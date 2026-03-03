@@ -1,0 +1,63 @@
+version: "3.9"
+
+networks:
+  robotnet:
+    driver: bridge
+
+services:
+  ros-core:
+    build:
+      context: ./ros
+    container_name: ros-core
+    environment:
+      - ROS_DOMAIN_ID=0
+      - ROS_PROXY_KEYS=local-dev-key
+    ports:
+      - "8080:8080" # proxy / key check
+      - "9090:9090" # rosbridge websocket
+    networks:
+      - robotnet
+
+  sim:
+    build:
+      context: ./sim
+    container_name: sim-runner
+    environment:
+      - ROS_DOMAIN_ID=0
+      - WEBOTS_WORLD=/workspace/worlds/battle_arena.wbt
+    volumes:
+      - ./sim/worlds:/workspace/worlds:ro
+    depends_on:
+      - ros-core
+    networks:
+      - robotnet
+
+  api:
+    build:
+      context: ./api
+    container_name: robot-gateway
+    environment:
+      - ROS_BRIDGE_HOST=ros-core
+      - ROS_BRIDGE_PORT=9090
+      - ROS_PROXY_URL=http://ros-core:8080/authorize
+      - ROS_PROXY_KEY=local-dev-key
+      - GATEWAY_NAME=gateway-1
+    ports:
+      - "8081:8080"
+    depends_on:
+      - ros-core
+    networks:
+      - robotnet
+
+  web:
+    image: nginx:alpine
+    container_name: arena-web
+    volumes:
+      - ./web/public:/usr/share/nginx/html:ro
+      - ./web/nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+    ports:
+      - "4173:80"
+    depends_on:
+      - api
+    networks:
+      - robotnet

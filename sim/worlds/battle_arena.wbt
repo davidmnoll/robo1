@@ -1,0 +1,162 @@
+#VRML_SIM R2023b utf8
+
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2023b/projects/robots/gctronic/e-puck/protos/E-puck.proto"
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2023b/projects/objects/backgrounds/protos/TexturedBackground.proto"
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2023b/projects/objects/backgrounds/protos/TexturedBackgroundLight.proto"
+
+WorldInfo {
+  basicTimeStep 32
+  title "Battle Arena Prototype"
+  coordinateSystem "NUE"
+}
+
+Viewpoint {
+  orientation -0.485 -0.727 -0.485 2.09
+  position 6 6 5.5
+  near 0.1
+  far 200
+}
+
+TexturedBackground {
+}
+
+TexturedBackgroundLight {
+}
+
+DEF ARENA_FLOOR Solid {
+  translation 0 0 -0.05
+  rotation 0 1 0 0
+  children [
+    Shape {
+      appearance PBRAppearance {
+        baseColor 0.17 0.19 0.24
+        roughness 0.5
+        metalness 0
+      }
+      geometry Box {
+        size 12 12 0.1
+      }
+    }
+  ]
+  contactMaterial "arena"
+  boundingObject Box {
+    size 12 12 0.1
+  }
+  locked TRUE
+}
+
+DEF ARENA_WALLS Transform {
+  translation 0 0 0.3
+  children [
+    DEF WALL Shape {
+      appearance PBRAppearance {
+        baseColor 0.65 0.65 0.68
+        roughness 0.3
+      }
+      geometry Box {
+        size 12 0.2 0.6
+      }
+    }
+    Transform {
+      rotation 0 0 1 1.5708
+      children [
+        USE WALL
+      ]
+    }
+    Transform {
+      rotation 0 0 1 3.14159
+      children [
+        USE WALL
+      ]
+    }
+    Transform {
+      rotation 0 0 1 -1.5708
+      children [
+        USE WALL
+      ]
+    }
+  ]
+}
+
+DEF OBSTACLE_BLOCKS Group {
+  children [
+    Transform {
+      translation 0 2 0.25
+      children [
+        Shape {
+          appearance PBRAppearance {
+            baseColor 0.6 0.31 0.24
+            roughness 0.4
+          }
+          geometry Box {
+            size 1.2 0.6 0.5
+          }
+        }
+      ]
+    }
+    Transform {
+      translation -2 -1.5 0.3
+      children [
+        Shape {
+          appearance PBRAppearance {
+            baseColor 0.26 0.56 0.78
+          }
+          geometry Box {
+            size 0.6 1.6 0.6
+          }
+        }
+      ]
+    }
+    Transform {
+      translation 2.5 -0.5 0.2
+      rotation 0 0 1 0.7
+      children [
+        Shape {
+          appearance PBRAppearance {
+            baseColor 0.35 0.9 0.55
+          }
+          geometry Cylinder {
+            height 0.4
+            radius 0.5
+          }
+        }
+      ]
+    }
+  ]
+}
+
+PointLight {
+  location 0 0 5
+  radius 20
+  color 1 1 1
+  intensity 0.75
+  castShadows TRUE
+}
+
+DEF BOT_1 E-puck {
+  translation -1.5 0 0.033
+  rotation 0 0 1 1.57
+  controller "bot"
+  controllerArgs [
+    "ROBOT_ID=bot_alpha"
+  ]
+  name "bot_alpha"
+  customData "{ \"team\": \"blue\" }"
+  camera_fieldOfView 1.3
+  camera_width 320
+  camera_height 240
+}
+
+DEF BOT_2 E-puck {
+  translation 1.5 0 0.033
+  rotation 0 0 1 -1.57
+  controller "bot"
+  controllerArgs [
+    "ROBOT_ID=bot_beta"
+  ]
+  name "bot_beta"
+  customData "{ \"team\": \"gold\" }"
+  camera_fieldOfView 1.3
+  camera_width 320
+  camera_height 240
+}

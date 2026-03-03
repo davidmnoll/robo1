@@ -1,0 +1,463 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Robot Arena Dashboard</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        background: radial-gradient(circle at top, #1b1f2b, #0d1117 55%);
+        color: #f8fafc;
+        padding: 2rem 1rem 4rem;
+      }
+      main {
+        max-width: 900px;
+        margin: 0 auto;
+      }
+      h1 {
+        text-align: center;
+        margin-bottom: 0.5rem;
+      }
+      p.subtitle {
+        text-align: center;
+        color: #94a3b8;
+        margin-bottom: 2rem;
+      }
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+        gap: 1.25rem;
+      }
+      .card {
+        background: #141821;
+        border-radius: 16px;
+        padding: 1.5rem;
+        box-shadow: 0 20px 60px rgba(0,0,0,.45);
+      }
+      label {
+        text-transform: uppercase;
+        font-size: 0.75rem;
+        letter-spacing: 0.08em;
+        color: #94a3b8;
+      }
+      input, select {
+        width: 100%;
+        margin-top: 0.25rem;
+        padding: 0.65rem 0.75rem;
+        border-radius: 10px;
+        border: 1px solid rgba(255,255,255,0.08);
+        background: rgba(15,23,42,0.7);
+        color: #f8fafc;
+      }
+      button {
+        background: linear-gradient(135deg, #2563eb, #14b8a6);
+        color: white;
+        font-weight: 600;
+        border: none;
+        border-radius: 10px;
+        padding: 0.65rem 1rem;
+        cursor: pointer;
+        transition: transform 0.15s ease;
+      }
+      button:hover {
+        transform: translateY(-2px);
+      }
+      .status {
+        text-align: center;
+        padding: 0.4rem 0.75rem;
+        border-radius: 999px;
+        font-weight: 600;
+        margin-bottom: 0.75rem;
+      }
+      .connected {
+        background: rgba(34,197,94,0.2);
+        color: #4ade80;
+      }
+      .disconnected {
+        background: rgba(248,113,113,0.2);
+        color: #f87171;
+      }
+      .controls-grid {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(60px, 1fr));
+        gap: 0.75rem;
+        max-width: 320px;
+        margin: 0 auto;
+      }
+      .controls-grid button {
+        padding: 1.25rem;
+        font-size: 1.5rem;
+        background: rgba(37,99,235,0.15);
+        border: 1px solid rgba(59,130,246,0.2);
+      }
+      .controls-grid button:active {
+        background: rgba(37,99,235,0.35);
+      }
+      .spacer {
+        visibility: hidden;
+      }
+      .sensor-data {
+        border: 1px solid rgba(255,255,255,.08);
+        border-radius: 12px;
+        padding: 1rem;
+        margin-top: 1rem;
+      }
+      .sensor-data h3 {
+        margin: 0 0 0.35rem;
+        font-size: 1rem;
+        color: #38bdf8;
+      }
+      #front-distance {
+        font-size: 2rem;
+        text-align: center;
+      }
+      pre {
+        background: rgba(15,23,42,0.9);
+        border-radius: 12px;
+        padding: 1rem;
+        overflow: auto;
+        font-size: 0.85rem;
+      }
+      .log {
+        max-height: 200px;
+      }
+      .keyboard-hint {
+        text-align: center;
+        margin-top: 1rem;
+        color: #94a3b8;
+      }
+      video {
+        width: 100%;
+        border-radius: 12px;
+        background: #000;
+        margin-top: 0.5rem;
+      }
+      .video-actions {
+        display: flex;
+        gap: 0.75rem;
+        margin-top: 0.75rem;
+        flex-wrap: wrap;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Robot Arena Dashboard</h1>
+      <p class="subtitle">Send twist commands through the API gateway and stream telemetry via WebSocket.</p>
+
+      <section class="card" style="margin-bottom:1.5rem;">
+        <div id="video-status" class="status disconnected">Video idle</div>
+        <video id="robot-video" autoplay playsinline muted></video>
+        <div class="video-actions">
+          <button id="video-btn">Start Video</button>
+          <button id="video-stop-btn" style="background:#ef4444;">Stop Video</button>
+        </div>
+        <div style="margin-top:1.25rem;">
+          <p style="color:#94a3b8;margin-top:0;">Teleoperation</p>
+          <div class="controls-grid">
+            <div class="spacer"></div>
+            <button data-action="forward">&#8593;</button>
+            <div class="spacer"></div>
+            <button data-action="left">&#8592;</button>
+            <button data-action="stop">&#9632;</button>
+            <button data-action="right">&#8594;</button>
+            <div class="spacer"></div>
+            <button data-action="backward">&#8595;</button>
+            <div class="spacer"></div>
+          </div>
+          <p class="keyboard-hint">Space bar stops the robot.</p>
+        </div>
+      </section>
+
+      <div class="grid" style="grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));">
+        <section class="card">
+          <div id="api-status" class="status disconnected">API unreachable</div>
+          <label for="api-base">API Endpoint (e.g. http://localhost:8081/api)</label>
+          <input id="api-base" placeholder="http://localhost:8081/api">
+          <label for="robot-id">Robot Namespace</label>
+          <input id="robot-id" value="robot_001" placeholder="robot_001">
+          <label for="linear-speed">Linear Speed (m/s)</label>
+          <input id="linear-speed" type="number" value="0.2" step="0.1">
+          <label for="angular-speed">Angular Speed (rad/s)</label>
+          <input id="angular-speed" type="number" value="0.4" step="0.1">
+          <button id="connect-btn" style="margin-top:1rem;">Connect WebSocket</button>
+          <div class="sensor-data">
+            <h3>Front Distance</h3>
+            <div id="front-distance">-- m</div>
+          </div>
+        </section>
+
+        <section class="card">
+          <h2 style="margin-top:0;">Telemetry Log</h2>
+          <div id="ws-status" class="status disconnected">WS disconnected</div>
+          <pre id="telemetry" class="log">Waiting for telemetry...</pre>
+        </section>
+      </div>
+    </main>
+
+    <script>
+      const apiStatus = document.getElementById('api-status');
+      const wsStatus = document.getElementById('ws-status');
+      const telemetryLog = document.getElementById('telemetry');
+      const frontDistance = document.getElementById('front-distance');
+      const robotInput = document.getElementById('robot-id');
+      const linearInput = document.getElementById('linear-speed');
+      const angularInput = document.getElementById('angular-speed');
+      const connectBtn = document.getElementById('connect-btn');
+      const apiBaseInput = document.getElementById('api-base');
+      const videoElement = document.getElementById('robot-video');
+      const videoBtn = document.getElementById('video-btn');
+      const videoStopBtn = document.getElementById('video-stop-btn');
+      const videoStatus = document.getElementById('video-status');
+
+      const defaultApiBase = window.location.origin.replace(/\/$/, '');
+      const storedApiBase = localStorage.getItem('arenaApiBase');
+      apiBaseInput.value = storedApiBase || `${defaultApiBase}/api`;
+
+      function apiBase() {
+        let value = (apiBaseInput.value || '').trim();
+        if (!value) value = `${defaultApiBase}/api`;
+        value = value.replace(/\/+$/, '');
+        if (!value.endsWith('/api')) {
+          value = `${value}/api`;
+        }
+        return value;
+      }
+
+      apiBaseInput.addEventListener('change', () => {
+        const normalized = apiBase();
+        apiBaseInput.value = normalized;
+        localStorage.setItem('arenaApiBase', normalized);
+        checkApiHealth();
+      });
+
+      let ws;
+      let lastRobotId = robotInput.value.trim();
+      let pc;
+
+      async function checkApiHealth() {
+        try {
+          const resp = await fetch(`${apiBase()}/health`);
+          if (!resp.ok) throw new Error('API error');
+          const json = await resp.json();
+          apiStatus.textContent = json.ros_connected ? 'API & ROS connected' : 'API up, ROS unavailable';
+          apiStatus.className = `status ${json.ros_connected ? 'connected' : 'disconnected'}`;
+        } catch (err) {
+          apiStatus.textContent = 'API unreachable';
+          apiStatus.className = 'status disconnected';
+        }
+      }
+
+      async function sendVelocity(linear, angular) {
+        const robot = robotInput.value.trim() || 'robot_001';
+        const base = apiBase();
+        const payload = {
+          linear_x: linear,
+          linear_y: 0,
+          linear_z: 0,
+          angular_x: 0,
+          angular_y: 0,
+          angular_z: angular,
+        };
+        try {
+          await fetch(`${base}/robots/${encodeURIComponent(robot)}/cmd_vel`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+          });
+        } catch (err) {
+          console.error('Command failed', err);
+        }
+      }
+
+      function logTelemetry(message) {
+        const ts = new Date().toLocaleTimeString();
+        telemetryLog.textContent = `[${ts}] ${message}\n` + telemetryLog.textContent;
+      }
+
+      function resolveWsBaseUrl() {
+        try {
+          const parsed = new URL(apiBase(), window.location.origin);
+          const wsProtocol = parsed.protocol === 'https:' ? 'wss:' : 'ws:';
+          const path = parsed.pathname.replace(/\/$/, '');
+          return `${wsProtocol}//${parsed.host}${path}`;
+        } catch (error) {
+          console.warn('Invalid API base, defaulting to window origin', error);
+          const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+          return `${proto}//${window.location.host}/api`;
+        }
+      }
+
+      function openWebSocket() {
+        const robot = robotInput.value.trim() || 'robot_001';
+        if (ws) ws.close();
+        const wsBase = resolveWsBaseUrl();
+        ws = new WebSocket(`${wsBase}/ws/${encodeURIComponent(robot)}`);
+        wsStatus.textContent = 'Connecting...';
+        wsStatus.className = 'status disconnected';
+        ws.onopen = () => {
+          wsStatus.textContent = `WS connected (${robot})`;
+          wsStatus.className = 'status connected';
+          logTelemetry(`WebSocket connected to ${robot}`);
+        };
+        ws.onmessage = (event) => {
+          try {
+            const data = JSON.parse(event.data);
+            logTelemetry(JSON.stringify(data));
+            if (typeof data.front_distance === 'number') {
+              frontDistance.textContent = `${data.front_distance.toFixed(2)} m`;
+            }
+          } catch {
+            logTelemetry(event.data);
+          }
+        };
+        ws.onclose = () => {
+          wsStatus.textContent = 'WS disconnected';
+          wsStatus.className = 'status disconnected';
+          logTelemetry('WebSocket closed');
+        };
+        ws.onerror = (event) => {
+          console.error('WS error', event);
+        };
+        lastRobotId = robot;
+      }
+
+      function initControls() {
+        const SPEED = () => parseFloat(linearInput.value) || 0;
+        const TURN = () => parseFloat(angularInput.value) || 0;
+        const mapping = {
+          forward: () => sendVelocity(SPEED(), 0),
+          backward: () => sendVelocity(-SPEED(), 0),
+          left: () => sendVelocity(0, TURN()),
+          right: () => sendVelocity(0, -TURN()),
+          stop: () => sendVelocity(0, 0),
+        };
+
+        document.querySelectorAll('.controls-grid button').forEach((button) => {
+          const action = button.dataset.action;
+          if (!action || !mapping[action]) return;
+          if (action === 'stop') {
+            button.addEventListener('click', mapping[action]);
+            return;
+          }
+          button.addEventListener('mousedown', mapping[action]);
+          button.addEventListener('mouseup', mapping.stop);
+          button.addEventListener('mouseleave', mapping.stop);
+          button.addEventListener('touchstart', (event) => {
+            event.preventDefault();
+            mapping[action]();
+          }, { passive: false });
+          button.addEventListener('touchend', mapping.stop);
+        });
+
+        const keys = {};
+        document.addEventListener('keydown', (event) => {
+          const key = event.key.toLowerCase();
+          if (keys[key]) return;
+          keys[key] = true;
+          switch (key) {
+            case 'w':
+            case 'arrowup':
+              mapping.forward();
+              break;
+            case 's':
+            case 'arrowdown':
+              mapping.backward();
+              break;
+            case 'a':
+            case 'arrowleft':
+              mapping.left();
+              break;
+            case 'd':
+            case 'arrowright':
+              mapping.right();
+              break;
+            case ' ':
+              mapping.stop();
+              break;
+          }
+        });
+        document.addEventListener('keyup', (event) => {
+          const key = event.key.toLowerCase();
+          keys[key] = false;
+          if (['w','s','a','d','arrowup','arrowdown','arrowleft','arrowright'].includes(key)) {
+            mapping.stop();
+          }
+        });
+      }
+
+      connectBtn.addEventListener('click', () => {
+        openWebSocket();
+      });
+
+      async function startVideo() {
+        const robot = robotInput.value.trim() || 'robot_001';
+        if (pc) {
+          pc.close();
+        }
+        pc = new RTCPeerConnection();
+        const inboundStream = new MediaStream();
+        pc.addEventListener('track', (event) => {
+          inboundStream.addTrack(event.track);
+          videoElement.srcObject = inboundStream;
+        });
+        pc.addTransceiver('video', { direction: 'recvonly' });
+        try {
+          const offer = await pc.createOffer();
+          await pc.setLocalDescription(offer);
+          const resp = await fetch(`${apiBase()}/robots/${encodeURIComponent(robot)}/webrtc`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ sdp: offer.sdp, type: offer.type })
+          });
+          if (!resp.ok) {
+            throw new Error(`WebRTC signaling failed: ${resp.status}`);
+          }
+          const answer = await resp.json();
+          await pc.setRemoteDescription(answer);
+          videoStatus.textContent = `Video streaming (${robot})`;
+          videoStatus.className = 'status connected';
+        } catch (err) {
+          console.error('Video setup failed', err);
+          videoStatus.textContent = 'Video error';
+          videoStatus.className = 'status disconnected';
+          if (pc) {
+            pc.close();
+            pc = null;
+          }
+        }
+      }
+
+      function stopVideo() {
+        if (pc) {
+          pc.close();
+          pc = null;
+        }
+        if (videoElement.srcObject) {
+          videoElement.srcObject.getTracks().forEach((track) => track.stop());
+          videoElement.srcObject = null;
+        }
+        videoStatus.textContent = 'Video idle';
+        videoStatus.className = 'status disconnected';
+      }
+
+      videoBtn.addEventListener('click', startVideo);
+      videoStopBtn.addEventListener('click', stopVideo);
+
+      window.addEventListener('beforeunload', () => {
+        if (pc) pc.close();
+        if (ws) ws.close();
+      });
+
+      checkApiHealth();
+      setInterval(checkApiHealth, 10_000);
+      initControls();
+    </script>
+  </body>
+</html>

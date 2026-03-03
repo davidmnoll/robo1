@@ -1,0 +1,10 @@
+fastapi
+uvicorn[standard]
+httpx
+roslibpy
+pydantic
+pydantic-settings
+aiortc
+av
+Pillow
+numpy
