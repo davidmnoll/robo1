@@ -266,12 +266,14 @@
           <div id="api-status" class="status disconnected">API unreachable</div>
           <label for="api-base">API Endpoint (e.g. http://localhost:8081/api)</label>
           <input id="api-base" placeholder="http://localhost:8081/api">
+          <label for="teleop-lobby-select">Control Lobby</label>
+          <select id="teleop-lobby-select"></select>
           <label for="bot-select">Registered Bot</label>
           <select id="bot-select">
             <option value="">Manual entry</option>
           </select>
           <label for="robot-id">Robot Namespace</label>
-          <input id="robot-id" value="robot_001" placeholder="robot_001">
+          <input id="robot-id" value="bot_alpha" placeholder="bot_alpha">
           <label for="linear-speed">Linear Speed (m/s)</label>
           <input id="linear-speed" type="number" value="0.2" step="0.1">
           <label for="angular-speed">Angular Speed (rad/s)</label>
@@ -330,6 +332,7 @@
       const botDescInput = document.getElementById('bot-desc');
       const createBotBtn = document.getElementById('create-bot-btn');
       const botSelect = document.getElementById('bot-select');
+      const teleopLobbySelect = document.getElementById('teleop-lobby-select');
 
       const defaultApiBase = window.location.origin.replace(/\/$/, '');
       const storedApiBase = localStorage.getItem('arenaApiBase');
@@ -361,6 +364,7 @@
       let currentLobbies = [];
       let currentBots = [];
       let selectedBotNamespace = '';
+      let selectedLobbyId = '';
 
       function authHeaders() {
         return authToken ? { 'Authorization': `Bearer ${authToken}` } : {};
@@ -401,6 +405,7 @@
           currentLobbies = [];
           currentBots = [];
           updateBotLobbyOptions();
+          updateTeleopLobbyOptions();
           updateBotSelect([]);
         }
       }
@@ -560,14 +565,19 @@
         openWebSocket();
       });
 
+      teleopLobbySelect.addEventListener('change', () => {
+        selectedLobbyId = teleopLobbySelect.value;
+        updateBotSelect(currentBots);
+      });
+
       botSelect.addEventListener('change', () => {
-        applyBotSelection(botSelect.value);
+        applyBotSelection(botSelect.value, true);
       });
 
       robotInput.addEventListener('input', () => {
         if (selectedBotNamespace) {
           botSelect.value = '';
-          applyBotSelection('');
+          applyBotSelection('', false);
         }
       });
 
@@ -693,6 +703,7 @@
           currentLobbies = data.items || [];
           renderLobbies(currentLobbies);
           updateBotLobbyOptions();
+          updateTeleopLobbyOptions();
         } catch (err) {
           console.error(err);
           lobbyList.innerHTML = '<p class="keyboard-hint" style="text-align:left;">Failed to load lobbies.</p>';
@@ -714,6 +725,25 @@
             ${lobby.description ? `<p>${lobby.description}</p>` : ''}
           </div>
         `).join('');
+      }
+
+      function updateTeleopLobbyOptions() {
+        if (!currentLobbies.length) {
+          teleopLobbySelect.innerHTML = '<option value="">No lobbies available</option>';
+          teleopLobbySelect.disabled = true;
+          selectedLobbyId = '';
+          updateBotSelect(currentBots);
+          return;
+        }
+        teleopLobbySelect.disabled = false;
+        if (!selectedLobbyId || !currentLobbies.some((lobby) => String(lobby.id) === selectedLobbyId)) {
+          selectedLobbyId = String(currentLobbies[0].id);
+        }
+        teleopLobbySelect.innerHTML = currentLobbies
+          .map((lobby) => `<option value="${lobby.id}">${lobby.name}</option>`)
+          .join('');
+        teleopLobbySelect.value = selectedLobbyId;
+        updateBotSelect(currentBots);
       }
 
       function updateBotLobbyOptions() {
@@ -810,7 +840,7 @@
         }
       }
 
-      function applyBotSelection(namespace) {
+      function applyBotSelection(namespace, autoConnect = false) {
         selectedBotNamespace = namespace || '';
         if (namespace) {
           robotInput.value = namespace;
@@ -820,24 +850,36 @@
           robotInput.classList.remove('readonly');
           robotInput.removeAttribute('readonly');
         }
-        if (namespace) {
+        if (namespace && autoConnect) {
           openWebSocket();
           startVideo();
         }
       }
 
       function updateBotSelect(bots) {
+        const filtered = selectedLobbyId
+          ? bots.filter((bot) => String(bot.lobby_id) === selectedLobbyId)
+          : [];
+        if (!filtered.length) {
+          botSelect.innerHTML = '<option value="">No bots registered for this lobby</option>';
+          botSelect.disabled = true;
+          botSelect.value = '';
+          selectedBotNamespace = '';
+          applyBotSelection('', false);
+          return;
+        }
+        botSelect.disabled = false;
         const options = ['<option value="">Manual entry</option>'].concat(
-          bots.map((bot) => `<option value="${bot.ros_namespace}">${bot.name} (${bot.ros_namespace})</option>`)
+          filtered.map((bot) => `<option value="${bot.ros_namespace}">${bot.name} (${bot.ros_namespace})</option>`)
         );
         botSelect.innerHTML = options.join('');
-        if (selectedBotNamespace && bots.some((bot) => bot.ros_namespace === selectedBotNamespace)) {
+        if (selectedBotNamespace && filtered.some((bot) => bot.ros_namespace === selectedBotNamespace)) {
           botSelect.value = selectedBotNamespace;
         } else {
           botSelect.value = '';
           selectedBotNamespace = '';
         }
-        applyBotSelection(botSelect.value);
+        applyBotSelection(botSelect.value, false);
       }
 
       async function createLobby() {

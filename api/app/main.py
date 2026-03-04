@@ -65,6 +65,14 @@ class SeedLobbyConfig(BaseModel):
     owner_email: IdentifierStr
 
 
+class SeedBotConfig(BaseModel):
+    name: str
+    ros_namespace: str
+    lobby_name: str
+    owner_email: IdentifierStr
+    description: Optional[str] = None
+
+
 class Settings(BaseSettings):
     ros_bridge_host: str = Field("localhost", alias="ROS_BRIDGE_HOST")
     ros_bridge_port: int = Field(9090, alias="ROS_BRIDGE_PORT")
@@ -77,6 +85,7 @@ class Settings(BaseSettings):
     access_token_expire_minutes: int = Field(60, alias="ACCESS_TOKEN_EXPIRE_MINUTES")
     seed_users_json: Optional[str] = Field(None, alias="SEED_USERS_JSON")
     seed_lobbies_json: Optional[str] = Field(None, alias="SEED_LOBBIES_JSON")
+    seed_bots_json: Optional[str] = Field(None, alias="SEED_BOTS_JSON")
 
 
 settings = Settings()
@@ -318,14 +327,18 @@ async def create_lobby(
 
 @app.get("/api/bots")
 async def list_bots(
+    lobby_id: Optional[int] = None,
     current_user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
-    result = await session.execute(
+    query = (
         select(Bot)
         .options(selectinload(Bot.lobby).selectinload(Lobby.owner))
         .order_by(Bot.created_at.desc())
     )
+    if lobby_id is not None:
+        query = query.where(Bot.lobby_id == lobby_id)
+    result = await session.execute(query)
     bots = result.scalars().all()
     return {"items": [bot_to_out(bot) for bot in bots]}
 
@@ -448,14 +461,20 @@ def seed_lobbies_config() -> list[SeedLobbyConfig]:
     return parse_seed_entries(settings.seed_lobbies_json, SeedLobbyConfig, "SEED_LOBBIES_JSON")
 
 
+def seed_bots_config() -> list[SeedBotConfig]:
+    return parse_seed_entries(settings.seed_bots_json, SeedBotConfig, "SEED_BOTS_JSON")
+
+
 async def apply_seed_data() -> None:
     users = seed_users_config()
     lobbies = seed_lobbies_config()
-    if not users and not lobbies:
+    bots = seed_bots_config()
+    if not users and not lobbies and not bots:
         logger.debug("No seed data provided")
         return
     async with AsyncSessionLocal() as session:
         user_cache: dict[str, User] = {}
+        lobby_cache: dict[str, Lobby] = {}
         for entry in users:
             email = entry.email.lower()
             result = await session.execute(select(User).where(User.email == email))
@@ -517,6 +536,67 @@ async def apply_seed_data() -> None:
                     changed = True
                 if changed:
                     logger.info("Synchronized seed lobby %s", entry.name)
+            lobby_cache[entry.name.lower()] = lobby
+        for entry in bots:
+            owner_email = entry.owner_email.lower()
+            owner = user_cache.get(owner_email)
+            if owner is None:
+                owner = (
+                    await session.execute(select(User).where(User.email == owner_email))
+                ).scalar_one_or_none()
+            if owner is None:
+                logger.warning(
+                    "Skipping seed bot %s because owner %s does not exist",
+                    entry.name,
+                    owner_email,
+                )
+                continue
+            lobby_key = entry.lobby_name.lower()
+            lobby = lobby_cache.get(lobby_key)
+            if lobby is None:
+                lobby = (
+                    await session.execute(
+                        select(Lobby).options(selectinload(Lobby.owner)).where(Lobby.name == entry.lobby_name)
+                    )
+                ).scalar_one_or_none()
+                if lobby:
+                    lobby_cache[lobby_key] = lobby
+            if lobby is None:
+                logger.warning(
+                    "Skipping seed bot %s because lobby %s does not exist",
+                    entry.name,
+                    entry.lobby_name,
+                )
+                continue
+            if lobby.owner_id != owner.id:
+                lobby.owner_id = owner.id
+                logger.info("Assigned lobby %s to owner %s for bot seeding", lobby.name, owner.email)
+            namespace = entry.ros_namespace.strip()
+            result = await session.execute(select(Bot).where(Bot.ros_namespace == namespace))
+            bot = result.scalar_one_or_none()
+            if not bot:
+                bot = Bot(
+                    name=entry.name.strip(),
+                    ros_namespace=namespace,
+                    description=entry.description,
+                    lobby_id=lobby.id,
+                )
+                session.add(bot)
+                logger.info("Seeded bot %s", entry.name)
+            else:
+                changed = False
+                normalized_name = entry.name.strip()
+                if bot.name != normalized_name:
+                    bot.name = normalized_name
+                    changed = True
+                if bot.description != entry.description:
+                    bot.description = entry.description
+                    changed = True
+                if bot.lobby_id != lobby.id:
+                    bot.lobby_id = lobby.id
+                    changed = True
+                if changed:
+                    logger.info("Synchronized seed bot %s", entry.name)
         await session.commit()
 
 
