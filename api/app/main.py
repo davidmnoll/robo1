@@ -1,19 +1,68 @@
 import asyncio
 import base64
 import contextlib
+import json
 import logging
+import secrets
 import time
-from typing import Any, Dict, Tuple
+from datetime import datetime, timedelta
+from typing import Any, Dict, Optional, Tuple, TypeVar
 
 import httpx
 import numpy as np
 import roslibpy
 from aiortc import RTCPeerConnection, RTCSessionDescription, VideoStreamTrack
 from av import VideoFrame
-from fastapi import Depends, FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+from jose import JWTError, jwt
+with contextlib.suppress(ImportError):
+    import bcrypt as _bcrypt
+
+    if _bcrypt and not hasattr(_bcrypt, "__about__"):
+        # bcrypt 4.2+ removed the __about__ module attribute, but passlib<1.8 still
+        # expects it when selecting a backend. Provide a shim exposing __version__.
+        class _About:  # minimalist shim for Passlib's version probe
+            def __init__(self, version: str):
+                self.__version__ = version
+
+        version = getattr(_bcrypt, "__version__", "0")
+        _bcrypt.__about__ = _About(version)
+    if _bcrypt and hasattr(_bcrypt, "hashpw"):
+        _orig_hashpw = _bcrypt.hashpw
+
+        def _hashpw_with_trunc(secret: bytes, config: bytes) -> bytes:
+            try:
+                return _orig_hashpw(secret, config)
+            except ValueError as exc:
+                if "longer than 72 bytes" not in str(exc):
+                    raise
+                return _orig_hashpw(secret[:72], config)
+
+        _bcrypt.hashpw = _hashpw_with_trunc
+from passlib.context import CryptContext
+from pydantic import BaseModel, Field, ValidationError, constr
 from pydantic_settings import BaseSettings
+from sqlalchemy import Column, DateTime, ForeignKey, Integer, String, Text, select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.orm import DeclarativeBase, relationship, selectinload
+
+
+IdentifierStr = constr(min_length=3)
+
+
+class SeedUserConfig(BaseModel):
+    email: IdentifierStr
+    password: constr(min_length=1, max_length=32)
+
+
+class SeedLobbyConfig(BaseModel):
+    name: str
+    ros_host: str
+    ros_port: int
+    description: Optional[str] = None
+    access_key: Optional[str] = None
+    owner_email: IdentifierStr
 
 
 class Settings(BaseSettings):
@@ -23,12 +72,75 @@ class Settings(BaseSettings):
     ros_proxy_key: str = Field("local-dev-key", alias="ROS_PROXY_KEY")
     gateway_name: str = Field("gateway-1", alias="GATEWAY_NAME")
     cors_allow_origins: list[str] = Field(default_factory=lambda: ["*"], alias="CORS_ALLOW_ORIGINS")
+    database_url: str = Field("postgresql+asyncpg://robot:robot@localhost:5432/robotarena", alias="DATABASE_URL")
+    secret_key: str = Field("super-secret-key", alias="SECRET_KEY")
+    access_token_expire_minutes: int = Field(60, alias="ACCESS_TOKEN_EXPIRE_MINUTES")
+    seed_users_json: Optional[str] = Field(None, alias="SEED_USERS_JSON")
+    seed_lobbies_json: Optional[str] = Field(None, alias="SEED_LOBBIES_JSON")
 
 
 settings = Settings()
+SeedModelT = TypeVar("SeedModelT", bound=BaseModel)
+
+
+class Base(DeclarativeBase):
+    pass
+
+
+engine = create_async_engine(settings.database_url, echo=False, future=True)
+AsyncSessionLocal = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+ALGORITHM = "HS256"
+
+
+class User(Base):
+    __tablename__ = "users"
+
+    id = Column(Integer, primary_key=True, index=True)
+    email = Column(String(255), unique=True, nullable=False, index=True)
+    password_hash = Column(String(255), nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    lobbies = relationship("Lobby", back_populates="owner", cascade="all, delete-orphan")
+
+
+class Lobby(Base):
+    __tablename__ = "lobbies"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(255), nullable=False)
+    ros_host = Column(String(255), nullable=False)
+    ros_port = Column(Integer, nullable=False)
+    description = Column(Text, nullable=True)
+    access_key = Column(String(255), nullable=False, unique=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    owner_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+
+    owner = relationship("User", back_populates="lobbies")
+    bots = relationship("Bot", back_populates="lobby", cascade="all, delete-orphan")
+
+
+class Bot(Base):
+    __tablename__ = "bots"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(255), nullable=False)
+    ros_namespace = Column(String(255), nullable=False, unique=True)
+    description = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    lobby_id = Column(Integer, ForeignKey("lobbies.id"), nullable=False)
+
+    lobby = relationship("Lobby", back_populates="bots")
+
+
+async def get_session() -> AsyncSession:
+    async with AsyncSessionLocal() as session:
+        yield session
+
+
 logger = logging.getLogger("gateway")
 logging.basicConfig(level=logging.INFO)
 frame_queues: Dict[str, asyncio.Queue[Tuple[int, int, bytes]]] = {}
+latest_frames: Dict[str, Dict[str, float]] = {}
 peer_connections: set[RTCPeerConnection] = set()
 camera_subscriptions: Dict[str, roslibpy.Topic] = {}
 
@@ -56,11 +168,356 @@ class RobotFramePayload(BaseModel):
     height: int
     format: str = "bgra"
     image: str  # base64
+    sim_time: Optional[float] = None
 
 
 class WebRTCOffer(BaseModel):
     sdp: str
     type: str
+
+
+class UserOut(BaseModel):
+    id: int
+    email: IdentifierStr
+
+
+class TokenResponse(BaseModel):
+    access_token: str
+    token_type: str
+    user: UserOut
+
+
+class RegisterRequest(BaseModel):
+    email: IdentifierStr
+    password: constr(min_length=6, max_length=32)
+
+
+class LoginRequest(BaseModel):
+    email: IdentifierStr
+    password: constr(min_length=1, max_length=32)
+
+
+class LobbyCreate(BaseModel):
+    name: str
+    ros_host: str
+    ros_port: int
+    description: Optional[str] = None
+
+
+class BotCreate(BaseModel):
+    lobby_id: int
+    name: constr(min_length=1, strip_whitespace=True)
+    ros_namespace: constr(min_length=1, strip_whitespace=True)
+    description: Optional[str] = None
+
+
+class LobbyOut(BaseModel):
+    id: int
+    name: str
+    ros_host: str
+    ros_port: int
+    description: Optional[str]
+    access_key: Optional[str]
+    owner_email: IdentifierStr
+    created_at: datetime
+
+
+class BotOut(BaseModel):
+    id: int
+    name: str
+    ros_namespace: str
+    description: Optional[str]
+    lobby_id: int
+    lobby_name: str
+    owner_email: IdentifierStr
+    created_at: datetime
+
+
+async def get_current_user(
+    authorization: str = Header(default=None),
+    session: AsyncSession = Depends(get_session),
+) -> User:
+    if not authorization or not authorization.lower().startswith("bearer "):
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    token = authorization.split(" ", 1)[1]
+    try:
+        payload = jwt.decode(token, settings.secret_key, algorithms=[ALGORITHM])
+        user_id = payload.get("sub")
+    except JWTError as exc:
+        raise HTTPException(status_code=401, detail="Invalid token") from exc
+    if user_id is None:
+        raise HTTPException(status_code=401, detail="Invalid token payload")
+    user = await session.get(User, int(user_id))
+    if not user:
+        raise HTTPException(status_code=401, detail="User not found")
+    return user
+
+
+@app.post("/api/auth/register", response_model=TokenResponse)
+async def register_user(payload: RegisterRequest, session: AsyncSession = Depends(get_session)) -> TokenResponse:
+    email = payload.email.lower()
+    existing = await session.execute(select(User).where(User.email == email))
+    if existing.scalar_one_or_none():
+        raise HTTPException(status_code=400, detail="Email already registered")
+    user = User(email=email, password_hash=hash_password(payload.password))
+    session.add(user)
+    await session.commit()
+    await session.refresh(user)
+    return create_token_response(user)
+
+
+@app.post("/api/auth/login", response_model=TokenResponse)
+async def login_user(payload: LoginRequest, session: AsyncSession = Depends(get_session)) -> TokenResponse:
+    email = payload.email.lower()
+    result = await session.execute(select(User).where(User.email == email))
+    user = result.scalar_one_or_none()
+    if not user or not verify_password(payload.password, user.password_hash):
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+    return create_token_response(user)
+
+
+@app.post("/api/auth/logout")
+async def logout_user() -> dict[str, str]:
+    # Stateless JWT logout; clients discard the token.
+    return {"status": "ok"}
+
+
+@app.get("/api/lobbies")
+async def list_lobbies(
+    current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    result = await session.execute(
+        select(Lobby).options(selectinload(Lobby.owner)).order_by(Lobby.created_at.desc())
+    )
+    lobbies = result.scalars().all()
+    return {"items": [lobby_to_out(lobby, current_user) for lobby in lobbies]}
+
+
+@app.post("/api/lobbies", response_model=LobbyOut)
+async def create_lobby(
+    payload: LobbyCreate,
+    current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+) -> LobbyOut:
+    access_key = secrets.token_urlsafe(16)
+    lobby = Lobby(
+        name=payload.name,
+        ros_host=payload.ros_host,
+        ros_port=payload.ros_port,
+        description=payload.description,
+        access_key=access_key,
+        owner_id=current_user.id,
+    )
+    session.add(lobby)
+    await session.commit()
+    await session.refresh(lobby)
+    lobby.owner = current_user
+    return lobby_to_out(lobby, current_user)
+
+
+@app.get("/api/bots")
+async def list_bots(
+    current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    result = await session.execute(
+        select(Bot)
+        .options(selectinload(Bot.lobby).selectinload(Lobby.owner))
+        .order_by(Bot.created_at.desc())
+    )
+    bots = result.scalars().all()
+    return {"items": [bot_to_out(bot) for bot in bots]}
+
+
+@app.post("/api/bots", response_model=BotOut)
+async def create_bot(
+    payload: BotCreate,
+    current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+) -> BotOut:
+    lobby_result = await session.execute(
+        select(Lobby).options(selectinload(Lobby.owner)).where(Lobby.id == payload.lobby_id)
+    )
+    lobby = lobby_result.scalar_one_or_none()
+    if not lobby:
+        raise HTTPException(status_code=404, detail="Lobby not found")
+    if lobby.owner_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Only the lobby owner can register bots")
+    normalized_namespace = payload.ros_namespace.strip()
+    existing = await session.execute(select(Bot).where(Bot.ros_namespace == normalized_namespace))
+    if existing.scalar_one_or_none():
+        raise HTTPException(status_code=400, detail="ROS namespace already registered")
+    bot = Bot(
+        name=payload.name.strip(),
+        ros_namespace=normalized_namespace,
+        description=payload.description,
+        lobby_id=lobby.id,
+    )
+    session.add(bot)
+    await session.commit()
+    await session.refresh(bot)
+    bot.lobby = lobby
+    return bot_to_out(bot)
+
+
+def user_to_out(user: User) -> UserOut:
+    return UserOut(id=user.id, email=user.email)
+
+
+def create_token_response(user: User) -> TokenResponse:
+    token = create_access_token({"sub": str(user.id)})
+    return TokenResponse(access_token=token, token_type="bearer", user=user_to_out(user))
+
+
+def hash_password(password: str) -> str:
+    return pwd_context.hash(password)
+
+
+def verify_password(password: str, password_hash: str) -> bool:
+    return pwd_context.verify(password, password_hash)
+
+
+def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
+    to_encode = data.copy()
+    expire = datetime.utcnow() + (
+        expires_delta
+        if expires_delta
+        else timedelta(minutes=settings.access_token_expire_minutes)
+    )
+    to_encode.update({"exp": expire})
+    return jwt.encode(to_encode, settings.secret_key, algorithm=ALGORITHM)
+
+
+def lobby_to_out(lobby: Lobby, current_user: User) -> LobbyOut:
+    owner_email = lobby.owner.email if lobby.owner else ""
+    key = lobby.access_key if lobby.owner_id == current_user.id else None
+    return LobbyOut(
+        id=lobby.id,
+        name=lobby.name,
+        ros_host=lobby.ros_host,
+        ros_port=lobby.ros_port,
+        description=lobby.description,
+        access_key=key,
+        owner_email=owner_email,
+        created_at=lobby.created_at,
+    )
+
+
+def bot_to_out(bot: Bot) -> BotOut:
+    lobby = bot.lobby
+    owner_email = lobby.owner.email if lobby and lobby.owner else ""
+    lobby_name = lobby.name if lobby else ""
+    return BotOut(
+        id=bot.id,
+        name=bot.name,
+        ros_namespace=bot.ros_namespace,
+        description=bot.description,
+        lobby_id=bot.lobby_id,
+        lobby_name=lobby_name,
+        owner_email=owner_email,
+        created_at=bot.created_at,
+    )
+
+
+def parse_seed_entries(raw: Optional[str], model: type[SeedModelT], label: str) -> list[SeedModelT]:
+    if not raw:
+        return []
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        logger.error("Failed to parse %s: %s", label, exc)
+        return []
+    if not isinstance(payload, list):
+        logger.error("%s must be a JSON list", label)
+        return []
+    entries: list[SeedModelT] = []
+    for idx, item in enumerate(payload):
+        try:
+            entries.append(model.model_validate(item))
+        except ValidationError as exc:
+            logger.error("Invalid %s entry #%s: %s", label, idx, exc)
+    return entries
+
+
+def seed_users_config() -> list[SeedUserConfig]:
+    return parse_seed_entries(settings.seed_users_json, SeedUserConfig, "SEED_USERS_JSON")
+
+
+def seed_lobbies_config() -> list[SeedLobbyConfig]:
+    return parse_seed_entries(settings.seed_lobbies_json, SeedLobbyConfig, "SEED_LOBBIES_JSON")
+
+
+async def apply_seed_data() -> None:
+    users = seed_users_config()
+    lobbies = seed_lobbies_config()
+    if not users and not lobbies:
+        logger.debug("No seed data provided")
+        return
+    async with AsyncSessionLocal() as session:
+        user_cache: dict[str, User] = {}
+        for entry in users:
+            email = entry.email.lower()
+            result = await session.execute(select(User).where(User.email == email))
+            user = result.scalar_one_or_none()
+            pwd_hash = hash_password(entry.password)
+            if not user:
+                user = User(email=email, password_hash=pwd_hash)
+                session.add(user)
+                await session.flush()
+                logger.info("Seeded user %s", email)
+            elif not verify_password(entry.password, user.password_hash):
+                user.password_hash = pwd_hash
+                logger.info("Updated password for seed user %s", email)
+            user_cache[email] = user
+        for entry in lobbies:
+            owner_email = entry.owner_email.lower()
+            owner = user_cache.get(owner_email)
+            if owner is None:
+                owner = (
+                    await session.execute(select(User).where(User.email == owner_email))
+                ).scalar_one_or_none()
+            if owner is None:
+                logger.warning(
+                    "Skipping seed lobby %s because owner %s does not exist",
+                    entry.name,
+                    owner_email,
+                )
+                continue
+            desired_key = entry.access_key or settings.ros_proxy_key or secrets.token_urlsafe(16)
+            result = await session.execute(select(Lobby).where(Lobby.name == entry.name))
+            lobby = result.scalar_one_or_none()
+            if not lobby:
+                lobby = Lobby(
+                    name=entry.name,
+                    ros_host=entry.ros_host,
+                    ros_port=entry.ros_port,
+                    description=entry.description,
+                    access_key=desired_key,
+                    owner_id=owner.id,
+                )
+                session.add(lobby)
+                logger.info("Seeded lobby %s", entry.name)
+            else:
+                changed = False
+                if lobby.owner_id != owner.id:
+                    lobby.owner_id = owner.id
+                    changed = True
+                if lobby.ros_host != entry.ros_host:
+                    lobby.ros_host = entry.ros_host
+                    changed = True
+                if lobby.ros_port != entry.ros_port:
+                    lobby.ros_port = entry.ros_port
+                    changed = True
+                if lobby.description != entry.description:
+                    lobby.description = entry.description
+                    changed = True
+                if desired_key and lobby.access_key != desired_key:
+                    lobby.access_key = desired_key
+                    changed = True
+                if changed:
+                    logger.info("Synchronized seed lobby %s", entry.name)
+        await session.commit()
 
 
 async def ensure_proxy_access() -> None:
@@ -86,18 +543,33 @@ async def ros_client() -> roslibpy.Ros:
 @app.on_event("startup")
 async def startup_event() -> None:
     await ensure_proxy_access()
-    ros = roslibpy.Ros(
-        host=settings.ros_bridge_host,
-        port=settings.ros_bridge_port,
-        is_secure=False,
-    )
-    ros.run()
-    for _ in range(100):
-        if ros.is_connected:
-            break
-        await asyncio.sleep(0.1)
-    if not ros.is_connected:
-        raise RuntimeError("Failed to connect to ROS bridge")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    await apply_seed_data()
+    attempt = 0
+    max_attempts = 30
+    delay = 2
+    ros: roslibpy.Ros | None = None
+    while attempt < max_attempts:
+        attempt += 1
+        try:
+            ros = roslibpy.Ros(
+                host=settings.ros_bridge_host,
+                port=settings.ros_bridge_port,
+                is_secure=False,
+            )
+            ros.run()
+            for _ in range(100):
+                if ros.is_connected:
+                    break
+                await asyncio.sleep(0.1)
+            if ros.is_connected:
+                break
+        except Exception as exc:
+            logger.warning("ROS bridge connection attempt %s failed: %s", attempt, exc)
+        await asyncio.sleep(delay)
+    if not ros or not ros.is_connected:
+        raise RuntimeError("Failed to connect to ROS bridge after multiple attempts")
     app.state.ros_client = ros
     logger.info(
         "Gateway %s connected to ROS bridge %s:%s",
@@ -184,6 +656,7 @@ async def ingest_frame(robot_id: str, payload: RobotFramePayload) -> dict[str, s
         except asyncio.QueueEmpty:
             pass
     await queue.put((payload.width, payload.height, image_bytes))
+    record_frame_info(robot_id, payload.sim_time)
     return {"status": "accepted"}
 
 
@@ -208,6 +681,25 @@ async def start_webrtc(robot_id: str, offer: WebRTCOffer) -> dict[str, str]:
     answer = await pc.createAnswer()
     await pc.setLocalDescription(answer)
     return {"sdp": pc.localDescription.sdp, "type": pc.localDescription.type}
+
+
+@app.get("/api/robots/{robot_id}/frame_info")
+async def frame_info(
+    robot_id: str,
+    current_user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    info = latest_frames.get(robot_id)
+    if not info:
+        raise HTTPException(status_code=404, detail="no frame data")
+    now = time.time()
+    age = now - info["received_at"]
+    queue = frame_queues.get(robot_id)
+    return {
+        "sim_time": info["sim_time"],
+        "received_at": info["received_at"],
+        "age": age,
+        "queue_size": queue.qsize() if queue else 0,
+    }
 def get_frame_queue(robot_id: str) -> asyncio.Queue[Tuple[int, int, bytes]]:
     if robot_id not in frame_queues:
         frame_queues[robot_id] = asyncio.Queue(maxsize=1)
@@ -242,6 +734,13 @@ def ensure_camera_subscription(robot_id: str) -> None:
         width = message.get("width")
         height = message.get("height")
         data = message.get("data")
+        stamp = message.get("header", {}).get("stamp", {})
+        sim_time = None
+        if stamp:
+            sec = stamp.get("sec")
+            nsec = stamp.get("nanosec")
+            if sec is not None and nsec is not None:
+                sim_time = float(sec) + float(nsec) / 1e9
         if width is None or height is None or data is None:
             return
         try:
@@ -253,6 +752,7 @@ def ensure_camera_subscription(robot_id: str) -> None:
             with contextlib.suppress(asyncio.QueueEmpty):
                 queue.get_nowait()
         queue.put_nowait((width, height, image_bytes))
+        record_frame_info(robot_id, sim_time)
 
     try:
         topic.subscribe(_callback)
@@ -260,3 +760,10 @@ def ensure_camera_subscription(robot_id: str) -> None:
         logger.info("Subscribed to %s camera topic", topic_name)
     except Exception as exc:  # pragma: no cover - rosbridge errors
         logger.warning("Failed to subscribe to %s: %s", topic_name, exc)
+
+
+def record_frame_info(robot_id: str, sim_time: Optional[float]) -> None:
+    latest_frames[robot_id] = {
+        "sim_time": sim_time if sim_time is not None else -1.0,
+        "received_at": time.time(),
+    }

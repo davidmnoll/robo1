@@ -99,6 +99,7 @@ class CameraStreamer:
                 "height": camera.getHeight(),
                 "format": "bgra",
                 "image": base64.b64encode(image_data).decode("ascii"),
+                "sim_time": sim_time,
             }
             data = json.dumps(payload).encode("utf-8")
             endpoint = f"{self.api_base}/robots/{self.robot_id}/frame"
@@ -121,6 +122,41 @@ class CameraStreamer:
                 self.ros.terminate()
 
 
+def create_cmd_velocity_listener(robot_id: str, host: str, port: int):
+    if roslibpy is None:
+        return None
+    ros = roslibpy.Ros(host=host, port=port, is_secure=False)
+    try:
+        ros.run()
+    except Exception:
+        return None
+    for _ in range(100):
+        if ros.is_connected:
+            break
+        time.sleep(0.05)
+    if not ros.is_connected:
+        ros.terminate()
+        return None
+
+    latest = {"linear": 0.0, "angular": 0.0, "timestamp": 0.0}
+
+    def _callback(message: Dict[str, Dict[str, float]]) -> None:
+        linear = message.get("linear", {}).get("x", 0.0)
+        angular = message.get("angular", {}).get("z", 0.0)
+        latest["linear"] = float(linear)
+        latest["angular"] = float(angular)
+        latest["timestamp"] = time.time()
+
+    topic = roslibpy.Topic(
+        ros,
+        f"/{robot_id}/cmd_vel",
+        "geometry_msgs/msg/Twist",
+    )
+    topic.subscribe(_callback)
+
+    return ros, topic, latest
+
+
 def main() -> None:
     robot = Robot()
     args = parse_controller_args(sys.argv[1:])
@@ -135,6 +171,7 @@ def main() -> None:
         or "http://localhost:8081/api"
     )
     camera_streamer = CameraStreamer(robot_id, ros_host, ros_port, api_base)
+    cmd_listener = create_cmd_velocity_listener(robot_id, ros_host, ros_port)
 
     timestep = int(robot.getBasicTimeStep())
     left_motor = robot.getDevice("left wheel motor")
@@ -160,6 +197,7 @@ def main() -> None:
     turn_speed = 3.0
     frame_interval = max(1, int(500 / timestep))
     frame_tick = 0
+    command_timeout = 0.5
 
     while robot.step(timestep) != -1:
         front_left = sensors[7].getValue()
@@ -176,6 +214,16 @@ def main() -> None:
                 left_speed = turn_speed
                 right_speed = -turn_speed
 
+        if cmd_listener:
+            _, _, latest = cmd_listener
+            if time.time() - latest["timestamp"] < command_timeout:
+                linear = latest["linear"]
+                angular = latest["angular"]
+                base_speed = linear * 20.0
+                turn = angular * 10.0
+                left_speed = base_speed - turn
+                right_speed = base_speed + turn
+
         left_motor.setVelocity(left_speed)
         right_motor.setVelocity(right_speed)
 
@@ -188,6 +236,12 @@ def main() -> None:
             robot.wwiSendText(f"{robot_id}: running")
 
     camera_streamer.shutdown()
+    if cmd_listener:
+        ros, topic, _ = cmd_listener
+        with contextlib.suppress(Exception):
+            topic.unsubscribe()
+        with contextlib.suppress(Exception):
+            ros.terminate()
 
 
 if __name__ == "__main__":

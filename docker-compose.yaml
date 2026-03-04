@@ -5,13 +5,25 @@ networks:
     driver: bridge
 
 services:
+  db:
+    image: postgres:15
+    container_name: arena-db
+    environment:
+      - POSTGRES_USER=robot
+      - POSTGRES_PASSWORD=robot
+      - POSTGRES_DB=robotarena
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    networks:
+      - robotnet
+
   ros-core:
     build:
       context: ./ros
     container_name: ros-core
     environment:
       - ROS_DOMAIN_ID=0
-      - ROS_PROXY_KEYS=local-dev-key
+      - ROS_PROXY_KEYS=${ROS_LOBBY_KEY:-local-dev-key}
     ports:
       - "8080:8080" # proxy / key check
       - "9090:9090" # rosbridge websocket
@@ -40,12 +52,18 @@ services:
       - ROS_BRIDGE_HOST=ros-core
       - ROS_BRIDGE_PORT=9090
       - ROS_PROXY_URL=http://ros-core:8080/authorize
-      - ROS_PROXY_KEY=local-dev-key
+      - ROS_PROXY_KEY=${ROS_LOBBY_KEY:-local-dev-key}
+      - 'SEED_USERS_JSON=[{"email":"dmn322","password":"TEST123!"}]'
+      - "SEED_LOBBIES_JSON=[{\"name\":\"ros-core\",\"ros_host\":\"ros-core\",\"ros_port\":9090,\"description\":\"Default ROS core lobby\",\"access_key\":\"${ROS_LOBBY_KEY:-local-dev-key}\",\"owner_email\":\"dmn322\"}]"
       - GATEWAY_NAME=gateway-1
+      - DATABASE_URL=postgresql+asyncpg://robot:robot@db:5432/robotarena
+      - SECRET_KEY=change-me-in-prod
+      - ACCESS_TOKEN_EXPIRE_MINUTES=60
     ports:
       - "8081:8080"
     depends_on:
       - ros-core
+      - db
     networks:
       - robotnet
 
@@ -61,3 +79,6 @@ services:
       - api
     networks:
       - robotnet
+
+volumes:
+  db_data:

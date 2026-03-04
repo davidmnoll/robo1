@@ -10,6 +10,10 @@ if [[ ! -x "${VENV_PATH}/bin/uvicorn" ]]; then
   exit 1
 fi
 
+export DATABASE_URL="${DATABASE_URL:-postgresql+asyncpg://robot:robot@localhost:5432/robotarena}"
+export SECRET_KEY="${SECRET_KEY:-dev-secret-key}"
+export ACCESS_TOKEN_EXPIRE_MINUTES="${ACCESS_TOKEN_EXPIRE_MINUTES:-60}"
+
 cd "${ROOT_DIR}/api"
 
 source "${VENV_PATH}/bin/activate"

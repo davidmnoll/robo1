@@ -55,6 +55,9 @@
         background: rgba(15,23,42,0.7);
         color: #f8fafc;
       }
+      input.readonly {
+        opacity: 0.7;
+      }
       button {
         background: linear-gradient(135deg, #2563eb, #14b8a6);
         color: white;
@@ -132,6 +135,39 @@
         margin-top: 1rem;
         color: #94a3b8;
       }
+      .button-row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.5rem;
+        margin-top: 0.75rem;
+      }
+      .button-row button {
+        flex: 1;
+        min-width: 120px;
+      }
+      .button-secondary {
+        background: #475569;
+      }
+      .lobby-list {
+        margin-top: 1rem;
+        display: flex;
+        flex-direction: column;
+        gap: 0.75rem;
+      }
+      .lobby-item {
+        background: #0f172a;
+        border: 1px solid rgba(255,255,255,0.08);
+        border-radius: 10px;
+        padding: 0.75rem;
+      }
+      .lobby-item h4 {
+        margin: 0 0 0.25rem 0;
+      }
+      .lobby-meta {
+        color: #94a3b8;
+        font-size: 0.85rem;
+        margin: 0.2rem 0;
+      }
       video {
         width: 100%;
         border-radius: 12px;
@@ -152,12 +188,62 @@
       <p class="subtitle">Send twist commands through the API gateway and stream telemetry via WebSocket.</p>
 
       <section class="card" style="margin-bottom:1.5rem;">
+        <h2 style="margin-top:0;">Account</h2>
+        <div id="auth-status" class="status disconnected">Not signed in</div>
+        <label for="auth-email">Username / Email</label>
+        <input id="auth-email" type="text" placeholder="dmn322 or user@example.com">
+        <label for="auth-password">Password</label>
+        <input id="auth-password" type="password" placeholder="••••••••">
+        <div class="button-row">
+          <button id="register-btn">Sign Up</button>
+          <button id="login-btn">Sign In</button>
+          <button id="logout-btn" class="button-secondary">Logout</button>
+        </div>
+        <p id="auth-message" class="keyboard-hint" style="text-align:left;"></p>
+      </section>
+
+      <section class="card" style="margin-bottom:1.5rem;">
+        <h2 style="margin-top:0;">Lobbies</h2>
+        <p id="lobby-message" class="keyboard-hint" style="text-align:left;">Sign in to create or join lobbies.</p>
+        <div id="lobby-form" style="display:none;">
+          <label for="lobby-name">Lobby Name</label>
+          <input id="lobby-name" placeholder="My ROS bridge">
+          <label for="lobby-host">ROS Bridge Host</label>
+          <input id="lobby-host" value="ros-core">
+          <label for="lobby-port">ROS Bridge Port</label>
+          <input id="lobby-port" type="number" value="9090">
+          <label for="lobby-desc">Description</label>
+          <input id="lobby-desc" placeholder="Optional notes">
+          <button id="create-lobby-btn">Create Lobby</button>
+        </div>
+        <div id="lobby-list" class="lobby-list"></div>
+      </section>
+
+      <section class="card" style="margin-bottom:1.5rem;">
+        <h2 style="margin-top:0;">Registered Bots</h2>
+        <p id="bot-message" class="keyboard-hint" style="text-align:left;">Sign in to manage bots.</p>
+        <div id="bot-form" style="display:none;">
+          <label for="bot-lobby-select">Lobby</label>
+          <select id="bot-lobby-select"></select>
+          <label for="bot-name">Bot Name</label>
+          <input id="bot-name" placeholder="Display name">
+          <label for="bot-namespace">ROS Namespace</label>
+          <input id="bot-namespace" placeholder="robot_001">
+          <label for="bot-desc">Description</label>
+          <input id="bot-desc" placeholder="Optional notes">
+          <button id="create-bot-btn">Register Bot</button>
+        </div>
+        <div id="bot-list" class="lobby-list"></div>
+      </section>
+
+      <section class="card" style="margin-bottom:1.5rem;">
         <div id="video-status" class="status disconnected">Video idle</div>
         <video id="robot-video" autoplay playsinline muted></video>
         <div class="video-actions">
           <button id="video-btn">Start Video</button>
           <button id="video-stop-btn" style="background:#ef4444;">Stop Video</button>
         </div>
+        <p id="video-meta" class="keyboard-hint" style="margin-top:0.5rem;text-align:left;">Sim: -- s | Delay: -- s</p>
         <div style="margin-top:1.25rem;">
           <p style="color:#94a3b8;margin-top:0;">Teleoperation</p>
           <div class="controls-grid">
@@ -180,6 +266,10 @@
           <div id="api-status" class="status disconnected">API unreachable</div>
           <label for="api-base">API Endpoint (e.g. http://localhost:8081/api)</label>
           <input id="api-base" placeholder="http://localhost:8081/api">
+          <label for="bot-select">Registered Bot</label>
+          <select id="bot-select">
+            <option value="">Manual entry</option>
+          </select>
           <label for="robot-id">Robot Namespace</label>
           <input id="robot-id" value="robot_001" placeholder="robot_001">
           <label for="linear-speed">Linear Speed (m/s)</label>
@@ -215,6 +305,31 @@
       const videoBtn = document.getElementById('video-btn');
       const videoStopBtn = document.getElementById('video-stop-btn');
       const videoStatus = document.getElementById('video-status');
+      const videoMeta = document.getElementById('video-meta');
+      const authEmailInput = document.getElementById('auth-email');
+      const authPasswordInput = document.getElementById('auth-password');
+      const authStatus = document.getElementById('auth-status');
+      const authMessage = document.getElementById('auth-message');
+      const registerBtn = document.getElementById('register-btn');
+      const loginBtn = document.getElementById('login-btn');
+      const logoutBtn = document.getElementById('logout-btn');
+      const lobbyMessage = document.getElementById('lobby-message');
+      const lobbyForm = document.getElementById('lobby-form');
+      const lobbyList = document.getElementById('lobby-list');
+      const lobbyNameInput = document.getElementById('lobby-name');
+      const lobbyHostInput = document.getElementById('lobby-host');
+      const lobbyPortInput = document.getElementById('lobby-port');
+      const lobbyDescInput = document.getElementById('lobby-desc');
+      const createLobbyBtn = document.getElementById('create-lobby-btn');
+      const botMessage = document.getElementById('bot-message');
+      const botForm = document.getElementById('bot-form');
+      const botList = document.getElementById('bot-list');
+      const botLobbySelect = document.getElementById('bot-lobby-select');
+      const botNameInput = document.getElementById('bot-name');
+      const botNamespaceInput = document.getElementById('bot-namespace');
+      const botDescInput = document.getElementById('bot-desc');
+      const createBotBtn = document.getElementById('create-bot-btn');
+      const botSelect = document.getElementById('bot-select');
 
       const defaultApiBase = window.location.origin.replace(/\/$/, '');
       const storedApiBase = localStorage.getItem('arenaApiBase');
@@ -240,6 +355,55 @@
       let ws;
       let lastRobotId = robotInput.value.trim();
       let pc;
+      let frameInfoInterval;
+      let authToken = localStorage.getItem('arenaToken') || '';
+      let currentUserEmail = localStorage.getItem('arenaUserEmail') || '';
+      let currentLobbies = [];
+      let currentBots = [];
+      let selectedBotNamespace = '';
+
+      function authHeaders() {
+        return authToken ? { 'Authorization': `Bearer ${authToken}` } : {};
+      }
+
+      function setAuth(token, email) {
+        authToken = token || '';
+        currentUserEmail = email || '';
+        if (token) {
+          localStorage.setItem('arenaToken', token);
+          localStorage.setItem('arenaUserEmail', email);
+        } else {
+          localStorage.removeItem('arenaToken');
+          localStorage.removeItem('arenaUserEmail');
+        }
+        updateAuthUI();
+      }
+
+      function updateAuthUI() {
+        if (authToken) {
+          authStatus.textContent = `Signed in as ${currentUserEmail}`;
+          authStatus.className = 'status connected';
+          lobbyForm.style.display = 'block';
+          lobbyMessage.textContent = 'Create a lobby or share keys with teammates.';
+          botForm.style.display = 'block';
+          botMessage.textContent = 'Register bots under your owned lobbies.';
+          fetchLobbies();
+          fetchBots();
+        } else {
+          authStatus.textContent = 'Not signed in';
+          authStatus.className = 'status disconnected';
+          lobbyForm.style.display = 'none';
+          lobbyList.innerHTML = '';
+          lobbyMessage.textContent = 'Sign in to create or join lobbies.';
+          botForm.style.display = 'none';
+          botList.innerHTML = '';
+          botMessage.textContent = 'Sign in to manage bots.';
+          currentLobbies = [];
+          currentBots = [];
+          updateBotLobbyOptions();
+          updateBotSelect([]);
+        }
+      }
 
       async function checkApiHealth() {
         try {
@@ -268,7 +432,7 @@
         try {
           await fetch(`${base}/robots/${encodeURIComponent(robot)}/cmd_vel`, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: { 'Content-Type': 'application/json', ...authHeaders() },
             body: JSON.stringify(payload),
           });
         } catch (err) {
@@ -396,6 +560,315 @@
         openWebSocket();
       });
 
+      botSelect.addEventListener('change', () => {
+        applyBotSelection(botSelect.value);
+      });
+
+      robotInput.addEventListener('input', () => {
+        if (selectedBotNamespace) {
+          botSelect.value = '';
+          applyBotSelection('');
+        }
+      });
+
+      registerBtn.addEventListener('click', registerUser);
+      loginBtn.addEventListener('click', loginUser);
+      logoutBtn.addEventListener('click', logoutUser);
+      createLobbyBtn.addEventListener('click', createLobby);
+      createBotBtn.addEventListener('click', createBot);
+
+      async function updateFrameInfo(robot) {
+        try {
+          const resp = await fetch(`${apiBase()}/robots/${encodeURIComponent(robot)}/frame_info`, {
+            headers: authHeaders(),
+          });
+          if (!resp.ok) {
+            throw new Error('No frame info');
+          }
+          const data = await resp.json();
+          const sim = data.sim_time >= 0 ? `${data.sim_time.toFixed(2)} s` : '--';
+          const delay = typeof data.age === 'number' ? `${data.age.toFixed(2)} s` : '--';
+          videoMeta.textContent = `Sim: ${sim} | Delay: ${delay}`;
+        } catch {
+          videoMeta.textContent = 'Sim: -- s | Delay: -- s';
+        }
+      }
+
+      function startFrameInfoPolling(robot) {
+        if (frameInfoInterval) {
+          clearInterval(frameInfoInterval);
+        }
+        updateFrameInfo(robot);
+        frameInfoInterval = setInterval(() => updateFrameInfo(robot), 1000);
+      }
+
+      function stopFrameInfoPolling() {
+        if (frameInfoInterval) {
+          clearInterval(frameInfoInterval);
+          frameInfoInterval = null;
+        }
+        videoMeta.textContent = 'Sim: -- s | Delay: -- s';
+      }
+
+      async function registerUser() {
+        authMessage.textContent = '';
+        const username = authEmailInput.value.trim();
+        const password = authPasswordInput.value;
+        if (!username || !password) {
+          authMessage.textContent = 'Enter a username/email and password.';
+          return;
+        }
+        if (password.length > 32) {
+          authMessage.textContent = 'Password must be at most 32 characters.';
+          return;
+        }
+        try {
+          const resp = await fetch(`${apiBase()}/auth/register`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              email: username,
+              password,
+            }),
+          });
+          if (!resp.ok) throw new Error(await resp.text());
+          const data = await resp.json();
+          setAuth(data.access_token, data.user.email);
+          authMessage.textContent = 'Registration successful.';
+        } catch (err) {
+          console.error(err);
+          authMessage.textContent = 'Registration failed.';
+        }
+      }
+
+      async function loginUser() {
+        authMessage.textContent = '';
+        const username = authEmailInput.value.trim();
+        const password = authPasswordInput.value;
+        if (!username || !password) {
+          authMessage.textContent = 'Enter a username/email and password.';
+          return;
+        }
+        if (password.length > 32) {
+          authMessage.textContent = 'Password must be at most 32 characters.';
+          return;
+        }
+        try {
+          const resp = await fetch(`${apiBase()}/auth/login`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              email: username,
+              password,
+            }),
+          });
+          if (!resp.ok) throw new Error(await resp.text());
+          const data = await resp.json();
+          setAuth(data.access_token, data.user.email);
+          authMessage.textContent = 'Signed in.';
+        } catch (err) {
+          console.error(err);
+          authMessage.textContent = 'Sign-in failed.';
+        }
+      }
+
+      function logoutUser() {
+        setAuth('', '');
+        authMessage.textContent = 'Logged out.';
+      }
+
+      async function fetchLobbies() {
+        if (!authToken) {
+          lobbyList.innerHTML = '';
+          currentLobbies = [];
+          updateBotLobbyOptions();
+          return;
+        }
+        try {
+          const resp = await fetch(`${apiBase()}/lobbies`, {
+            headers: authHeaders(),
+          });
+          if (!resp.ok) throw new Error(await resp.text());
+          const data = await resp.json();
+          currentLobbies = data.items || [];
+          renderLobbies(currentLobbies);
+          updateBotLobbyOptions();
+        } catch (err) {
+          console.error(err);
+          lobbyList.innerHTML = '<p class="keyboard-hint" style="text-align:left;">Failed to load lobbies.</p>';
+        }
+      }
+
+      function renderLobbies(lobbies) {
+        if (!lobbies.length) {
+          lobbyList.innerHTML = '<p class="keyboard-hint" style="text-align:left;">No lobbies yet.</p>';
+          return;
+        }
+        lobbyList.innerHTML = lobbies.map((lobby) => `
+          <div class="lobby-item">
+            <h4>${lobby.name}</h4>
+            <p class="lobby-meta">Host: ${lobby.ros_host}:${lobby.ros_port}</p>
+            <p class="lobby-meta">Owner: ${lobby.owner_email}</p>
+            <p class="lobby-meta">Key: ${lobby.access_key || 'hidden'}</p>
+            <p class="lobby-meta">Created: ${new Date(lobby.created_at).toLocaleString()}</p>
+            ${lobby.description ? `<p>${lobby.description}</p>` : ''}
+          </div>
+        `).join('');
+      }
+
+      function updateBotLobbyOptions() {
+        const owned = currentLobbies.filter((lobby) => lobby.owner_email === currentUserEmail);
+        if (!owned.length) {
+          botLobbySelect.innerHTML = '<option value="">No owned lobbies</option>';
+          botLobbySelect.disabled = true;
+          return;
+        }
+        botLobbySelect.disabled = false;
+        const options = ['<option value="">Select a lobby</option>'].concat(
+          owned.map((lobby) => `<option value="${lobby.id}">${lobby.name}</option>`)
+        );
+        botLobbySelect.innerHTML = options.join('');
+        botLobbySelect.value = '';
+      }
+
+      async function fetchBots() {
+        if (!authToken) {
+          currentBots = [];
+          botList.innerHTML = '';
+          updateBotSelect([]);
+          return;
+        }
+        try {
+          const resp = await fetch(`${apiBase()}/bots`, {
+            headers: authHeaders(),
+          });
+          if (!resp.ok) throw new Error(await resp.text());
+          const data = await resp.json();
+          currentBots = data.items || [];
+          renderBots(currentBots);
+          updateBotSelect(currentBots);
+        } catch (err) {
+          console.error(err);
+          botList.innerHTML = '<p class="keyboard-hint" style="text-align:left;">Failed to load bots.</p>';
+        }
+      }
+
+      function renderBots(bots) {
+        if (!bots.length) {
+          botList.innerHTML = '<p class="keyboard-hint" style="text-align:left;">No bots yet.</p>';
+          return;
+        }
+        botList.innerHTML = bots.map((bot) => `
+          <div class="lobby-item">
+            <h4>${bot.name}</h4>
+            <p class="lobby-meta">Namespace: ${bot.ros_namespace}</p>
+            <p class="lobby-meta">Lobby: ${bot.lobby_name}</p>
+            <p class="lobby-meta">Owner: ${bot.owner_email}</p>
+            <p class="lobby-meta">Created: ${new Date(bot.created_at).toLocaleString()}</p>
+            ${bot.description ? `<p>${bot.description}</p>` : ''}
+          </div>
+        `).join('');
+      }
+
+      async function createBot() {
+        if (!authToken) {
+          botMessage.textContent = 'Sign in to register bots.';
+          return;
+        }
+        const lobbyId = Number(botLobbySelect.value);
+        const name = botNameInput.value.trim();
+        const namespace = botNamespaceInput.value.trim();
+        if (!lobbyId) {
+          botMessage.textContent = 'Select a lobby.';
+          return;
+        }
+        if (!name || !namespace) {
+          botMessage.textContent = 'Enter a bot name and namespace.';
+          return;
+        }
+        try {
+          const body = {
+            lobby_id: lobbyId,
+            name,
+            ros_namespace: namespace,
+            description: botDescInput.value || null,
+          };
+          const resp = await fetch(`${apiBase()}/bots`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', ...authHeaders() },
+            body: JSON.stringify(body),
+          });
+          if (!resp.ok) throw new Error(await resp.text());
+          botMessage.textContent = 'Bot registered.';
+          botNameInput.value = '';
+          botNamespaceInput.value = '';
+          botDescInput.value = '';
+          fetchBots();
+        } catch (err) {
+          console.error(err);
+          botMessage.textContent = 'Failed to register bot.';
+        }
+      }
+
+      function applyBotSelection(namespace) {
+        selectedBotNamespace = namespace || '';
+        if (namespace) {
+          robotInput.value = namespace;
+          robotInput.classList.add('readonly');
+          robotInput.setAttribute('readonly', 'readonly');
+        } else {
+          robotInput.classList.remove('readonly');
+          robotInput.removeAttribute('readonly');
+        }
+        if (namespace) {
+          openWebSocket();
+          startVideo();
+        }
+      }
+
+      function updateBotSelect(bots) {
+        const options = ['<option value="">Manual entry</option>'].concat(
+          bots.map((bot) => `<option value="${bot.ros_namespace}">${bot.name} (${bot.ros_namespace})</option>`)
+        );
+        botSelect.innerHTML = options.join('');
+        if (selectedBotNamespace && bots.some((bot) => bot.ros_namespace === selectedBotNamespace)) {
+          botSelect.value = selectedBotNamespace;
+        } else {
+          botSelect.value = '';
+          selectedBotNamespace = '';
+        }
+        applyBotSelection(botSelect.value);
+      }
+
+      async function createLobby() {
+        if (!authToken) {
+          lobbyMessage.textContent = 'Sign in to create a lobby.';
+          return;
+        }
+        try {
+          const body = {
+            name: lobbyNameInput.value,
+            ros_host: lobbyHostInput.value,
+            ros_port: Number(lobbyPortInput.value),
+            description: lobbyDescInput.value || null,
+          };
+          const resp = await fetch(`${apiBase()}/lobbies`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', ...authHeaders() },
+            body: JSON.stringify(body),
+          });
+          if (!resp.ok) throw new Error(await resp.text());
+          const data = await resp.json();
+          lobbyMessage.textContent = `Lobby created. Key: ${data.access_key || 'hidden'}`;
+          lobbyNameInput.value = '';
+          lobbyDescInput.value = '';
+          fetchLobbies();
+        } catch (err) {
+          console.error(err);
+          lobbyMessage.textContent = 'Failed to create lobby.';
+        }
+      }
+
       async function startVideo() {
         const robot = robotInput.value.trim() || 'robot_001';
         if (pc) {
@@ -413,7 +886,7 @@
           await pc.setLocalDescription(offer);
           const resp = await fetch(`${apiBase()}/robots/${encodeURIComponent(robot)}/webrtc`, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: { 'Content-Type': 'application/json', ...authHeaders() },
             body: JSON.stringify({ sdp: offer.sdp, type: offer.type })
           });
           if (!resp.ok) {
@@ -423,6 +896,7 @@
           await pc.setRemoteDescription(answer);
           videoStatus.textContent = `Video streaming (${robot})`;
           videoStatus.className = 'status connected';
+          startFrameInfoPolling(robot);
         } catch (err) {
           console.error('Video setup failed', err);
           videoStatus.textContent = 'Video error';
@@ -431,6 +905,7 @@
             pc.close();
             pc = null;
           }
+          stopFrameInfoPolling();
         }
       }
 
@@ -445,6 +920,7 @@
         }
         videoStatus.textContent = 'Video idle';
         videoStatus.className = 'status disconnected';
+        stopFrameInfoPolling();
       }
 
       videoBtn.addEventListener('click', startVideo);
@@ -453,11 +929,13 @@
       window.addEventListener('beforeunload', () => {
         if (pc) pc.close();
         if (ws) ws.close();
+        stopFrameInfoPolling();
       });
 
       checkApiHealth();
       setInterval(checkApiHealth, 10_000);
       initControls();
+      updateAuthUI();
     </script>
   </body>
 </html>

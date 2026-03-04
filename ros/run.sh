@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -eo pipefail
 
 ROOT_DIR="$(cd -- "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
@@ -29,10 +29,15 @@ if [[ -z "${ROS_SETUP_SCRIPT}" || ! -f "${ROS_SETUP_SCRIPT}" ]]; then
 fi
 
 set +u
+# Leave AMENT_TRACE_SETUP_FILES defined and force it to 0 to keep setup quiet even if the host sets it.
+export AMENT_TRACE_SETUP_FILES=0
+# Default ROS 2 logging to WARN for less noisy console output (can be overridden upstream).
+export RCUTILS_LOGGING_MIN_SEVERITY=${RCUTILS_LOGGING_MIN_SEVERITY:-WARN}
+export AMENT_PYTHON_EXECUTABLE=${AMENT_PYTHON_EXECUTABLE:-python3}
 source "${ROS_SETUP_SCRIPT}"
 set -u
 
-ros2 run rosbridge_server rosbridge_websocket --port "${ROSBRIDGE_PORT}" &
+ros2 run rosbridge_server rosbridge_websocket --port "${ROSBRIDGE_PORT}" --ros-args --log-level warn &
 ROS_PID=$!
 
 cleanup() {

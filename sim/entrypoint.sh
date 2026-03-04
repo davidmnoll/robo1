@@ -1,7 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-source /opt/ros/${ROS_DISTRO}/setup.bash
+: "${ROS_DISTRO:=humble}"
+if [[ ! -f "/opt/ros/${ROS_DISTRO}/setup.bash" ]]; then
+  echo "ROS distribution ${ROS_DISTRO} is not installed in /opt/ros." >&2
+  exit 1
+fi
+
+set +u
+source "/opt/ros/${ROS_DISTRO}/setup.bash"
+set -u
 
 WORLD_PATH="${WEBOTS_WORLD:-/workspace/worlds/battle_arena.wbt}"
 
