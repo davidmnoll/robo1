@@ -462,6 +462,28 @@ def seed_bots_config() -> list[SeedBotConfig]:
     return parse_seed_entries(settings.seed_bots_json, SeedBotConfig, "SEED_BOTS_JSON")
 
 
+async def prepare_database(max_attempts: int = 10, delay: int = 5) -> None:
+    attempt = 0
+    while True:
+        try:
+            async with engine.begin() as conn:
+                await conn.run_sync(Base.metadata.create_all)
+            break
+        except Exception as exc:  # pragma: no cover - startup diagnostics
+            attempt += 1
+            if attempt >= max_attempts:
+                logger.error("Database preparation failed after %s attempts: %s", attempt, exc)
+                raise
+            logger.warning(
+                "Database connection attempt %s/%s failed: %s; retrying in %ss",
+                attempt,
+                max_attempts,
+                exc,
+                delay,
+            )
+            await asyncio.sleep(delay)
+
+
 async def apply_seed_data() -> None:
     users = seed_users_config()
     lobbies = seed_lobbies_config()
@@ -606,8 +628,7 @@ async def ros_client() -> roslibpy.Ros:
 
 @app.on_event("startup")
 async def startup_event() -> None:
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+    await prepare_database()
     await apply_seed_data()
     attempt = 0
     max_attempts = 30
