@@ -73,8 +73,6 @@ resource "google_sql_database_instance" "postgres" {
     disk_size       = var.db_disk_size_gb
   }
 
-  deletion_protection_enabled = var.db_deletion_protection
-
   depends_on = [google_project_service.enabled]
 }
 
