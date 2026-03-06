@@ -3,6 +3,7 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="robot-gateway-api-base" content="__API_BASE_URL__">
     <title>Robot Arena Dashboard</title>
     <style>
       :root {
@@ -332,10 +333,13 @@
       const botSelect = document.getElementById('bot-select');
       const teleopLobbySelect = document.getElementById('teleop-lobby-select');
 
+      const apiMetaTag = document.querySelector('meta[name="robot-gateway-api-base"]');
+      const metaValue = apiMetaTag ? (apiMetaTag.getAttribute('content') || '').trim() : '';
+      const deploymentApiBase = metaValue && metaValue !== '__API_BASE_URL__' ? metaValue : '';
       const defaultOrigin = window.location.origin.replace(/\/$/, '');
-      let computedDefaultApi = `${defaultOrigin}/api`;
+      let computedDefaultApi = deploymentApiBase || `${defaultOrigin}/api`;
       const currentPort = window.location.port;
-      if (currentPort === '4173') {
+      if (!deploymentApiBase && currentPort === '4173') {
         // dashboard served via nginx dev port; default API to 8081 on same host
         computedDefaultApi = `${window.location.protocol}//${window.location.hostname}:8081/api`;
       }
