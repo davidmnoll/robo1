@@ -18,6 +18,8 @@ Experiment with creating a dashboard to remotely control simulated robots:
 - Bot APIs:
   - `GET /api/bots` → list every registered bot along with its lobby/owner metadata
   - `POST /api/bots` → register a bot (name + ROS namespace) under a lobby you own
+- Internal ROS handshake:
+  - `POST /api/internal/lobbies/{lobby_name}/online` with the lobby `access_key` kicks off the gateway’s ROS bridge connection monitor so Cloud Run can wait for rosbridge to come online after deploy.
 - The dashboard now includes a bot management card plus a dropdown in the teleop panel so you can pick a registered bot namespace (or fall back to manual entry).
 - The gateway can seed users, lobbies, and bots from JSON provided via `SEED_USERS_JSON` / `SEED_LOBBIES_JSON` / `SEED_BOTS_JSON`. The default compose file seeds `dmn322` / `TEST123!`, a `ros-core` lobby whose `access_key` reuses the shared `ROS_PUSH_KEY` env var (fed into both the ROS camera forwarder and `ROS_PUSH_KEY` on the API), and two bots (`bot_alpha`, `bot_beta`) that match the simulated robots. Example:
 

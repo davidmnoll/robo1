@@ -203,6 +203,10 @@ class LoginRequest(BaseModel):
     password: constr(min_length=1, max_length=32)
 
 
+class LobbyOnlineRequest(BaseModel):
+    access_key: constr(min_length=1, max_length=255)
+
+
 class LobbyCreate(BaseModel):
     name: str
     ros_host: str
@@ -371,6 +375,28 @@ async def create_bot(
     return bot_to_out(bot)
 
 
+@app.post("/api/internal/lobbies/{lobby_name}/online")
+async def register_lobby_online(
+    lobby_name: str,
+    payload: LobbyOnlineRequest,
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    stmt = select(Lobby).where(Lobby.name == lobby_name)
+    result = await session.execute(stmt)
+    lobby = result.scalar_one_or_none()
+    if lobby is None:
+        raise HTTPException(status_code=404, detail="Lobby not found")
+    if lobby.access_key != payload.access_key:
+        raise HTTPException(status_code=403, detail="Invalid lobby key")
+    task: asyncio.Task | None = getattr(app.state, "ros_monitor_task", None)
+    if task is None or task.done():
+        if task and task.done() and task.exception():
+            logger.warning("Previous ROS monitor task ended with error: %s", task.exception())
+        logger.info("Received lobby %s online notification; starting ROS monitor", lobby_name)
+        app.state.ros_monitor_task = asyncio.create_task(monitor_ros_connection())
+    return {"status": "monitoring", "lobby": lobby_name}
+
+
 def user_to_out(user: User) -> UserOut:
     return UserOut(id=user.id, email=user.email)
 
@@ -462,12 +488,13 @@ def seed_bots_config() -> list[SeedBotConfig]:
     return parse_seed_entries(settings.seed_bots_json, SeedBotConfig, "SEED_BOTS_JSON")
 
 
-async def prepare_database(max_attempts: int = 10, delay: int = 5) -> None:
+async def prepare_database(max_attempts: int = 60, delay: int = 5) -> None:
     attempt = 0
     while True:
         try:
             async with engine.begin() as conn:
                 await conn.run_sync(Base.metadata.create_all)
+            logger.info("Database connection established after %s attempt(s)", attempt + 1)
             break
         except Exception as exc:  # pragma: no cover - startup diagnostics
             attempt += 1
@@ -630,41 +657,16 @@ async def ros_client() -> roslibpy.Ros:
 async def startup_event() -> None:
     await prepare_database()
     await apply_seed_data()
-    attempt = 0
-    max_attempts = 30
-    delay = 2
-    ros: roslibpy.Ros | None = None
-    while attempt < max_attempts:
-        attempt += 1
-        try:
-            ros = roslibpy.Ros(
-                host=settings.ros_bridge_host,
-                port=settings.ros_bridge_port,
-                is_secure=False,
-            )
-            ros.run()
-            for _ in range(100):
-                if ros.is_connected:
-                    break
-                await asyncio.sleep(0.1)
-            if ros.is_connected:
-                break
-        except Exception as exc:
-            logger.warning("ROS bridge connection attempt %s failed: %s", attempt, exc)
-        await asyncio.sleep(delay)
-    if not ros or not ros.is_connected:
-        raise RuntimeError("Failed to connect to ROS bridge after multiple attempts")
-    app.state.ros_client = ros
-    logger.info(
-        "Gateway %s connected to ROS bridge %s:%s",
-        settings.gateway_name,
-        settings.ros_bridge_host,
-        settings.ros_bridge_port,
-    )
+    app.state.ros_monitor_task = None
 
 
 @app.on_event("shutdown")
 async def shutdown_event() -> None:
+    monitor: asyncio.Task | None = getattr(app.state, "ros_monitor_task", None)
+    if monitor:
+        monitor.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await monitor
     ros: roslibpy.Ros | None = getattr(app.state, "ros_client", None)
     if ros:
         ros.terminate()
@@ -784,3 +786,50 @@ class RobotVideoTrack(VideoStreamTrack):
         frame = VideoFrame.from_ndarray(array, format="bgra")
         frame.pts, frame.time_base = await self.next_timestamp()
         return frame
+
+
+async def monitor_ros_connection(delay: int = 5) -> None:
+    while True:
+        ros = await _connect_ros()
+        if ros is None:
+            await asyncio.sleep(delay)
+            continue
+        app.state.ros_client = ros
+        logger.info(
+            "Gateway %s connected to ROS bridge %s:%s",
+            settings.gateway_name,
+            settings.ros_bridge_host,
+            settings.ros_bridge_port,
+        )
+        try:
+            while ros.is_connected:
+                await asyncio.sleep(delay)
+        except asyncio.CancelledError:  # pragma: no cover - shutdown path
+            ros.terminate()
+            raise
+        finally:
+            ros.terminate()
+            if getattr(app.state, "ros_client", None) is ros:
+                app.state.ros_client = None
+            logger.warning("ROS bridge connection lost; retrying in %ss", delay)
+        await asyncio.sleep(delay)
+
+
+async def _connect_ros(max_wait: float = 10.0) -> roslibpy.Ros | None:
+    try:
+        ros = roslibpy.Ros(
+            host=settings.ros_bridge_host,
+            port=settings.ros_bridge_port,
+            is_secure=False,
+        )
+        ros.run()
+        elapsed = 0.0
+        while not ros.is_connected and elapsed < max_wait:
+            await asyncio.sleep(0.1)
+            elapsed += 0.1
+        if ros.is_connected:
+            return ros
+        ros.terminate()
+    except Exception as exc:  # pragma: no cover - network failures
+        logger.warning("ROS bridge connection attempt failed: %s", exc)
+    return None
