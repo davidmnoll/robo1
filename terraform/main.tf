@@ -28,7 +28,8 @@ locals {
     "run.googleapis.com",
     "sqladmin.googleapis.com",
     "compute.googleapis.com",
-    "iam.googleapis.com"
+    "iam.googleapis.com",
+    "containerregistry.googleapis.com"
   ]
 
   cloud_sql_instance_name   = coalesce(var.cloud_sql_instance_name, "${var.project_id}-api-db")

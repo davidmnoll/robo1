@@ -69,5 +69,5 @@ flowchart LR
 
 - Infrastructure-as-code for the hosted API/database lives under `terraform/`. It provisions Cloud SQL + Cloud Run inside the `robo1-489405` project.
 - Terraform state is stored in the `robo1-terraform-state` GCS bucket; the GitHub Actions workflow (`.github/workflows/terraform.yml`) ensures the bucket exists before running `terraform init`.
-- The workflow authenticates with the `GCP_TERRAFORM_TOKEN` secret (a JSON key for the Terraform service account) and automatically runs `terraform plan`/`apply` on pushes to `main`.
+- The workflow authenticates with the `GCP_TERRAFORM_TOKEN` secret (a JSON key for the Terraform service account), builds/pushes the API container to `gcr.io/robo1-489405/robot-gateway:${GITHUB_SHA}`, and automatically runs `terraform plan`/`apply` on pushes to `main`.
 - Customize runtime values (API image, CORS origins, ROS bridge host, etc.) via Terraform variables or environment overrides detailed in `terraform/README.md`.

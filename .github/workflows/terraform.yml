@@ -59,6 +59,7 @@ jobs:
         env:
           TF_VAR_project_id: ${{ env.PROJECT_ID }}
           TF_VAR_region: us-central1
+          TF_VAR_api_image: gcr.io/${{ env.PROJECT_ID }}/robot-gateway:${{ github.sha }}
 
       - name: Terraform Apply
         if: github.ref == 'refs/heads/main'
@@ -67,3 +68,4 @@ jobs:
         env:
           TF_VAR_project_id: ${{ env.PROJECT_ID }}
           TF_VAR_region: us-central1
+          TF_VAR_api_image: gcr.io/${{ env.PROJECT_ID }}/robot-gateway:${{ github.sha }}

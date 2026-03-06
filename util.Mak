@@ -19,6 +19,11 @@ create-service-account:
 	--member "serviceAccount:${SA_EMAIL}" \
 	--role "roles/iam.serviceAccountUser"
 
+	gcloud projects add-iam-policy-binding robo1-489405 \
+    --member="serviceAccount:terraform@robo1-489405.iam.gserviceaccount.com" \
+    --role="roles/resourcemanager.projectIamAdmin"
+
+
 	# After that, generate a key (so we can upload it as GCP_TERRAFORM_TOKEN):
 
 create-service-acct-key:
