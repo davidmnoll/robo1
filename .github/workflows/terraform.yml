@@ -40,6 +40,26 @@ jobs:
           gsutil ls -b gs://robo1-terraform-state >/dev/null 2>&1 || \
             gsutil mb -p "${PROJECT_ID}" gs://robo1-terraform-state
 
+      - name: Configure Docker auth for GCR
+        run: gcloud auth configure-docker gcr.io --quiet
+
+      - name: Ensure API image exists
+        env:
+          IMAGE: gcr.io/${{ env.PROJECT_ID }}/robot-gateway:${{ github.sha }}
+        run: |
+          set -euo pipefail
+          if ! gcloud container images list-tags "gcr.io/${PROJECT_ID}/robot-gateway" \
+              --filter="tags:${GITHUB_SHA}" --format="get(digest)" | grep -q .; then
+            echo "API image ${IMAGE} missing; building..."
+            docker build -t "${IMAGE}" ./api
+            docker push "${IMAGE}"
+            docker tag "${IMAGE}" "gcr.io/${PROJECT_ID}/robot-gateway:latest"
+            docker push "gcr.io/${PROJECT_ID}/robot-gateway:latest"
+          else
+            echo "API image ${IMAGE} already exists."
+          fi
+          echo "TF_VAR_api_image=${IMAGE}" >> "${GITHUB_ENV}"
+
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
         with:
@@ -59,8 +79,6 @@ jobs:
         env:
           TF_VAR_project_id: ${{ env.PROJECT_ID }}
           TF_VAR_region: us-central1
-          TF_VAR_api_image: gcr.io/${{ env.PROJECT_ID }}/robot-gateway:${{ github.sha }}
-          TF_VAR_ros_bridge_enabled: "false"
 
       - name: Terraform Apply
         if: github.ref == 'refs/heads/main'
@@ -69,5 +87,3 @@ jobs:
         env:
           TF_VAR_project_id: ${{ env.PROJECT_ID }}
           TF_VAR_region: us-central1
-          TF_VAR_api_image: gcr.io/${{ env.PROJECT_ID }}/robot-gateway:${{ github.sha }}
-          TF_VAR_ros_bridge_enabled: "false"
