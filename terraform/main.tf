@@ -52,6 +52,9 @@ resource "google_project_service" "enabled" {
 resource "random_password" "db_password" {
   length  = 24
   special = true
+  keepers = {
+    project = var.project_id
+  }
 }
 
 resource "random_password" "api_secret_key" {
