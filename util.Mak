@@ -33,3 +33,7 @@ enable-pages:
 	gh api repos/davidmnoll/robo1/pages --method PUT \
       -F source[branch]=main \
       -F source[path]=/
+
+enable-gcloud-services:
+	gcloud services enable iam.googleapis.com --project=robo1-489405
+
