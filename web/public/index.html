@@ -335,7 +335,7 @@
 
       const apiMetaTag = document.querySelector('meta[name="robot-gateway-api-base"]');
       const metaValue = apiMetaTag ? (apiMetaTag.getAttribute('content') || '').trim() : '';
-      const deploymentApiBase = metaValue && metaValue !== '__API_BASE_URL__' ? metaValue : '';
+      const deploymentApiBase = /^https?:\/\//.test(metaValue) ? metaValue : '';
       const defaultOrigin = window.location.origin.replace(/\/$/, '');
       let computedDefaultApi = deploymentApiBase || `${defaultOrigin}/api`;
       const currentPort = window.location.port;
