@@ -9,14 +9,12 @@ environment variable for future ROS integrations.
 
 from __future__ import annotations
 
-import base64
 import contextlib
-import json
 import os
 import sys
 import time
-from typing import Dict, Optional
-from urllib import error, request
+from pathlib import Path
+from typing import Callable, Dict, Optional
 
 from controller import Camera, Robot
 
@@ -36,82 +34,92 @@ def parse_controller_args(args: list[str]) -> Dict[str, str]:
     return result
 
 
+def build_logger(robot_id: str) -> Callable[[str], None]:
+    log_dir = Path(os.getenv("BOT_LOG_DIR", "/tmp/bot_logs"))
+    with contextlib.suppress(OSError):
+        log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / f"{robot_id}.log"
+
+    def _log(message: str) -> None:
+        text = f"[{robot_id}] {message}"
+        print(text, flush=True)
+        with contextlib.suppress(OSError):
+            with log_path.open("a", encoding="utf-8") as handle:
+                handle.write(text + "\n")
+
+    return _log
+
+
 class CameraStreamer:
-    def __init__(self, robot_id: str, host: str, port: int, api_base: Optional[str]) -> None:
+    def __init__(
+        self,
+        robot_id: str,
+        host: str,
+        port: int,
+        log_fn: Callable[[str], None],
+        max_attempts: int = 30,
+    ) -> None:
+        if roslibpy is None:
+            raise RuntimeError("roslibpy unavailable; cannot stream camera")
         self.robot_id = robot_id
-        self.mode = "disabled"
-        self.api_base = api_base
-        self.ros = None
-        self.topic = None
-        if roslibpy is not None:
-            self.ros = roslibpy.Ros(host=host, port=port, is_secure=False)
+        self.log = log_fn
+        self.ros: Optional[roslibpy.Ros] = None
+        self.topic: Optional[roslibpy.Topic] = None
+        self._publish_count = 0
+        for attempt in range(1, max_attempts + 1):
+            self.log(f"connecting to rosbridge ({host}:{port}) attempt {attempt}/{max_attempts}")
+            candidate = roslibpy.Ros(host=host, port=port, is_secure=False)
             try:
-                self.ros.run()
-            except Exception:
-                self.ros = None
-            if self.ros:
-                for _ in range(100):
-                    if self.ros.is_connected:
-                        break
-                    time.sleep(0.05)
-            if self.ros and self.ros.is_connected:
-                topic_name = f"/{robot_id}/camera/image_raw"
-                self.topic = roslibpy.Topic(
-                    self.ros,
-                    topic_name,
-                    "sensor_msgs/msg/Image",
-                )
-                self.mode = "ros"
-        if self.mode != "ros" and self.api_base:
-            self.mode = "http"
+                candidate.run()
+            except Exception as exc:
+                self.log(f"rosbridge connection failed: {exc}")
+                time.sleep(1.0)
+                continue
+            for _ in range(100):
+                if candidate.is_connected:
+                    break
+                time.sleep(0.1)
+            if candidate.is_connected:
+                self.ros = candidate
+                break
+            self.log("rosbridge still unavailable; retrying in 1s")
+            time.sleep(1.0)
+        if not self.ros or not self.ros.is_connected:
+            raise RuntimeError("rosbridge connection timed out")
+        topic_name = f"/{robot_id}/camera/image_raw"
+        self.topic = roslibpy.Topic(
+            self.ros,
+            topic_name,
+            "sensor_msgs/msg/Image",
+        )
+        self.log(f"rosbridge camera stream via {host}:{port}")
 
     def publish(self, camera: Camera, sim_time: float) -> None:
-        if self.mode == "ros" and self.topic:
-            image_data = camera.getImage()
-            if image_data is None:
-                return
-            width = camera.getWidth()
-            height = camera.getHeight()
-            secs = int(sim_time)
-            nsecs = int((sim_time - secs) * 1e9)
-            message = {
-                "header": {
-                    "stamp": {"sec": secs, "nanosec": nsecs},
-                    "frame_id": f"{self.robot_id}_camera",
-                },
-                "height": height,
-                "width": width,
-                "encoding": "BGRA8",
-                "is_bigendian": 0,
-                "step": width * 4,
-                "data": list(image_data),
-            }
-            try:
-                self.topic.publish(message)
-            except Exception:
-                self.mode = "disabled"
-        elif self.mode == "http" and self.api_base:
-            image_data = camera.getImage()
-            if image_data is None:
-                return
-            payload = {
-                "width": camera.getWidth(),
-                "height": camera.getHeight(),
-                "format": "bgra",
-                "image": base64.b64encode(image_data).decode("ascii"),
-                "sim_time": sim_time,
-            }
-            data = json.dumps(payload).encode("utf-8")
-            endpoint = f"{self.api_base}/robots/{self.robot_id}/frame"
-            req = request.Request(
-                endpoint,
-                data=data,
-                headers={"Content-Type": "application/json"},
-            )
-            try:
-                request.urlopen(req, timeout=0.2)
-            except error.URLError:
-                pass
+        image_data = camera.getImage()
+        if image_data is None:
+            return
+        width = camera.getWidth()
+        height = camera.getHeight()
+        if not self.topic:
+            raise RuntimeError("rosbridge topic unavailable")
+        secs = int(sim_time)
+        nsecs = int((sim_time - secs) * 1e9)
+        message = {
+            "header": {
+                "stamp": {"sec": secs, "nanosec": nsecs},
+                "frame_id": f"{self.robot_id}_camera",
+            },
+            "height": height,
+            "width": width,
+            "encoding": "BGRA8",
+            "is_bigendian": 0,
+            "step": width * 4,
+            "data": list(image_data),
+        }
+        self.topic.publish(message)
+        self._publish_count += 1
+        if self._publish_count % 30 == 0:
+            self.log(f"published {self._publish_count} camera frames")
 
     def shutdown(self) -> None:
         if self.topic:
@@ -122,20 +130,37 @@ class CameraStreamer:
                 self.ros.terminate()
 
 
-def create_cmd_velocity_listener(robot_id: str, host: str, port: int):
+def create_cmd_velocity_listener(
+    robot_id: str,
+    host: str,
+    port: int,
+    log_fn: Callable[[str], None],
+    max_attempts: int = 30,
+) -> Optional[tuple[roslibpy.Ros, roslibpy.Topic, Dict[str, float]]]:
     if roslibpy is None:
+        log_fn("roslibpy unavailable; cmd_vel listener disabled")
         return None
-    ros = roslibpy.Ros(host=host, port=port, is_secure=False)
-    try:
-        ros.run()
-    except Exception:
-        return None
-    for _ in range(100):
-        if ros.is_connected:
+    ros: Optional[roslibpy.Ros] = None
+    for attempt in range(1, max_attempts + 1):
+        log_fn(f"connecting to cmd_vel on rosbridge attempt {attempt}/{max_attempts}")
+        candidate = roslibpy.Ros(host=host, port=port, is_secure=False)
+        try:
+            candidate.run()
+        except Exception as exc:
+            log_fn(f"failed to connect to rosbridge for cmd_vel: {exc}")
+            time.sleep(1.0)
+            continue
+        for _ in range(100):
+            if candidate.is_connected:
+                break
+            time.sleep(0.1)
+        if candidate.is_connected:
+            ros = candidate
             break
-        time.sleep(0.05)
-    if not ros.is_connected:
-        ros.terminate()
+        log_fn("rosbridge unreachable for cmd_vel; retrying in 1s")
+        time.sleep(1.0)
+    if ros is None or not ros.is_connected:
+        log_fn("cmd_vel listener failed after repeated attempts")
         return None
 
     latest = {"linear": 0.0, "angular": 0.0, "timestamp": 0.0}
@@ -153,6 +178,7 @@ def create_cmd_velocity_listener(robot_id: str, host: str, port: int):
         "geometry_msgs/msg/Twist",
     )
     topic.subscribe(_callback)
+    log_fn("subscribed to cmd_vel")
 
     return ros, topic, latest
 
@@ -165,13 +191,15 @@ def main() -> None:
     robot_id = args.get("ROBOT_ID", robot.getName())
     ros_host = os.getenv("ROS_BRIDGE_HOST", "localhost")
     ros_port = int(os.getenv("ROS_BRIDGE_PORT", "9090"))
-    api_base = (
-        os.getenv("API_BASE_URL")
-        or os.getenv("API_BASE")
-        or "http://localhost:8081/api"
-    )
-    camera_streamer = CameraStreamer(robot_id, ros_host, ros_port, api_base)
-    cmd_listener = create_cmd_velocity_listener(robot_id, ros_host, ros_port)
+    log = build_logger(robot_id)
+    camera_streamer: CameraStreamer | None = None
+    while camera_streamer is None:
+        try:
+            camera_streamer = CameraStreamer(robot_id, ros_host, ros_port, log)
+        except RuntimeError as exc:
+            log(f"camera streamer init failed: {exc}; retrying in 2s")
+            time.sleep(2.0)
+    cmd_listener = create_cmd_velocity_listener(robot_id, ros_host, ros_port, log)
 
     timestep = int(robot.getBasicTimeStep())
     left_motor = robot.getDevice("left wheel motor")

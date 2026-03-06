@@ -1,6 +1,5 @@
 fastapi
 uvicorn[standard]
-httpx
 roslibpy
 pydantic
 pydantic[email]

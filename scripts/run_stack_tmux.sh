@@ -29,7 +29,7 @@ tmux select-window -t "${SESSION_NAME}":ros-core
 
 cat <<EOF
 Started tmux session '${SESSION_NAME}' with windows:
-  [ros-core] rosbridge + proxy
+  [ros-core] rosbridge + camera_forwarder
   [sim]      Webots arena
   [api]      FastAPI gateway
   [web]      Static dashboard server

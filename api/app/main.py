@@ -1,14 +1,13 @@
 import asyncio
-import base64
 import contextlib
+import base64
+import binascii
 import json
 import logging
 import secrets
-import time
 from datetime import datetime, timedelta
 from typing import Any, Dict, Optional, Tuple, TypeVar
 
-import httpx
 import numpy as np
 import roslibpy
 from aiortc import RTCPeerConnection, RTCSessionDescription, VideoStreamTrack
@@ -76,8 +75,7 @@ class SeedBotConfig(BaseModel):
 class Settings(BaseSettings):
     ros_bridge_host: str = Field("localhost", alias="ROS_BRIDGE_HOST")
     ros_bridge_port: int = Field(9090, alias="ROS_BRIDGE_PORT")
-    ros_proxy_url: str = Field("http://ros-core:8080/authorize", alias="ROS_PROXY_URL")
-    ros_proxy_key: str = Field("local-dev-key", alias="ROS_PROXY_KEY")
+    ros_push_key: str = Field("local-dev-key", alias="ROS_PUSH_KEY")
     gateway_name: str = Field("gateway-1", alias="GATEWAY_NAME")
     cors_allow_origins: list[str] = Field(default_factory=lambda: ["*"], alias="CORS_ALLOW_ORIGINS")
     database_url: str = Field("postgresql+asyncpg://robot:robot@localhost:5432/robotarena", alias="DATABASE_URL")
@@ -149,9 +147,7 @@ async def get_session() -> AsyncSession:
 logger = logging.getLogger("gateway")
 logging.basicConfig(level=logging.INFO)
 frame_queues: Dict[str, asyncio.Queue[Tuple[int, int, bytes]]] = {}
-latest_frames: Dict[str, Dict[str, float]] = {}
 peer_connections: set[RTCPeerConnection] = set()
-camera_subscriptions: Dict[str, roslibpy.Topic] = {}
 
 app = FastAPI(title="Robot Gateway API", version="0.1.0")
 app.add_middleware(
@@ -172,17 +168,18 @@ class TwistCommand(BaseModel):
     angular_z: float = 0.0
 
 
-class RobotFramePayload(BaseModel):
-    width: int
-    height: int
-    format: str = "bgra"
-    image: str  # base64
-    sim_time: Optional[float] = None
-
-
 class WebRTCOffer(BaseModel):
     sdp: str
     type: str
+
+
+class FramePayload(BaseModel):
+    width: int
+    height: int
+    encoding: str
+    data: str
+    stamp_sec: int | None = None
+    stamp_nanosec: int | None = None
 
 
 class UserOut(BaseModel):
@@ -503,7 +500,7 @@ async def apply_seed_data() -> None:
                     owner_email,
                 )
                 continue
-            desired_key = entry.access_key or settings.ros_proxy_key or secrets.token_urlsafe(16)
+            desired_key = entry.access_key or settings.ros_push_key or secrets.token_urlsafe(16)
             result = await session.execute(select(Lobby).where(Lobby.name == entry.name))
             lobby = result.scalar_one_or_none()
             if not lobby:
@@ -600,19 +597,6 @@ async def apply_seed_data() -> None:
         await session.commit()
 
 
-async def ensure_proxy_access() -> None:
-    """Hit the ROS proxy to prove this gateway is allowed to publish."""
-    if not settings.ros_proxy_url:
-        return
-    headers = {"x-api-key": settings.ros_proxy_key} if settings.ros_proxy_key else {}
-    try:
-        async with httpx.AsyncClient(timeout=5) as client:
-            resp = await client.get(settings.ros_proxy_url, headers=headers)
-            resp.raise_for_status()
-    except httpx.HTTPError as exc:
-        logger.warning("Skipping proxy authorization check: %s", exc)
-
-
 async def ros_client() -> roslibpy.Ros:
     ros: roslibpy.Ros | None = getattr(app.state, "ros_client", None)
     if ros is None or not ros.is_connected:
@@ -622,7 +606,6 @@ async def ros_client() -> roslibpy.Ros:
 
 @app.on_event("startup")
 async def startup_event() -> None:
-    await ensure_proxy_access()
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     await apply_seed_data()
@@ -665,10 +648,6 @@ async def shutdown_event() -> None:
     if ros:
         ros.terminate()
         logger.info("Disconnected from ROS bridge")
-    for topic in camera_subscriptions.values():
-        with contextlib.suppress(Exception):
-            topic.unsubscribe()
-    camera_subscriptions.clear()
     for pc in list(peer_connections):
         await pc.close()
     peer_connections.clear()
@@ -706,6 +685,26 @@ async def send_cmd_vel(robot_id: str, cmd: TwistCommand, ros: roslibpy.Ros = Dep
     return {"robot": robot_id, "status": "queued"}
 
 
+@app.post("/api/internal/frames/{robot_id}")
+async def ingest_camera_frame(
+    robot_id: str,
+    payload: FramePayload,
+    x_api_key: str = Header(default=""),
+) -> dict[str, Any]:
+    if settings.ros_push_key and x_api_key != settings.ros_push_key:
+        raise HTTPException(status_code=403, detail="invalid push key")
+    try:
+        image_bytes = base64.b64decode(payload.data)
+    except binascii.Error as exc:
+        raise HTTPException(status_code=400, detail=f"invalid frame payload: {exc}") from exc
+    queue = get_frame_queue(robot_id)
+    if queue.full():
+        with contextlib.suppress(asyncio.QueueEmpty):
+            queue.get_nowait()
+    queue.put_nowait((payload.width, payload.height, image_bytes))
+    return {"robot": robot_id, "status": "queued"}
+
+
 @app.websocket("/api/ws/{robot_id}")
 async def websocket_proxy(websocket: WebSocket, robot_id: str) -> None:
     await websocket.accept()
@@ -723,26 +722,8 @@ async def websocket_proxy(websocket: WebSocket, robot_id: str) -> None:
         logger.info("Client disconnected from %s WS", robot_id)
 
 
-@app.post("/api/robots/{robot_id}/frame")
-async def ingest_frame(robot_id: str, payload: RobotFramePayload) -> dict[str, str]:
-    try:
-        image_bytes = base64.b64decode(payload.image)
-    except base64.binascii.Error as exc:
-        raise HTTPException(status_code=400, detail="invalid base64 image") from exc
-    queue = get_frame_queue(robot_id)
-    if queue.full():
-        try:
-            queue.get_nowait()
-        except asyncio.QueueEmpty:
-            pass
-    await queue.put((payload.width, payload.height, image_bytes))
-    record_frame_info(robot_id, payload.sim_time)
-    return {"status": "accepted"}
-
-
 @app.post("/api/robots/{robot_id}/webrtc")
 async def start_webrtc(robot_id: str, offer: WebRTCOffer) -> dict[str, str]:
-    ensure_camera_subscription(robot_id)
     queue = get_frame_queue(robot_id)
     if queue.empty():
         logger.warning("No frames received yet for %s; WebRTC stream may be blank", robot_id)
@@ -763,23 +744,6 @@ async def start_webrtc(robot_id: str, offer: WebRTCOffer) -> dict[str, str]:
     return {"sdp": pc.localDescription.sdp, "type": pc.localDescription.type}
 
 
-@app.get("/api/robots/{robot_id}/frame_info")
-async def frame_info(
-    robot_id: str,
-    current_user: User = Depends(get_current_user),
-) -> dict[str, Any]:
-    info = latest_frames.get(robot_id)
-    if not info:
-        raise HTTPException(status_code=404, detail="no frame data")
-    now = time.time()
-    age = now - info["received_at"]
-    queue = frame_queues.get(robot_id)
-    return {
-        "sim_time": info["sim_time"],
-        "received_at": info["received_at"],
-        "age": age,
-        "queue_size": queue.qsize() if queue else 0,
-    }
 def get_frame_queue(robot_id: str) -> asyncio.Queue[Tuple[int, int, bytes]]:
     if robot_id not in frame_queues:
         frame_queues[robot_id] = asyncio.Queue(maxsize=1)
@@ -794,56 +758,8 @@ class RobotVideoTrack(VideoStreamTrack):
     async def recv(self) -> VideoFrame:
         queue = get_frame_queue(self.robot_id)
         width, height, payload = await queue.get()
+        logger.info("RobotVideoTrack sending frame for %s: %sx%s", self.robot_id, width, height)
         array = np.frombuffer(payload, dtype=np.uint8).reshape((height, width, 4))
         frame = VideoFrame.from_ndarray(array, format="bgra")
         frame.pts, frame.time_base = await self.next_timestamp()
         return frame
-
-
-def ensure_camera_subscription(robot_id: str) -> None:
-    if robot_id in camera_subscriptions:
-        return
-    ros: roslibpy.Ros | None = getattr(app.state, "ros_client", None)
-    if ros is None or not ros.is_connected:
-        logger.warning("ROS bridge unavailable; cannot subscribe to %s camera", robot_id)
-        return
-    topic_name = f"/{robot_id}/camera/image_raw"
-    topic = roslibpy.Topic(ros, topic_name, "sensor_msgs/msg/Image")
-
-    def _callback(message: Dict[str, Any]) -> None:
-        width = message.get("width")
-        height = message.get("height")
-        data = message.get("data")
-        stamp = message.get("header", {}).get("stamp", {})
-        sim_time = None
-        if stamp:
-            sec = stamp.get("sec")
-            nsec = stamp.get("nanosec")
-            if sec is not None and nsec is not None:
-                sim_time = float(sec) + float(nsec) / 1e9
-        if width is None or height is None or data is None:
-            return
-        try:
-            image_bytes = bytes(data)
-        except (TypeError, ValueError):
-            return
-        queue = get_frame_queue(robot_id)
-        if queue.full():
-            with contextlib.suppress(asyncio.QueueEmpty):
-                queue.get_nowait()
-        queue.put_nowait((width, height, image_bytes))
-        record_frame_info(robot_id, sim_time)
-
-    try:
-        topic.subscribe(_callback)
-        camera_subscriptions[robot_id] = topic
-        logger.info("Subscribed to %s camera topic", topic_name)
-    except Exception as exc:  # pragma: no cover - rosbridge errors
-        logger.warning("Failed to subscribe to %s: %s", topic_name, exc)
-
-
-def record_frame_info(robot_id: str, sim_time: Optional[float]) -> None:
-    latest_frames[robot_id] = {
-        "sim_time": sim_time if sim_time is not None else -1.0,
-        "received_at": time.time(),
-    }

@@ -19,14 +19,16 @@ Experiment with creating a dashboard to remotely control simulated robots:
   - `GET /api/bots` → list every registered bot along with its lobby/owner metadata
   - `POST /api/bots` → register a bot (name + ROS namespace) under a lobby you own
 - The dashboard now includes a bot management card plus a dropdown in the teleop panel so you can pick a registered bot namespace (or fall back to manual entry).
-- The gateway can seed users, lobbies, and bots from JSON provided via `SEED_USERS_JSON` / `SEED_LOBBIES_JSON` / `SEED_BOTS_JSON`. The default compose file seeds `dmn322` / `TEST123!`, a `ros-core` lobby whose `access_key` reuses the shared `ROS_LOBBY_KEY` env var (fed into both `ROS_PROXY_KEYS` on ros-core and `ROS_PROXY_KEY` on the API), and two bots (`bot_alpha`, `bot_beta`) that match the simulated robots. Example:
+- The gateway can seed users, lobbies, and bots from JSON provided via `SEED_USERS_JSON` / `SEED_LOBBIES_JSON` / `SEED_BOTS_JSON`. The default compose file seeds `dmn322` / `TEST123!`, a `ros-core` lobby whose `access_key` reuses the shared `ROS_PUSH_KEY` env var (fed into both the ROS camera forwarder and `ROS_PUSH_KEY` on the API), and two bots (`bot_alpha`, `bot_beta`) that match the simulated robots. Example:
 
 ```bash
-export ROS_LOBBY_KEY=super-secret
+export ROS_PUSH_KEY=super-secret
 export SEED_USERS_JSON='[{"email":"dmn322","password":"TEST123!"}]'
-export SEED_LOBBIES_JSON='[{"name":"ros-core","ros_host":"ros-core","ros_port":9090,"description":"Default ROS core lobby","access_key":"'"$ROS_LOBBY_KEY"'","owner_email":"dmn322"}]'
+export SEED_LOBBIES_JSON='[{"name":"ros-core","ros_host":"ros-core","ros_port":9090,"description":"Default ROS core lobby","access_key":"'"$ROS_PUSH_KEY"'","owner_email":"dmn322"}]'
 export SEED_BOTS_JSON='[{"name":"Arena Bot Alpha","ros_namespace":"bot_alpha","lobby_name":"ros-core","owner_email":"dmn322"},{"name":"Arena Bot Beta","ros_namespace":"bot_beta","lobby_name":"ros-core","owner_email":"dmn322"}]'
 ```
+- The `ros-core` service runs `rosbridge_server` plus a `camera_forwarder` ROS 2 node. The node subscribes to `CAMERA_NAMESPACES` (comma-separated list of robot namespaces) and pushes base64 frames to `API_PUSH_URL` using `ROS_PUSH_KEY` for authentication.
+- The `sim` service is wired to `ros-core` via `ROS_BRIDGE_HOST=ros-core` / `ROS_BRIDGE_PORT=9090` so its controllers publish frames over rosbridge without any manual tweaks.
 
 ## Data flow & stack
 
@@ -37,7 +39,8 @@ flowchart LR
     end
 
     subgraph ROSCore
-        R[rosbridge_server + proxy]
+        R[rosbridge_server]
+        F[CameraForwarder node]
     end
 
     subgraph Gateway
@@ -49,7 +52,8 @@ flowchart LR
     end
 
     W -- sensor_msgs/Image --> R
-    R -- ROS bridge WebSocket --> A
+    R -- ROS bridge WebSocket --> F
+    F -- HTTP frame push --> A
     A -- WebRTC video track --> B
     B -- REST/WebSocket commands --> A
     A -- cmd_vel via rosbridge --> R
