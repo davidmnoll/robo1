@@ -23,6 +23,10 @@ provider "google" {
   region  = var.region
 }
 
+data "google_project" "project" {
+  project_id = var.project_id
+}
+
 locals {
   required_services = [
     "appengineflex.googleapis.com",
@@ -153,6 +157,12 @@ resource "google_project_iam_member" "default_service_registry_reader" {
   member  = "serviceAccount:${var.project_id}@appspot.gserviceaccount.com"
 }
 
+resource "google_project_iam_member" "compute_service_registry_reader" {
+  project = var.project_id
+  role    = "roles/storage.objectViewer"
+  member  = "serviceAccount:${data.google_project.project.number}-compute@developer.gserviceaccount.com"
+}
+
 resource "google_app_engine_flexible_app_version" "api" {
   project         = var.project_id
   service         = var.app_engine_service_name
@@ -203,6 +213,7 @@ resource "google_app_engine_flexible_app_version" "api" {
     google_project_iam_member.app_cloudsql_client,
     google_project_iam_member.app_logs_writer,
     google_project_iam_member.app_registry_reader,
-    google_project_iam_member.default_service_registry_reader
+    google_project_iam_member.default_service_registry_reader,
+    google_project_iam_member.compute_service_registry_reader
   ]
 }
