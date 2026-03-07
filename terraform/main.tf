@@ -253,3 +253,15 @@ resource "google_app_engine_flexible_app_version" "api" {
     google_project_iam_member.gae_service_agent_artifact_registry_reader
   ]
 }
+
+resource "google_app_engine_service_split_traffic" "default" {
+  service         = var.app_engine_service_name
+  migrate_traffic = true
+  split {
+    allocations = {
+      "${google_app_engine_flexible_app_version.api.version_id}" = 1.0
+    }
+  }
+
+  depends_on = [google_app_engine_flexible_app_version.api]
+}
