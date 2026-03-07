@@ -28,8 +28,8 @@ bridge:
 	$(ROS_SETUP) && ros2 launch rosbridge_server rosbridge_websocket_launch.xml
 
 web:
-	@echo "Starting web server at http://localhost:8000"
-	cd web && python3 -m http.server 8000
+	@echo "Starting Vite dev server at http://localhost:4173"
+	cd web && ./run.sh
 
 controller:
 	$(ROS_SETUP) && python3 src/simple_controller.py

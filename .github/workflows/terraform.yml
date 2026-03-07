@@ -200,19 +200,30 @@ jobs:
           CLOUD_RUN_URL=$(terraform output -raw cloud_run_url)
           echo "cloud_run_url=${CLOUD_RUN_URL}" >> "${GITHUB_ENV}"
 
-      - name: Prepare dashboard artifact
+      - name: Install dashboard dependencies
+        working-directory: web
+        run: npm ci
+
+      - name: Build dashboard
+        working-directory: web
+        env:
+          cloud_run_url: ${{ env.cloud_run_url }}
         run: |
           set -euo pipefail
           if [ -z "${cloud_run_url:-}" ]; then
-            echo "Cloud Run URL missing; cannot inject API base" >&2
+            echo "Cloud Run URL missing; cannot build dashboard" >&2
             exit 1
           fi
+          API_BASE="${cloud_run_url%/}/api"
+          echo "Building dashboard with API base ${API_BASE}"
+          VITE_API_BASE_URL="${API_BASE}" npm run build
+
+      - name: Prepare dashboard artifact
+        run: |
+          set -euo pipefail
           DEPLOY_DIR=dashboard-dist
           rm -rf "${DEPLOY_DIR}"
-          cp -R web/public "${DEPLOY_DIR}"
-          API_BASE="${cloud_run_url%/}/api"
-          sed -i "s|__API_BASE_URL__|${API_BASE}|g" "${DEPLOY_DIR}/index.html"
-          echo "Injected API base ${API_BASE}"
+          cp -R web/dist "${DEPLOY_DIR}"
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3

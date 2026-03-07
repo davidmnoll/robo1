@@ -5,6 +5,13 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="robot-gateway-api-base" content="__API_BASE_URL__">
     <title>Robot Arena Dashboard</title>
+    <script type="module">
+      const meta = document.querySelector('meta[name="robot-gateway-api-base"]');
+      const injected = import.meta.env?.VITE_API_BASE_URL;
+      if (meta && injected && injected !== '__API_BASE_URL__') {
+        meta.setAttribute('content', injected);
+      }
+    </script>
     <style>
       :root {
         color-scheme: dark;
