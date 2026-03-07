@@ -35,6 +35,7 @@ export SEED_BOTS_JSON='[{"name":"Arena Bot Alpha","ros_namespace":"bot_alpha","l
 ```
 - The `ros-core` service runs `rosbridge_server` plus a bridge node that pushes camera frames and opens an authenticated WebSocket to `/api/internal/ws/lobbies` for command delivery. Set `API_BASE_URL` (default `http://robot-gateway:8080/api`) and `ROS_PUSH_KEY` so the node can authenticate when hitting `/api/internal/*` endpoints.
 - The `sim` service still connects to rosbridge via `ROS_BRIDGE_HOST=ros-core` / `ROS_BRIDGE_PORT=9090`, but the API no longer needs public rosbridge credentials because robots initiate every connection.
+- Need to run the Webots arena locally with the GUI (e.g., to debug camera angles)? Use `make -f sim/Makefile.remote remote-sim API_URL=https://<gateway>/api LOBBY_KEY=<key>` after installing Webots + ROS 2 on your machine. The command starts the ROS bridge + camera forwarder locally and launches the `battle_arena.wbt` world so your robots attach to the supplied lobby.
 
 ## Data flow & stack
 

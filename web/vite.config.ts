@@ -4,7 +4,10 @@ import { resolve } from 'node:path';
 const rootDir = resolve(__dirname, 'public');
 const outDir = resolve(__dirname, 'dist');
 
+const basePath = process.env.VITE_BASE_PATH || '/';
+
 export default defineConfig({
+  base: basePath,
   root: rootDir,
   publicDir: false,
   build: {

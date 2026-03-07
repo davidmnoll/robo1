@@ -1,0 +1,43 @@
+ROOT_DIR := $(abspath $(dir $(lastword $(MAKEFILE_LIST)))/..)
+WEBOTS_WORLD ?= $(ROOT_DIR)/sim/worlds/battle_arena.wbt
+ROS_RUN := $(ROOT_DIR)/ros/run.sh
+ROS_BRIDGE_HOST ?= 127.0.0.1
+ROS_BRIDGE_PORT ?= 9090
+CAMERA_NAMESPACES ?= bot_alpha,bot_beta
+API_URL ?=
+LOBBY_KEY ?=
+
+.PHONY: remote-sim
+remote-sim:
+	@bash -c 'set -euo pipefail; \
+		if [ -z "$(API_URL)" ]; then \
+			echo "API_URL is required (e.g. https://your-gateway-url/api)" >&2; exit 1; \
+		fi; \
+		if [ -z "$(LOBBY_KEY)" ]; then \
+			echo "LOBBY_KEY is required (copy it from the dashboard)" >&2; exit 1; \
+		fi; \
+		if [ ! -f "$(WEBOTS_WORLD)" ]; then \
+			echo "World file $(WEBOTS_WORLD) not found" >&2; exit 1; \
+		fi; \
+		if ! command -v webots >/dev/null 2>&1; then \
+			echo "webots executable not found in PATH. Install Webots locally." >&2; exit 1; \
+		fi; \
+		API_BASE="$${API_URL%/}"; \
+		echo "[remote-sim] Connecting to $${API_BASE} with lobby key"; \
+		export API_BASE_URL="$${API_BASE}"; \
+		export API_PUSH_URL="$${API_BASE}/internal/frames"; \
+		export ROS_PUSH_KEY="$(LOBBY_KEY)"; \
+		export CAMERA_NAMESPACES="$(CAMERA_NAMESPACES)"; \
+		export ROS_BRIDGE_PORT="$(ROS_BRIDGE_PORT)"; \
+		"$(ROS_RUN)" >/tmp/remote-sim-ros.log 2>&1 & \
+		ROS_PID=$$!; \
+		trap "kill $$ROS_PID >/dev/null 2>&1 || true" EXIT INT TERM; \
+		echo "[remote-sim] rosbridge + camera forwarder starting (PID $$ROS_PID)"; \
+		sleep 3; \
+		export WEBOTS_DISABLE_GRAPHICS=0; \
+		unset QT_QPA_PLATFORM; \
+		export ROS_BRIDGE_HOST="$(ROS_BRIDGE_HOST)"; \
+		export ROS_BRIDGE_PORT="$(ROS_BRIDGE_PORT)"; \
+		echo "[remote-sim] Launching Webots GUI with world $(WEBOTS_WORLD)"; \
+		webots "$(WEBOTS_WORLD)"; \
+		echo "[remote-sim] Webots exited. Shutting down rosbridge..."'
