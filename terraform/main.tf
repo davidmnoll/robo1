@@ -135,7 +135,6 @@ resource "google_app_engine_flexible_app_version" "api" {
   service         = var.app_engine_service_name
   version_id      = var.app_engine_version_id
   runtime         = "custom"
-  env             = "flex"
   service_account = google_service_account.api_runner.email
 
   deployment {
@@ -145,13 +144,21 @@ resource "google_app_engine_flexible_app_version" "api" {
   }
 
   resources {
-    cpu          = var.app_engine_cpu
-    memory_gb    = var.app_engine_memory_gb
-    disk_size_gb = var.app_engine_disk_size_gb
+    cpu       = var.app_engine_cpu
+    memory_gb = var.app_engine_memory_gb
+    disk_gb   = var.app_engine_disk_size_gb
   }
 
   manual_scaling {
     instances = 1
+  }
+
+  liveness_check {
+    path = "/api/health"
+  }
+
+  readiness_check {
+    path = "/api/health"
   }
 
   env_variables = local.app_engine_env
