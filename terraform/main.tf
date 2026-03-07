@@ -34,7 +34,8 @@ locals {
     "sqladmin.googleapis.com",
     "compute.googleapis.com",
     "iam.googleapis.com",
-    "containerregistry.googleapis.com"
+    "containerregistry.googleapis.com",
+    "artifactregistry.googleapis.com"
   ]
 
   cloud_sql_instance_name   = coalesce(var.cloud_sql_instance_name, "${var.project_id}-api-db")
@@ -151,9 +152,21 @@ resource "google_project_iam_member" "app_registry_reader" {
   member  = "serviceAccount:${google_service_account.api_runner.email}"
 }
 
+resource "google_project_iam_member" "app_artifact_registry_reader" {
+  project = var.project_id
+  role    = "roles/artifactregistry.reader"
+  member  = "serviceAccount:${google_service_account.api_runner.email}"
+}
+
 resource "google_project_iam_member" "default_service_registry_reader" {
   project = var.project_id
   role    = "roles/storage.objectViewer"
+  member  = "serviceAccount:${var.project_id}@appspot.gserviceaccount.com"
+}
+
+resource "google_project_iam_member" "default_service_artifact_registry_reader" {
+  project = var.project_id
+  role    = "roles/artifactregistry.reader"
   member  = "serviceAccount:${var.project_id}@appspot.gserviceaccount.com"
 }
 
@@ -163,9 +176,21 @@ resource "google_project_iam_member" "compute_service_registry_reader" {
   member  = "serviceAccount:${data.google_project.project.number}-compute@developer.gserviceaccount.com"
 }
 
+resource "google_project_iam_member" "compute_service_artifact_registry_reader" {
+  project = var.project_id
+  role    = "roles/artifactregistry.reader"
+  member  = "serviceAccount:${data.google_project.project.number}-compute@developer.gserviceaccount.com"
+}
+
 resource "google_project_iam_member" "gae_service_agent_registry_reader" {
   project = var.project_id
   role    = "roles/storage.objectViewer"
+  member  = "serviceAccount:service-${data.google_project.project.number}@gae-api-prod.google.com.iam.gserviceaccount.com"
+}
+
+resource "google_project_iam_member" "gae_service_agent_artifact_registry_reader" {
+  project = var.project_id
+  role    = "roles/artifactregistry.reader"
   member  = "serviceAccount:service-${data.google_project.project.number}@gae-api-prod.google.com.iam.gserviceaccount.com"
 }
 
@@ -219,8 +244,12 @@ resource "google_app_engine_flexible_app_version" "api" {
     google_project_iam_member.app_cloudsql_client,
     google_project_iam_member.app_logs_writer,
     google_project_iam_member.app_registry_reader,
+    google_project_iam_member.app_artifact_registry_reader,
     google_project_iam_member.default_service_registry_reader,
+    google_project_iam_member.default_service_artifact_registry_reader,
     google_project_iam_member.compute_service_registry_reader,
-    google_project_iam_member.gae_service_agent_registry_reader
+    google_project_iam_member.compute_service_artifact_registry_reader,
+    google_project_iam_member.gae_service_agent_registry_reader,
+    google_project_iam_member.gae_service_agent_artifact_registry_reader
   ]
 }
