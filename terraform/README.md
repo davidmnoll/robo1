@@ -4,10 +4,10 @@ This directory provisions the managed stack that hosts the FastAPI gateway plus 
 
 ### Resources
 
-- Enables core Google APIs (`run.googleapis.com`, `sqladmin.googleapis.com`, `compute.googleapis.com`, `iam.googleapis.com`)
+- Enables core Google APIs (App Engine Flex, Cloud SQL, IAM, Artifact Registry)
 - Cloud SQL for PostgreSQL 15 (instance + database + user/password)
-- Cloud Run service for the API container (public unauthenticated ingress)
-- Service account that Cloud Run uses to talk to Cloud SQL
+- App Engine Flexible service for the API container (public ingress, UDP-capable)
+- Service account that App Engine uses to talk to Cloud SQL
 
 ### Prerequisites
 
@@ -27,4 +27,4 @@ terraform plan -var="project_id=robo1-489405" -var="region=us-central1"
 terraform apply
 ```
 
-Outputs include the Cloud Run URL, Cloud SQL connection name, and generated database credentials. These values feed the ROS camera forwarder (API base URL + lobby key) and any other consumers (e.g., analytics jobs).
+Outputs include the App Engine URL, Cloud SQL connection name, and generated database credentials. These values feed the ROS camera forwarder (API base URL + lobby key) and any other consumers (e.g., analytics jobs).

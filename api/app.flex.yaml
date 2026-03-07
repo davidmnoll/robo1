@@ -1,0 +1,30 @@
+runtime: custom
+env: flex
+service: robot-gateway
+
+# Adjust resources / scaling to your workload.
+resources:
+  cpu: 1
+  memory_gb: 2
+  disk_size_gb: 10
+
+automatic_scaling:
+  min_num_instances: 1
+  max_num_instances: 2
+
+env_variables:
+  # Replace the values below before deploying.
+  DATABASE_URL: "postgresql+asyncpg://robot:robot@/robotarena?host=/cloudsql/PROJECT:REGION:INSTANCE"
+  SECRET_KEY: "change-me"
+  ACCESS_TOKEN_EXPIRE_MINUTES: "60"
+  ROS_PUSH_KEY: "local-dev-key"
+  GATEWAY_NAME: "gateway-flex"
+  CORS_ALLOW_ORIGINS: '["*"]'
+  # Optional JSON seeds (keep empty unless seeding data)
+  SEED_USERS_JSON: ""
+  SEED_LOBBIES_JSON: ""
+  SEED_BOTS_JSON: ""
+
+beta_settings:
+  # Replace with your Cloud SQL connection name.
+  cloud_sql_instances: "PROJECT:REGION:INSTANCE"

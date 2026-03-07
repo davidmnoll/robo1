@@ -1,11 +1,11 @@
-output "cloud_run_url" {
-  description = "Public URL for the deployed API service"
-  value       = google_cloud_run_service.api.status[0].url
+output "app_engine_url" {
+  description = "Public URL for the deployed App Engine service"
+  value       = var.app_engine_service_name == "default" ? "https://${google_app_engine_application.app.default_hostname}" : "https://${var.app_engine_service_name}-dot-${google_app_engine_application.app.default_hostname}"
 }
 
-output "cloud_run_service_name" {
-  description = "Name of the Cloud Run service"
-  value       = google_cloud_run_service.api.name
+output "app_engine_service_name" {
+  description = "Name of the App Engine service"
+  value       = var.app_engine_service_name
 }
 
 output "db_instance_connection_name" {

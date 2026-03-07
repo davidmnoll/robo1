@@ -23,9 +23,21 @@ provider "google" {
   region  = var.region
 }
 
+resource "google_app_engine_application" "app" {
+  project     = var.project_id
+  location_id = var.app_engine_location
+
+  lifecycle {
+    prevent_destroy = true
+  }
+
+  depends_on = [google_project_service.enabled]
+}
+
 locals {
   required_services = [
-    "run.googleapis.com",
+    "appengineflex.googleapis.com",
+    "appengine.googleapis.com",
     "sqladmin.googleapis.com",
     "compute.googleapis.com",
     "iam.googleapis.com",
@@ -33,12 +45,24 @@ locals {
   ]
 
   cloud_sql_instance_name   = coalesce(var.cloud_sql_instance_name, "${var.project_id}-api-db")
-  cloud_run_service_name    = coalesce(var.cloud_run_service_name, "robot-gateway")
   cloud_sql_connection_name = "${var.project_id}:${var.region}:${local.cloud_sql_instance_name}"
   db_name                   = coalesce(var.db_name, "robotarena")
   db_user                   = coalesce(var.db_user, "robot")
   database_url              = "postgresql+asyncpg://${local.db_user}:${random_password.db_password.result}@/${local.db_name}?host=/cloudsql/${local.cloud_sql_connection_name}"
   cors_allow_origins_json   = jsonencode(var.cors_allow_origins)
+  env_seed_overrides = { for item in [
+    { key = "SEED_USERS_JSON", value = var.seed_users_json },
+    { key = "SEED_LOBBIES_JSON", value = var.seed_lobbies_json },
+    { key = "SEED_BOTS_JSON", value = var.seed_bots_json },
+  ] : item.key => item.value if length(trimspace(item.value)) > 0 }
+  app_engine_env = merge({
+    DATABASE_URL                = local.database_url
+    SECRET_KEY                  = random_password.api_secret_key.result
+    ACCESS_TOKEN_EXPIRE_MINUTES = tostring(var.access_token_expire_minutes)
+    ROS_PUSH_KEY                = var.ros_push_key
+    GATEWAY_NAME                = var.gateway_name
+    CORS_ALLOW_ORIGINS          = local.cors_allow_origins_json
+  }, local.env_seed_overrides)
 }
 
 resource "google_project_service" "enabled" {
@@ -63,10 +87,11 @@ resource "random_password" "api_secret_key" {
 }
 
 resource "google_sql_database_instance" "postgres" {
-  name             = local.cloud_sql_instance_name
-  project          = var.project_id
-  database_version = "POSTGRES_15"
-  region           = var.region
+  name                = local.cloud_sql_instance_name
+  project             = var.project_id
+  database_version    = "POSTGRES_15"
+  region              = var.region
+  deletion_protection = var.db_deletion_protection
 
   settings {
     tier = var.db_instance_tier
@@ -95,109 +120,53 @@ resource "google_sql_user" "app" {
 
 resource "google_service_account" "api_runner" {
   account_id   = "robot-gateway"
-  display_name = "Robot gateway Cloud Run"
+  display_name = "Robot gateway App Engine"
   project      = var.project_id
 }
 
-resource "google_project_iam_member" "run_cloudsql_client" {
+resource "google_project_iam_member" "app_cloudsql_client" {
   project = var.project_id
   role    = "roles/cloudsql.client"
   member  = "serviceAccount:${google_service_account.api_runner.email}"
 }
 
-resource "google_cloud_run_service" "api" {
-  name     = local.cloud_run_service_name
-  location = var.region
-  project  = var.project_id
+resource "google_app_engine_flexible_app_version" "api" {
+  project         = var.project_id
+  service         = var.app_engine_service_name
+  version_id      = var.app_engine_version_id
+  runtime         = "custom"
+  env             = "flex"
+  service_account = google_service_account.api_runner.email
 
-  metadata {
-    annotations = {
-      "run.googleapis.com/ingress" = "all"
+  deployment {
+    container {
+      image = var.api_image
     }
   }
 
-  template {
-    metadata {
-      annotations = {
-        "run.googleapis.com/cloudsql-instances" = local.cloud_sql_connection_name
-      }
-    }
-
-    spec {
-      service_account_name = google_service_account.api_runner.email
-      containers {
-        image = var.api_image
-
-        env {
-          name  = "DATABASE_URL"
-          value = local.database_url
-        }
-
-        env {
-          name  = "SECRET_KEY"
-          value = random_password.api_secret_key.result
-        }
-
-        env {
-          name  = "ACCESS_TOKEN_EXPIRE_MINUTES"
-          value = tostring(var.access_token_expire_minutes)
-        }
-
-        env {
-          name  = "ROS_PUSH_KEY"
-          value = var.ros_push_key
-        }
-
-        env {
-          name  = "GATEWAY_NAME"
-          value = var.gateway_name
-        }
-
-        env {
-          name  = "CORS_ALLOW_ORIGINS"
-          value = local.cors_allow_origins_json
-        }
-
-        dynamic "env" {
-          for_each = { for k, v in {
-            SEED_USERS_JSON   = var.seed_users_json
-            SEED_LOBBIES_JSON = var.seed_lobbies_json
-            SEED_BOTS_JSON    = var.seed_bots_json
-          } : k => v if length(trimspace(v)) > 0 }
-
-          content {
-            name  = env.key
-            value = env.value
-          }
-        }
-
-        resources {
-          limits = {
-            cpu    = var.cloud_run_cpu
-            memory = var.cloud_run_memory
-          }
-        }
-      }
-    }
+  resources {
+    cpu          = var.app_engine_cpu
+    memory_gb    = var.app_engine_memory_gb
+    disk_size_gb = var.app_engine_disk_size_gb
   }
 
-  traffic {
-    percent         = 100
-    latest_revision = true
+  manual_scaling {
+    instances = 1
+  }
+
+  env_variables = local.app_engine_env
+
+  beta_settings = {
+    "cloud_sql_instances" = local.cloud_sql_connection_name
+  }
+
+  lifecycle {
+    create_before_destroy = true
   }
 
   depends_on = [
-    google_project_service.enabled,
+    google_app_engine_application.app,
     google_sql_database_instance.postgres,
-    google_project_iam_member.run_cloudsql_client
+    google_project_iam_member.app_cloudsql_client
   ]
-}
-
-resource "google_cloud_run_service_iam_member" "public_invoker" {
-  project  = google_cloud_run_service.api.project
-  location = google_cloud_run_service.api.location
-  service  = google_cloud_run_service.api.name
-  role     = "roles/run.invoker"
-  member   = "allUsers"
-  depends_on = [google_cloud_run_service.api]
 }

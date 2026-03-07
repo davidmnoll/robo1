@@ -5,9 +5,15 @@ variable "project_id" {
 }
 
 variable "region" {
-  description = "Primary region for Cloud Run and Cloud SQL"
+  description = "Primary region for App Engine Flex and Cloud SQL"
   type        = string
   default     = "us-central1"
+}
+
+variable "app_engine_location" {
+  description = "App Engine location (e.g. us-central). Only set once per project."
+  type        = string
+  default     = "us-central"
 }
 
 variable "api_image" {
@@ -16,22 +22,46 @@ variable "api_image" {
   default     = "gcr.io/robo1-489405/robot-gateway:latest"
 }
 
-variable "cloud_run_service_name" {
-  description = "Optional override for the Cloud Run service name"
+variable "app_engine_service_name" {
+  description = "App Engine service name (use default if you want appspot.com root)"
   type        = string
-  default     = null
+  default     = "robot-gateway"
 }
 
-variable "cloud_run_cpu" {
-  description = "CPU limit for the Cloud Run container (e.g. 1, 2)"
+variable "app_engine_version_id" {
+  description = "Version identifier for the App Engine Flex deployment"
   type        = string
-  default     = "1"
+  default     = "flex-v1"
 }
 
-variable "cloud_run_memory" {
-  description = "Memory limit for the Cloud Run container"
-  type        = string
-  default     = "1Gi"
+variable "app_engine_cpu" {
+  description = "vCPU count allocated to each App Engine Flex instance"
+  type        = number
+  default     = 1
+}
+
+variable "app_engine_memory_gb" {
+  description = "Memory (GB) allocated to each App Engine Flex instance"
+  type        = number
+  default     = 2
+}
+
+variable "app_engine_disk_size_gb" {
+  description = "Disk size (GB) allocated to each App Engine Flex instance"
+  type        = number
+  default     = 10
+}
+
+variable "app_engine_min_instances" {
+  description = "Minimum number of App Engine Flex instances to keep warm"
+  type        = number
+  default     = 1
+}
+
+variable "app_engine_max_instances" {
+  description = "Maximum number of App Engine Flex instances"
+  type        = number
+  default     = 1
 }
 
 variable "access_token_expire_minutes" {

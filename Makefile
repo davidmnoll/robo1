@@ -87,8 +87,11 @@ gcloud-resources:
 	set -euo pipefail; \
 	gcloud config set project "${PROJECT_ID}" >/dev/null; \
 	echo ""; \
-	echo "[Cloud Run services]"; \
-	gcloud run services list; \
+	echo "[App Engine services]"; \
+	gcloud app services list || true; \
+	echo ""; \
+	echo "[App Engine versions]"; \
+	gcloud app versions list || true; \
 	echo ""; \
 	echo "[Cloud SQL instances]"; \
 	gcloud sql instances list; \

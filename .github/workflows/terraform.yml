@@ -74,7 +74,7 @@ jobs:
     permissions:
       contents: read
     outputs:
-      cloud_run_url: ${{ steps.tf_outputs.outputs.cloud_run_url }}
+      gateway_url: ${{ steps.tf_outputs.outputs.gateway_url }}
 
     steps:
       - name: Checkout
@@ -149,8 +149,8 @@ jobs:
         working-directory: ${{ env.TF_WORKING_DIR }}
         run: |
           set -euo pipefail
-          CLOUD_RUN_URL=$(terraform output -raw cloud_run_url)
-          echo "cloud_run_url=${CLOUD_RUN_URL}" >> "${GITHUB_OUTPUT}"
+          GATEWAY_URL=$(terraform output -raw app_engine_url)
+          echo "gateway_url=${GATEWAY_URL}" >> "${GITHUB_OUTPUT}"
 
   deploy_dashboard:
     runs-on: ubuntu-latest
@@ -167,7 +167,7 @@ jobs:
       name: github-pages
       url: ${{ steps.deploy.outputs.page_url }}
     env:
-      CLOUD_RUN_URL: ${{ needs.terraform.outputs.cloud_run_url }}
+      GATEWAY_URL: ${{ needs.terraform.outputs.gateway_url }}
     concurrency:
       group: pages
       cancel-in-progress: true
@@ -186,20 +186,20 @@ jobs:
         with:
           terraform_version: 1.7.5
 
-      - name: Fetch Cloud Run URL
+      - name: Fetch gateway URL
         id: fetch_url
         env:
-          TERRAFORM_OUTPUT_URL: ${{ needs.terraform.outputs.cloud_run_url }}
+          TERRAFORM_OUTPUT_URL: ${{ needs.terraform.outputs.gateway_url }}
         working-directory: ${{ env.TF_WORKING_DIR }}
         run: |
           set -euo pipefail
           if [ -n "${TERRAFORM_OUTPUT_URL}" ]; then
-            echo "CLOUD_RUN_URL=${TERRAFORM_OUTPUT_URL}" >> "${GITHUB_ENV}"
+            echo "GATEWAY_URL=${TERRAFORM_OUTPUT_URL}" >> "${GITHUB_ENV}"
             exit 0
           fi
           terraform init -input=false >/dev/null
-          CLOUD_RUN_URL=$(terraform output -raw cloud_run_url)
-          echo "CLOUD_RUN_URL=${CLOUD_RUN_URL}" >> "${GITHUB_ENV}"
+          GATEWAY_URL=$(terraform output -raw app_engine_url)
+          echo "GATEWAY_URL=${GATEWAY_URL}" >> "${GITHUB_ENV}"
 
       - name: Install dashboard dependencies
         working-directory: web
@@ -208,15 +208,15 @@ jobs:
       - name: Build dashboard
         working-directory: web
         env:
-          CLOUD_RUN_URL: ${{ env.CLOUD_RUN_URL }}
+          GATEWAY_URL: ${{ env.GATEWAY_URL }}
           GITHUB_REPOSITORY: ${{ github.repository }}
         run: |
           set -euo pipefail
-          if [ -z "${CLOUD_RUN_URL:-}" ]; then
-            echo "Cloud Run URL missing; cannot build dashboard" >&2
+          if [ -z "${GATEWAY_URL:-}" ]; then
+            echo "Gateway URL missing; cannot build dashboard" >&2
             exit 1
           fi
-          API_BASE="${CLOUD_RUN_URL%/}/api"
+          API_BASE="${GATEWAY_URL%/}/api"
           REPO_NAME="${GITHUB_REPOSITORY#*/}"
           BASE_PATH="/${REPO_NAME}/"
           echo "Building dashboard with API base ${API_BASE} and base path ${BASE_PATH}"
