@@ -141,6 +141,12 @@ resource "google_project_iam_member" "app_logs_writer" {
   member  = "serviceAccount:${google_service_account.api_runner.email}"
 }
 
+resource "google_project_iam_member" "app_registry_reader" {
+  project = var.project_id
+  role    = "roles/storage.objectViewer"
+  member  = "serviceAccount:${google_service_account.api_runner.email}"
+}
+
 resource "google_app_engine_flexible_app_version" "api" {
   project         = var.project_id
   service         = var.app_engine_service_name
@@ -189,6 +195,7 @@ resource "google_app_engine_flexible_app_version" "api" {
   depends_on = [
     google_sql_database_instance.postgres,
     google_project_iam_member.app_cloudsql_client,
-    google_project_iam_member.app_logs_writer
+    google_project_iam_member.app_logs_writer,
+    google_project_iam_member.app_registry_reader
   ]
 }
