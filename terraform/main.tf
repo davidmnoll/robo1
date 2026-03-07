@@ -23,17 +23,6 @@ provider "google" {
   region  = var.region
 }
 
-resource "google_app_engine_application" "app" {
-  project     = var.project_id
-  location_id = var.app_engine_location
-
-  lifecycle {
-    prevent_destroy = true
-  }
-
-  depends_on = [google_project_service.enabled]
-}
-
 locals {
   required_services = [
     "appengineflex.googleapis.com",
@@ -172,7 +161,6 @@ resource "google_app_engine_flexible_app_version" "api" {
   }
 
   depends_on = [
-    google_app_engine_application.app,
     google_sql_database_instance.postgres,
     google_project_iam_member.app_cloudsql_client
   ]

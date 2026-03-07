@@ -12,11 +12,12 @@ This directory provisions the managed stack that hosts the FastAPI gateway plus 
 ### Prerequisites
 
 1. Create (once) a bucket for Terraform state: `gsutil mb -p <PROJECT_ID> gs://robo1-terraform-state`
-2. GitHub Actions automatically builds/pushes the API image to `gcr.io/${PROJECT_ID}/robot-gateway:${GITHUB_SHA}` before Terraform runs; if you apply locally, run `gcloud builds submit --tag gcr.io/${PROJECT_ID}/robot-gateway:$(git rev-parse HEAD) ./api` yourself.
-3. Configure application secrets:
+2. Initialize App Engine for the project (one-time): `gcloud app create --project=<PROJECT_ID> --region=us-central`
+3. GitHub Actions automatically builds/pushes the API image to `gcr.io/${PROJECT_ID}/robot-gateway:${GITHUB_SHA}` before Terraform runs; if you apply locally, run `gcloud builds submit --tag gcr.io/${PROJECT_ID}/robot-gateway:$(git rev-parse HEAD) ./api` yourself.
+4. Configure application secrets:
    - Set `ros_push_key` or override via `TF_VAR_ros_push_key`
    - Update `cors_allow_origins` to match your GitHub Pages domain
-4. Authenticate gcloud / Terraform with a service account that has Project Editor + Cloud SQL Admin permissions (the repo uses the `GCP_TERRAFORM_TOKEN` secret)
+5. Authenticate gcloud / Terraform with a service account that has Project Editor + Cloud SQL Admin permissions (the repo uses the `GCP_TERRAFORM_TOKEN` secret)
 
 ### Usage
 

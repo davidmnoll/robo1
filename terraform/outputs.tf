@@ -1,6 +1,6 @@
 output "app_engine_url" {
   description = "Public URL for the deployed App Engine service"
-  value       = var.app_engine_service_name == "default" ? "https://${google_app_engine_application.app.default_hostname}" : "https://${var.app_engine_service_name}-dot-${google_app_engine_application.app.default_hostname}"
+  value       = google_app_engine_flexible_app_version.api.version_url
 }
 
 output "app_engine_service_name" {
