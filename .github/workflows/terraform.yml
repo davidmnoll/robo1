@@ -158,8 +158,7 @@ jobs:
       - changes
       - terraform
     if: github.ref == 'refs/heads/main' &&
-        (needs.terraform.result == 'success' || needs.terraform.result == 'skipped') &&
-        (needs.changes.outputs.web == 'true' || needs.changes.outputs.api_or_tf == 'true' || github.event_name == 'workflow_dispatch')
+        (needs.terraform.result == 'success' || needs.terraform.result == 'skipped')
     permissions:
       contents: read
       pages: write
