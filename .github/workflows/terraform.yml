@@ -167,6 +167,8 @@ jobs:
     environment:
       name: github-pages
       url: ${{ steps.deploy.outputs.page_url }}
+    env:
+      CLOUD_RUN_URL: ${{ needs.terraform.outputs.cloud_run_url }}
     concurrency:
       group: pages
       cancel-in-progress: true
@@ -193,12 +195,12 @@ jobs:
         run: |
           set -euo pipefail
           if [ -n "${TERRAFORM_OUTPUT_URL}" ]; then
-            echo "cloud_run_url=${TERRAFORM_OUTPUT_URL}" >> "${GITHUB_ENV}"
+            echo "CLOUD_RUN_URL=${TERRAFORM_OUTPUT_URL}" >> "${GITHUB_ENV}"
             exit 0
           fi
           terraform init -input=false >/dev/null
           CLOUD_RUN_URL=$(terraform output -raw cloud_run_url)
-          echo "cloud_run_url=${CLOUD_RUN_URL}" >> "${GITHUB_ENV}"
+          echo "CLOUD_RUN_URL=${CLOUD_RUN_URL}" >> "${GITHUB_ENV}"
 
       - name: Install dashboard dependencies
         working-directory: web
@@ -207,15 +209,15 @@ jobs:
       - name: Build dashboard
         working-directory: web
         env:
-          cloud_run_url: ${{ env.cloud_run_url }}
+          CLOUD_RUN_URL: ${{ env.CLOUD_RUN_URL }}
           GITHUB_REPOSITORY: ${{ github.repository }}
         run: |
           set -euo pipefail
-          if [ -z "${cloud_run_url:-}" ]; then
+          if [ -z "${CLOUD_RUN_URL:-}" ]; then
             echo "Cloud Run URL missing; cannot build dashboard" >&2
             exit 1
           fi
-          API_BASE="${cloud_run_url%/}/api"
+          API_BASE="${CLOUD_RUN_URL%/}/api"
           REPO_NAME="${GITHUB_REPOSITORY#*/}"
           BASE_PATH="/${REPO_NAME}/"
           echo "Building dashboard with API base ${API_BASE} and base path ${BASE_PATH}"
