@@ -1241,7 +1241,7 @@ class RobotVideoTrack(VideoStreamTrack):
         )
         payload_size = len(payload)
         payload_channels = payload_size // max(width * height, 1)
-        logger.debug(
+        logger.info(
             "Frame payload size=%s channels=%s for %s",
             payload_size,
             payload_channels,
@@ -1255,7 +1255,7 @@ class RobotVideoTrack(VideoStreamTrack):
             )
             array = np.zeros((max(height, 1), max(width, 1), 4), dtype=np.uint8)
         else:
-            logger.debug(
+            logger.info(
                 "Frame decoded for %s into array shape %s dtype %s",
                 self.robot_id,
                 array.shape,
