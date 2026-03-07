@@ -79,7 +79,7 @@ variable "gateway_name" {
 variable "cors_allow_origins" {
   description = "List of allowed browser origins for CORS"
   type        = list(string)
-  default     = ["*"]
+  default     = ["https://davidmnoll.github.io"]
 }
 
 variable "seed_users_json" {
