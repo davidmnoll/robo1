@@ -41,7 +41,7 @@ variable "access_token_expire_minutes" {
 }
 
 variable "ros_push_key" {
-  description = "Shared secret the ROS camera forwarder will use when POSTing frames"
+  description = "Shared lobby key the ROS camera forwarder uses when POSTing frames"
   type        = string
   default     = "local-dev-key"
 }

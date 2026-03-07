@@ -5,6 +5,7 @@ import binascii
 import gzip
 import json
 import logging
+import os
 import secrets
 from collections import defaultdict
 from datetime import datetime, timedelta
@@ -74,7 +75,7 @@ class SeedBotConfig(BaseModel):
 
 
 class Settings(BaseSettings):
-    ros_push_key: str = Field("local-dev-key", alias="ROS_PUSH_KEY")
+    lobby_key: str = Field("local-dev-key", alias="ROS_PUSH_KEY")
     gateway_name: str = Field("gateway-1", alias="GATEWAY_NAME")
     cors_allow_origins: list[str] = Field(default_factory=lambda: ["*"], alias="CORS_ALLOW_ORIGINS")
     database_url: str = Field("postgresql+asyncpg://robot:robot@localhost:5432/robotarena", alias="DATABASE_URL")
@@ -88,6 +89,9 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+lobby_key_override = os.getenv("LOBBY_KEY")
+if lobby_key_override:
+    settings.lobby_key = lobby_key_override
 SeedModelT = TypeVar("SeedModelT", bound=BaseModel)
 
 
@@ -784,8 +788,8 @@ def parse_seed_entries(raw: Optional[str], model: type[SeedModelT], label: str) 
 
 
 def require_internal_api_key(provided: str) -> None:
-    if settings.ros_push_key and provided != settings.ros_push_key:
-        raise HTTPException(status_code=403, detail="invalid push key")
+    if settings.lobby_key and provided != settings.lobby_key:
+        raise HTTPException(status_code=403, detail="invalid lobby key")
 
 
 def update_robot_heartbeat(robot_id: str) -> None:
@@ -880,7 +884,7 @@ async def apply_seed_data() -> None:
                     owner_email,
                 )
                 continue
-            desired_key = entry.access_key or settings.ros_push_key or secrets.token_urlsafe(16)
+            desired_key = entry.access_key or settings.lobby_key or secrets.token_urlsafe(16)
             result = await session.execute(select(Lobby).where(Lobby.name == entry.name))
             lobby = result.scalar_one_or_none()
             if not lobby:

@@ -97,23 +97,8 @@ gcloud-resources:
 	gcloud artifacts repositories list || true
 
 cloud-sim:
-	@bash -c 'set -euo pipefail; \
-	API_URL="${CLOUD_RUN_API_URL}"; \
-	if [ -z "$${API_URL}" ] && [ -d terraform ]; then \
-	  API_URL=$$(cd terraform && terraform output -raw cloud_run_url 2>/dev/null || true); \
-	  if [ -n "$${API_URL}" ]; then \
-	    API_URL="$${API_URL%/}/api"; \
-	  fi; \
-	fi; \
-	if [ -z "$${API_URL}" ]; then \
-	  echo "Set CLOUD_RUN_API_URL to your Cloud Run API base (e.g. https://robot-gateway-.../api) or run terraform output first." >&2; exit 1; \
-	fi; \
-	export CLOUD_RUN_API_URL="$${API_URL%/}/api"; \
-	if [ -z "${CLOUD_RUN_LOBBY_KEY:-}" ]; then \
-	  echo "Set CLOUD_RUN_LOBBY_KEY to the lobby access key" >&2; exit 1; \
-	fi; \
 	echo "Starting ROS bridge + Webots sim against $$CLOUD_RUN_API_URL"; \
-	docker compose -f docker-compose.yaml -f docker-compose.cloud.yml up ros-core sim'
+	docker compose -f docker-compose.yaml -f docker-compose.cloud.yml up --build ros-core sim
 
 # Cleanup
 clean:

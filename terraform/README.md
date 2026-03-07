@@ -27,4 +27,4 @@ terraform plan -var="project_id=robo1-489405" -var="region=us-central1"
 terraform apply
 ```
 
-Outputs include the Cloud Run URL, Cloud SQL connection name, and generated database credentials. These values feed the ROS camera forwarder (`API_PUSH_URL`, `ROS_PUSH_KEY`) and any other consumers (e.g., analytics jobs).
+Outputs include the Cloud Run URL, Cloud SQL connection name, and generated database credentials. These values feed the ROS camera forwarder (API base URL + lobby key) and any other consumers (e.g., analytics jobs).

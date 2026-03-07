@@ -25,7 +25,6 @@ services:
       - ROS_DOMAIN_ID=0
       - CAMERA_NAMESPACES=bot_alpha,bot_beta
       - API_BASE_URL=http://robot-gateway:8080/api
-      - API_PUSH_URL=http://robot-gateway:8080/api/internal/frames
       - ROS_PUSH_KEY=${ROS_PUSH_KEY:-local-dev-key}
     ports:
       - "9090:9090" # rosbridge websocket

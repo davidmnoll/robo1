@@ -28,11 +28,11 @@ class RobotBridgeNode(Node):
             raise RuntimeError("CAMERA_NAMESPACES env var is empty; cannot forward streams")
 
         api_base = os.getenv("API_BASE_URL", "http://robot-gateway:8080/api").rstrip("/")
-        push_base = os.getenv("API_PUSH_URL", f"{api_base}/internal/frames").rstrip("/")
+        push_base = f"{api_base}/internal/frames"
         self.api_base = api_base
         self.command_base = f"{api_base}/internal/robots".rstrip("/")
         self.push_base_url = push_base
-        self.api_key = os.getenv("ROS_PUSH_KEY", "")
+        self.api_key = os.getenv("LOBBY_KEY") or os.getenv("ROS_PUSH_KEY", "")
         self.headers = {"x-api-key": self.api_key} if self.api_key else {}
         self.session = requests.Session()
         self.heartbeat_interval = float(os.getenv("COMMAND_HEARTBEAT_INTERVAL", "5"))

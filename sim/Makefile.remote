@@ -25,7 +25,6 @@ remote-sim:
 		API_BASE="$${API_URL%/}"; \
 		echo "[remote-sim] Connecting to $${API_BASE} with lobby key"; \
 		export API_BASE_URL="$${API_BASE}"; \
-		export API_PUSH_URL="$${API_BASE}/internal/frames"; \
 		export ROS_PUSH_KEY="$(LOBBY_KEY)"; \
 		export CAMERA_NAMESPACES="$(CAMERA_NAMESPACES)"; \
 		export ROS_BRIDGE_PORT="$(ROS_BRIDGE_PORT)"; \

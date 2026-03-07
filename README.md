@@ -25,7 +25,7 @@ Experiment with creating a dashboard to remotely control simulated robots:
   - `POST /api/internal/lobbies/{lobby_name}/online` with the lobby `access_key` simply validates ownership so bots can pair using the shared key.
   - Bridges push camera frames (gzip-compressed + base64) via `POST /api/internal/frames/{robot_namespace}` and maintain a persistent WebSocket connection to `/api/internal/ws/lobbies?api_key=...`. The API pushes queued velocity commands down that socket (tagged by robot namespace), and the bridge responds with `complete` messages after publishing to rosbridge. Heartbeats are also sent over the same WebSocket channel, so no extra polling endpoints are required.
 - The dashboard ships with lobby management and teleoperation views so owners can copy lobby keys, tweak privacy, and curate bots from the browser.
-- The gateway can seed users, lobbies, and bots from JSON provided via `SEED_USERS_JSON` / `SEED_LOBBIES_JSON` / `SEED_BOTS_JSON`. The default compose file seeds `dmn322` / `TEST123!`, a `ros-core` lobby whose `access_key` reuses the shared `ROS_PUSH_KEY` env var (fed into both the ROS camera forwarder and `ROS_PUSH_KEY` on the API), and two bots (`bot_alpha`, `bot_beta`) that match the simulated robots. Example:
+- The gateway can seed users, lobbies, and bots from JSON provided via `SEED_USERS_JSON` / `SEED_LOBBIES_JSON` / `SEED_BOTS_JSON`. The default compose file seeds `dmn322` / `TEST123!`, a `ros-core` lobby whose `access_key` reuses the shared lobby key env var (`ROS_PUSH_KEY`, also accepted as `LOBBY_KEY`), and two bots (`bot_alpha`, `bot_beta`) that match the simulated robots. Example:
 
 ```bash
 export ROS_PUSH_KEY=super-secret
@@ -33,7 +33,7 @@ export SEED_USERS_JSON='[{"email":"dmn322","password":"TEST123!"}]'
 export SEED_LOBBIES_JSON='[{"name":"ros-core","description":"Default ROS core lobby","access_key":"'"$ROS_PUSH_KEY"'","owner_email":"dmn322","is_public":true}]'
 export SEED_BOTS_JSON='[{"name":"Arena Bot Alpha","ros_namespace":"bot_alpha","lobby_name":"ros-core","owner_email":"dmn322"},{"name":"Arena Bot Beta","ros_namespace":"bot_beta","lobby_name":"ros-core","owner_email":"dmn322"}]'
 ```
-- The `ros-core` service runs `rosbridge_server` plus a bridge node that pushes camera frames and opens an authenticated WebSocket to `/api/internal/ws/lobbies` for command delivery. Set `API_BASE_URL` (default `http://robot-gateway:8080/api`) and `ROS_PUSH_KEY` so the node can authenticate when hitting `/api/internal/*` endpoints.
+- The `ros-core` service runs `rosbridge_server` plus a bridge node that pushes camera frames and opens an authenticated WebSocket to `/api/internal/ws/lobbies` for command delivery. Set `API_BASE_URL` (default `http://robot-gateway:8080/api`) and the lobby key (`ROS_PUSH_KEY` or `LOBBY_KEY`) so the node can authenticate when hitting `/api/internal/*` endpoints.
 - The `sim` service still connects to rosbridge via `ROS_BRIDGE_HOST=ros-core` / `ROS_BRIDGE_PORT=9090`, but the API no longer needs public rosbridge credentials because robots initiate every connection.
 - Need to run the Webots arena locally with the GUI (e.g., to debug camera angles)? Use `make -f sim/Makefile.remote remote-sim API_URL=https://<gateway>/api LOBBY_KEY=<key>` after installing Webots + ROS 2 on your machine. The command starts the ROS bridge + camera forwarder locally and launches the `battle_arena.wbt` world so your robots attach to the supplied lobby.
 
