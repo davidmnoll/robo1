@@ -255,7 +255,8 @@ resource "google_app_engine_flexible_app_version" "api" {
 }
 
 resource "google_app_engine_service_split_traffic" "default" {
-  service = var.app_engine_service_name
+  service          = var.app_engine_service_name
+  migrate_traffic  = false
   split {
     allocations = {
       "${google_app_engine_flexible_app_version.api.version_id}" = 1.0
