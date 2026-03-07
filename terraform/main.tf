@@ -66,7 +66,7 @@ locals {
     "asia-south1"     = "as.r.appspot.com"
   }
   app_engine_domain_suffix = lookup(local.region_host_suffix, var.region, "uc.r.appspot.com")
-  app_engine_url_prefix    = var.app_engine_service_name == "default" ? var.project_id : "${var.app_engine_service_name}-dot-${var.project_id}"
+  app_engine_url_prefix    = var.project_id
   app_engine_url           = "https://${local.app_engine_url_prefix}.${local.app_engine_domain_suffix}"
 }
 

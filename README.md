@@ -74,7 +74,7 @@ flowchart LR
 
 ## Cloud deployment
 
-- Infrastructure-as-code for the hosted API/database lives under `terraform/`. It provisions Cloud SQL + App Engine Flexible inside the `robo1-489405` project (Terraform pins the Flex service to a single always-on instance for predictable cost; tweak `app_engine_max_instances` if you need to scale out). Create the App Engine application once (`gcloud app create --project=... --region=us-central`) before running Terraform so the Flex versions can deploy.
+- Infrastructure-as-code for the hosted API/database lives under `terraform/`. It provisions Cloud SQL + App Engine Flexible inside the `robo1-489405` project (Terraform pins the Flex service to a single always-on instance for predictable cost; tweak `app_engine_max_instances` if you need to scale out). Create the App Engine application once (`gcloud app create --project=... --region=us-central`) before running Terraform so the default service exists.
 - Terraform state is stored in the `robo1-terraform-state` GCS bucket; the GitHub Actions workflow (`.github/workflows/terraform.yml`) ensures the bucket exists before running `terraform init`.
 - The workflow authenticates with the `GCP_TERRAFORM_TOKEN` secret (a JSON key for the Terraform service account), ensures the API container image (`gcr.io/robo1-489405/robot-gateway:${GITHUB_SHA}`) exists by building/pushing it when necessary, and automatically runs `terraform plan`/`apply` on pushes to `main`.
 - Customize runtime values (API image, CORS origins, ROS bridge host, etc.) via Terraform variables or environment overrides detailed in `terraform/README.md`.

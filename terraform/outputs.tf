@@ -1,6 +1,6 @@
 output "app_engine_url" {
   description = "Public URL for the deployed App Engine service"
-  value       = local.app_engine_url
+  value       = "https://${var.project_id}.${local.app_engine_domain_suffix}"
 }
 
 output "app_engine_service_name" {

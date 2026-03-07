@@ -22,12 +22,6 @@ variable "api_image" {
   default     = "gcr.io/robo1-489405/robot-gateway:latest"
 }
 
-variable "app_engine_service_name" {
-  description = "App Engine service name (use default if you want appspot.com root)"
-  type        = string
-  default     = "robot-gateway"
-}
-
 variable "app_engine_version_id" {
   description = "Version identifier for the App Engine Flex deployment"
   type        = string
@@ -140,4 +134,9 @@ variable "db_user" {
   description = "Application database user name"
   type        = string
   default     = null
+}
+variable "app_engine_service_name" {
+  description = "App Engine service name (first deploy must be 'default')"
+  type        = string
+  default     = "default"
 }
