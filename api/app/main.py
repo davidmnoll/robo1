@@ -2,14 +2,16 @@ import asyncio
 import contextlib
 import base64
 import binascii
+import gzip
 import json
 import logging
 import secrets
+from collections import defaultdict
 from datetime import datetime, timedelta
+from enum import Enum
 from typing import Any, Dict, Optional, Tuple, TypeVar
 
 import numpy as np
-import roslibpy
 from aiortc import RTCPeerConnection, RTCSessionDescription, VideoStreamTrack
 from av import VideoFrame
 from fastapi import Depends, FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
@@ -42,7 +44,7 @@ with contextlib.suppress(ImportError):
 from passlib.context import CryptContext
 from pydantic import BaseModel, Field, ValidationError, constr
 from pydantic_settings import BaseSettings
-from sqlalchemy import Column, DateTime, ForeignKey, Integer, String, Text, select
+from sqlalchemy import Boolean, Column, DateTime, Float, ForeignKey, Integer, String, Text, delete, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, relationship, selectinload
 
@@ -57,11 +59,10 @@ class SeedUserConfig(BaseModel):
 
 class SeedLobbyConfig(BaseModel):
     name: str
-    ros_host: str
-    ros_port: int
     description: Optional[str] = None
     access_key: Optional[str] = None
     owner_email: IdentifierStr
+    is_public: bool = False
 
 
 class SeedBotConfig(BaseModel):
@@ -73,8 +74,6 @@ class SeedBotConfig(BaseModel):
 
 
 class Settings(BaseSettings):
-    ros_bridge_host: str = Field("localhost", alias="ROS_BRIDGE_HOST")
-    ros_bridge_port: int = Field(9090, alias="ROS_BRIDGE_PORT")
     ros_push_key: str = Field("local-dev-key", alias="ROS_PUSH_KEY")
     gateway_name: str = Field("gateway-1", alias="GATEWAY_NAME")
     cors_allow_origins: list[str] = Field(default_factory=lambda: ["*"], alias="CORS_ALLOW_ORIGINS")
@@ -84,6 +83,8 @@ class Settings(BaseSettings):
     seed_users_json: Optional[str] = Field(None, alias="SEED_USERS_JSON")
     seed_lobbies_json: Optional[str] = Field(None, alias="SEED_LOBBIES_JSON")
     seed_bots_json: Optional[str] = Field(None, alias="SEED_BOTS_JSON")
+    heartbeat_timeout_seconds: int = Field(30, alias="HEARTBEAT_TIMEOUT_SECONDS")
+    command_retention_seconds: int = Field(120, alias="COMMAND_RETENTION_SECONDS")
 
 
 settings = Settings()
@@ -121,6 +122,8 @@ class Lobby(Base):
     access_key = Column(String(255), nullable=False, unique=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     owner_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    is_public = Column(Boolean, nullable=False, default=False, server_default=text("false"))
+    is_deleted = Column(Boolean, nullable=False, default=False, server_default=text("false"))
 
     owner = relationship("User", back_populates="lobbies")
     bots = relationship("Bot", back_populates="lobby", cascade="all, delete-orphan")
@@ -135,8 +138,28 @@ class Bot(Base):
     description = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     lobby_id = Column(Integer, ForeignKey("lobbies.id"), nullable=False)
+    is_deleted = Column(Boolean, nullable=False, default=False, server_default=text("false"))
 
     lobby = relationship("Lobby", back_populates="bots")
+
+
+class RobotCommand(Base):
+    __tablename__ = "robot_commands"
+
+    id = Column(Integer, primary_key=True, index=True)
+    robot_namespace = Column(String(255), nullable=False, index=True)
+    linear_x = Column(Float, nullable=False, default=0.0)
+    linear_y = Column(Float, nullable=False, default=0.0)
+    linear_z = Column(Float, nullable=False, default=0.0)
+    angular_x = Column(Float, nullable=False, default=0.0)
+    angular_y = Column(Float, nullable=False, default=0.0)
+    angular_z = Column(Float, nullable=False, default=0.0)
+    status = Column(String(32), nullable=False, default="pending")
+    requested_by = Column(String(255), nullable=True)
+    message = Column(String(512), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    claimed_at = Column(DateTime, nullable=True)
+    completed_at = Column(DateTime, nullable=True)
 
 
 async def get_session() -> AsyncSession:
@@ -148,6 +171,11 @@ logger = logging.getLogger("gateway")
 logging.basicConfig(level=logging.INFO)
 frame_queues: Dict[str, asyncio.Queue[Tuple[int, int, bytes]]] = {}
 peer_connections: set[RTCPeerConnection] = set()
+active_robot_streams: Dict[str, set[str]] = defaultdict(set)
+robot_heartbeats: Dict[str, datetime] = {}
+command_subscribers: Dict[str, set[WebSocket]] = defaultdict(set)
+websocket_robot_map: Dict[int, set[str]] = {}
+command_ws_lock = asyncio.Lock()
 
 app = FastAPI(title="Robot Gateway API", version="0.1.0")
 app.add_middleware(
@@ -180,6 +208,7 @@ class FramePayload(BaseModel):
     data: str
     stamp_sec: int | None = None
     stamp_nanosec: int | None = None
+    compressed: bool = False
 
 
 class UserOut(BaseModel):
@@ -208,10 +237,15 @@ class LobbyOnlineRequest(BaseModel):
 
 
 class LobbyCreate(BaseModel):
-    name: str
-    ros_host: str
-    ros_port: int
+    name: constr(min_length=1, strip_whitespace=True)
     description: Optional[str] = None
+    is_public: bool = False
+
+
+class LobbyUpdate(BaseModel):
+    name: Optional[constr(min_length=1, strip_whitespace=True)] = None
+    description: Optional[str] = None
+    is_public: Optional[bool] = None
 
 
 class BotCreate(BaseModel):
@@ -221,15 +255,23 @@ class BotCreate(BaseModel):
     description: Optional[str] = None
 
 
+class BotUpdate(BaseModel):
+    name: Optional[constr(min_length=1, strip_whitespace=True)] = None
+    ros_namespace: Optional[constr(min_length=1, strip_whitespace=True)] = None
+    description: Optional[str] = None
+
+
 class LobbyOut(BaseModel):
     id: int
     name: str
-    ros_host: str
-    ros_port: int
     description: Optional[str]
     access_key: Optional[str]
     owner_email: IdentifierStr
     created_at: datetime
+    is_public: bool
+    is_deleted: bool
+    is_owner: bool
+    bot_count: int
 
 
 class BotOut(BaseModel):
@@ -241,6 +283,38 @@ class BotOut(BaseModel):
     lobby_name: str
     owner_email: IdentifierStr
     created_at: datetime
+    is_deleted: bool
+    active_streamers: list[str]
+
+
+class LobbyDetailOut(LobbyOut):
+    bots: list[BotOut]
+
+
+class RobotCommandOut(BaseModel):
+    id: int
+    robot_namespace: str
+    linear_x: float
+    linear_y: float
+    linear_z: float
+    angular_x: float
+    angular_y: float
+    angular_z: float
+    status: str
+    requested_by: Optional[str]
+    message: Optional[str]
+    created_at: datetime
+    claimed_at: Optional[datetime]
+    completed_at: Optional[datetime]
+
+
+class RobotCommandDelivery(BaseModel):
+    command: Optional[RobotCommandOut]
+
+
+class RobotCommandComplete(BaseModel):
+    status: Optional[str] = None
+    message: Optional[str] = None
 
 
 async def get_current_user(
@@ -297,9 +371,14 @@ async def list_lobbies(
     current_user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
-    result = await session.execute(
-        select(Lobby).options(selectinload(Lobby.owner)).order_by(Lobby.created_at.desc())
+    stmt = (
+        select(Lobby)
+            .options(selectinload(Lobby.owner), selectinload(Lobby.bots))
+            .where(Lobby.is_deleted.is_(False))
+            .where(or_(Lobby.is_public.is_(True), Lobby.owner_id == current_user.id))
+            .order_by(Lobby.created_at.desc())
     )
+    result = await session.execute(stmt)
     lobbies = result.scalars().all()
     return {"items": [lobby_to_out(lobby, current_user) for lobby in lobbies]}
 
@@ -312,18 +391,82 @@ async def create_lobby(
 ) -> LobbyOut:
     access_key = secrets.token_urlsafe(16)
     lobby = Lobby(
-        name=payload.name,
-        ros_host=payload.ros_host,
-        ros_port=payload.ros_port,
+        name=payload.name.strip(),
+        ros_host="internal",
+        ros_port=0,
         description=payload.description,
         access_key=access_key,
         owner_id=current_user.id,
+        is_public=payload.is_public,
     )
     session.add(lobby)
     await session.commit()
     await session.refresh(lobby)
     lobby.owner = current_user
     return lobby_to_out(lobby, current_user)
+
+
+@app.get("/api/lobbies/{lobby_id}", response_model=LobbyDetailOut)
+async def get_lobby_detail(
+    lobby_id: int,
+    current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+) -> LobbyDetailOut:
+    stmt = (
+        select(Lobby)
+        .options(selectinload(Lobby.owner), selectinload(Lobby.bots).selectinload(Bot.lobby))
+        .where(Lobby.id == lobby_id)
+    )
+    result = await session.execute(stmt)
+    lobby = result.scalar_one_or_none()
+    if not lobby or lobby.is_deleted:
+        raise HTTPException(status_code=404, detail="Lobby not found")
+    if not lobby.is_public and lobby.owner_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Lobby is private")
+    return lobby_detail_to_out(lobby, current_user)
+
+
+@app.patch("/api/lobbies/{lobby_id}", response_model=LobbyOut)
+async def update_lobby(
+    lobby_id: int,
+    payload: LobbyUpdate,
+    current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+) -> LobbyOut:
+    lobby = await session.get(Lobby, lobby_id)
+    if not lobby or lobby.is_deleted:
+        raise HTTPException(status_code=404, detail="Lobby not found")
+    if lobby.owner_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Only the lobby owner can update")
+    if payload.name is not None:
+        lobby.name = payload.name.strip()
+    if payload.description is not None:
+        lobby.description = payload.description
+    if payload.is_public is not None:
+        lobby.is_public = payload.is_public
+    await session.commit()
+    await session.refresh(lobby)
+    await session.refresh(lobby, attribute_names=["owner", "bots"])
+    return lobby_to_out(lobby, current_user)
+
+
+@app.delete("/api/lobbies/{lobby_id}")
+async def delete_lobby(
+    lobby_id: int,
+    current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, str]:
+    lobby = await session.get(Lobby, lobby_id)
+    if not lobby or lobby.is_deleted:
+        raise HTTPException(status_code=404, detail="Lobby not found")
+    if lobby.owner_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Only the lobby owner can delete")
+    lobby.is_deleted = True
+    await session.refresh(lobby, attribute_names=["bots"])
+    for bot in lobby.bots:
+        bot.is_deleted = True
+    await session.commit()
+    return {"status": "deleted"}
 
 
 @app.get("/api/bots")
@@ -336,6 +479,8 @@ async def list_bots(
         select(Bot)
         .options(selectinload(Bot.lobby).selectinload(Lobby.owner))
         .order_by(Bot.created_at.desc())
+        .where(Bot.is_deleted.is_(False))
+        .where(Bot.lobby.has(Lobby.is_deleted.is_(False)))
     )
     if lobby_id is not None:
         query = query.where(Bot.lobby_id == lobby_id)
@@ -360,19 +505,74 @@ async def create_bot(
         raise HTTPException(status_code=403, detail="Only the lobby owner can register bots")
     normalized_namespace = payload.ros_namespace.strip()
     existing = await session.execute(select(Bot).where(Bot.ros_namespace == normalized_namespace))
-    if existing.scalar_one_or_none():
+    bot = existing.scalar_one_or_none()
+    if bot and not bot.is_deleted:
         raise HTTPException(status_code=400, detail="ROS namespace already registered")
-    bot = Bot(
-        name=payload.name.strip(),
-        ros_namespace=normalized_namespace,
-        description=payload.description,
-        lobby_id=lobby.id,
-    )
-    session.add(bot)
+    if bot and bot.is_deleted:
+        bot.name = payload.name.strip()
+        bot.description = payload.description
+        bot.lobby_id = lobby.id
+        bot.is_deleted = False
+    else:
+        bot = Bot(
+            name=payload.name.strip(),
+            ros_namespace=normalized_namespace,
+            description=payload.description,
+            lobby_id=lobby.id,
+        )
+        session.add(bot)
     await session.commit()
     await session.refresh(bot)
     bot.lobby = lobby
     return bot_to_out(bot)
+
+
+@app.patch("/api/bots/{bot_id}", response_model=BotOut)
+async def update_bot(
+    bot_id: int,
+    payload: BotUpdate,
+    current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+) -> BotOut:
+    bot = await session.get(Bot, bot_id)
+    if not bot or bot.is_deleted:
+        raise HTTPException(status_code=404, detail="Bot not found")
+    lobby = await session.get(Lobby, bot.lobby_id)
+    if not lobby or lobby.owner_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Only the lobby owner can update bots")
+    if payload.name is not None:
+        bot.name = payload.name.strip()
+    if payload.description is not None:
+        bot.description = payload.description
+    if payload.ros_namespace is not None:
+        new_ns = payload.ros_namespace.strip()
+        if new_ns != bot.ros_namespace:
+            existing = await session.execute(select(Bot).where(Bot.ros_namespace == new_ns))
+            ns_bot = existing.scalar_one_or_none()
+            if ns_bot and ns_bot.id != bot.id:
+                raise HTTPException(status_code=400, detail="ROS namespace already registered")
+            bot.ros_namespace = new_ns
+    await session.commit()
+    await session.refresh(bot)
+    bot.lobby = lobby
+    return bot_to_out(bot)
+
+
+@app.delete("/api/bots/{bot_id}")
+async def delete_bot(
+    bot_id: int,
+    current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, str]:
+    bot = await session.get(Bot, bot_id)
+    if not bot or bot.is_deleted:
+        raise HTTPException(status_code=404, detail="Bot not found")
+    lobby = await session.get(Lobby, bot.lobby_id)
+    if not lobby or lobby.owner_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Only the lobby owner can delete bots")
+    bot.is_deleted = True
+    await session.commit()
+    return {"status": "deleted"}
 
 
 @app.post("/api/internal/lobbies/{lobby_name}/online")
@@ -381,20 +581,16 @@ async def register_lobby_online(
     payload: LobbyOnlineRequest,
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
-    stmt = select(Lobby).where(Lobby.name == lobby_name)
+    stmt = select(Lobby).options(selectinload(Lobby.bots)).where(Lobby.name == lobby_name)
     result = await session.execute(stmt)
     lobby = result.scalar_one_or_none()
-    if lobby is None:
+    if lobby is None or lobby.is_deleted:
         raise HTTPException(status_code=404, detail="Lobby not found")
     if lobby.access_key != payload.access_key:
         raise HTTPException(status_code=403, detail="Invalid lobby key")
-    task: asyncio.Task | None = getattr(app.state, "ros_monitor_task", None)
-    if task is None or task.done():
-        if task and task.done() and task.exception():
-            logger.warning("Previous ROS monitor task ended with error: %s", task.exception())
-        logger.info("Received lobby %s online notification; starting ROS monitor", lobby_name)
-        app.state.ros_monitor_task = asyncio.create_task(monitor_ros_connection())
-    return {"status": "monitoring", "lobby": lobby_name}
+    for bot in lobby.bots:
+        update_robot_heartbeat(bot.ros_namespace)
+    return {"status": "acknowledged", "lobby": lobby_name}
 
 
 def user_to_out(user: User) -> UserOut:
@@ -428,22 +624,36 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -
 def lobby_to_out(lobby: Lobby, current_user: User) -> LobbyOut:
     owner_email = lobby.owner.email if lobby.owner else ""
     key = lobby.access_key if lobby.owner_id == current_user.id else None
+    bots = getattr(lobby, "bots", []) or []
+    bot_count = sum(1 for bot in bots if not getattr(bot, "is_deleted", False))
+    is_owner = lobby.owner_id == current_user.id
     return LobbyOut(
         id=lobby.id,
         name=lobby.name,
-        ros_host=lobby.ros_host,
-        ros_port=lobby.ros_port,
         description=lobby.description,
         access_key=key,
         owner_email=owner_email,
         created_at=lobby.created_at,
+        is_public=bool(lobby.is_public),
+        is_deleted=bool(lobby.is_deleted),
+        is_owner=is_owner,
+        bot_count=bot_count,
     )
+
+
+def lobby_detail_to_out(lobby: Lobby, current_user: User) -> LobbyDetailOut:
+    base = lobby_to_out(lobby, current_user)
+    bots = [bot_to_out(bot) for bot in getattr(lobby, "bots", []) if not bot.is_deleted]
+    data = base.model_dump()
+    data["bots"] = bots
+    return LobbyDetailOut(**data)
 
 
 def bot_to_out(bot: Bot) -> BotOut:
     lobby = bot.lobby
     owner_email = lobby.owner.email if lobby and lobby.owner else ""
     lobby_name = lobby.name if lobby else ""
+    active = sorted(active_robot_streams.get(bot.ros_namespace, set()))
     return BotOut(
         id=bot.id,
         name=bot.name,
@@ -453,7 +663,102 @@ def bot_to_out(bot: Bot) -> BotOut:
         lobby_name=lobby_name,
         owner_email=owner_email,
         created_at=bot.created_at,
+        is_deleted=bool(bot.is_deleted),
+        active_streamers=active,
     )
+
+
+def robot_command_to_out(command: RobotCommand) -> RobotCommandOut:
+    return RobotCommandOut(
+        id=command.id,
+        robot_namespace=command.robot_namespace,
+        linear_x=command.linear_x,
+        linear_y=command.linear_y,
+        linear_z=command.linear_z,
+        angular_x=command.angular_x,
+        angular_y=command.angular_y,
+        angular_z=command.angular_z,
+        status=command.status,
+        requested_by=command.requested_by,
+        message=command.message,
+        created_at=command.created_at,
+        claimed_at=command.claimed_at,
+        completed_at=command.completed_at,
+    )
+
+
+async def cleanup_completed_commands(session: AsyncSession, robot_id: str) -> None:
+    cutoff = datetime.utcnow() - timedelta(seconds=settings.command_retention_seconds)
+    await session.execute(
+        delete(RobotCommand)
+        .where(RobotCommand.robot_namespace == robot_id)
+        .where(RobotCommand.status == "completed")
+        .where(RobotCommand.completed_at.isnot(None))
+        .where(RobotCommand.completed_at < cutoff)
+    )
+
+
+async def register_robot_ws(websocket: WebSocket, robots: list[str]) -> None:
+    if not robots:
+        return
+    async with command_ws_lock:
+        ws_id = id(websocket)
+        entry = websocket_robot_map.setdefault(ws_id, set())
+        for robot in robots:
+            command_subscribers[robot].add(websocket)
+            entry.add(robot)
+
+
+async def unregister_robot_ws(websocket: WebSocket) -> None:
+    ws_id = id(websocket)
+    async with command_ws_lock:
+        subscribed = websocket_robot_map.pop(ws_id, set())
+        for robot in subscribed:
+            sockets = command_subscribers.get(robot)
+            if not sockets:
+                continue
+            sockets.discard(websocket)
+            if not sockets:
+                command_subscribers.pop(robot, None)
+
+
+async def broadcast_robot_command(command: RobotCommand) -> None:
+    payload = {
+        "type": "command",
+        "robot": command.robot_namespace,
+        "command": robot_command_to_out(command).model_dump(mode="json"),
+    }
+    async with command_ws_lock:
+        sockets = list(command_subscribers.get(command.robot_namespace, set()))
+    for websocket in sockets:
+        try:
+            await websocket.send_json(payload)
+        except RuntimeError:
+            # websocket likely closed; cleanup asynchronously
+            await unregister_robot_ws(websocket)
+        except Exception:
+            await unregister_robot_ws(websocket)
+
+
+async def send_pending_commands_to_connection(websocket: WebSocket, robots: list[str]) -> None:
+    if not robots:
+        return
+    async with AsyncSessionLocal() as session:
+        for robot in robots:
+            result = await session.execute(
+                select(RobotCommand)
+                .where(RobotCommand.robot_namespace == robot)
+                .where(RobotCommand.status == "pending")
+                .order_by(RobotCommand.created_at.asc())
+            )
+            for command in result.scalars():
+                await websocket.send_json(
+                    {
+                        "type": "command",
+                        "robot": robot,
+                        "command": robot_command_to_out(command).model_dump(mode="json"),
+                    }
+                )
 
 
 def parse_seed_entries(raw: Optional[str], model: type[SeedModelT], label: str) -> list[SeedModelT]:
@@ -476,6 +781,15 @@ def parse_seed_entries(raw: Optional[str], model: type[SeedModelT], label: str) 
     return entries
 
 
+def require_internal_api_key(provided: str) -> None:
+    if settings.ros_push_key and provided != settings.ros_push_key:
+        raise HTTPException(status_code=403, detail="invalid push key")
+
+
+def update_robot_heartbeat(robot_id: str) -> None:
+    robot_heartbeats[robot_id] = datetime.utcnow()
+
+
 def seed_users_config() -> list[SeedUserConfig]:
     return parse_seed_entries(settings.seed_users_json, SeedUserConfig, "SEED_USERS_JSON")
 
@@ -494,6 +808,21 @@ async def prepare_database(max_attempts: int = 60, delay: int = 5) -> None:
         try:
             async with engine.begin() as conn:
                 await conn.run_sync(Base.metadata.create_all)
+                await conn.execute(
+                    text(
+                        "ALTER TABLE lobbies ADD COLUMN IF NOT EXISTS is_public BOOLEAN NOT NULL DEFAULT false"
+                    )
+                )
+                await conn.execute(
+                    text(
+                        "ALTER TABLE lobbies ADD COLUMN IF NOT EXISTS is_deleted BOOLEAN NOT NULL DEFAULT false"
+                    )
+                )
+                await conn.execute(
+                    text(
+                        "ALTER TABLE bots ADD COLUMN IF NOT EXISTS is_deleted BOOLEAN NOT NULL DEFAULT false"
+                    )
+                )
             logger.info("Database connection established after %s attempt(s)", attempt + 1)
             break
         except Exception as exc:  # pragma: no cover - startup diagnostics
@@ -555,11 +884,12 @@ async def apply_seed_data() -> None:
             if not lobby:
                 lobby = Lobby(
                     name=entry.name,
-                    ros_host=entry.ros_host,
-                    ros_port=entry.ros_port,
                     description=entry.description,
                     access_key=desired_key,
                     owner_id=owner.id,
+                    ros_host="internal",
+                    ros_port=0,
+                    is_public=entry.is_public,
                 )
                 session.add(lobby)
                 logger.info("Seeded lobby %s", entry.name)
@@ -568,14 +898,14 @@ async def apply_seed_data() -> None:
                 if lobby.owner_id != owner.id:
                     lobby.owner_id = owner.id
                     changed = True
-                if lobby.ros_host != entry.ros_host:
-                    lobby.ros_host = entry.ros_host
-                    changed = True
-                if lobby.ros_port != entry.ros_port:
-                    lobby.ros_port = entry.ros_port
-                    changed = True
                 if lobby.description != entry.description:
                     lobby.description = entry.description
+                    changed = True
+                if lobby.is_public != entry.is_public:
+                    lobby.is_public = entry.is_public
+                    changed = True
+                if lobby.is_deleted:
+                    lobby.is_deleted = False
                     changed = True
                 if desired_key and lobby.access_key != desired_key:
                     lobby.access_key = desired_key
@@ -641,36 +971,22 @@ async def apply_seed_data() -> None:
                 if bot.lobby_id != lobby.id:
                     bot.lobby_id = lobby.id
                     changed = True
+                if bot.is_deleted:
+                    bot.is_deleted = False
+                    changed = True
                 if changed:
                     logger.info("Synchronized seed bot %s", entry.name)
         await session.commit()
-
-
-async def ros_client() -> roslibpy.Ros:
-    ros: roslibpy.Ros | None = getattr(app.state, "ros_client", None)
-    if ros is None or not ros.is_connected:
-        raise HTTPException(status_code=503, detail="ROS bridge unavailable")
-    return ros
 
 
 @app.on_event("startup")
 async def startup_event() -> None:
     await prepare_database()
     await apply_seed_data()
-    app.state.ros_monitor_task = None
 
 
 @app.on_event("shutdown")
 async def shutdown_event() -> None:
-    monitor: asyncio.Task | None = getattr(app.state, "ros_monitor_task", None)
-    if monitor:
-        monitor.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await monitor
-    ros: roslibpy.Ros | None = getattr(app.state, "ros_client", None)
-    if ros:
-        ros.terminate()
-        logger.info("Disconnected from ROS bridge")
     for pc in list(peer_connections):
         await pc.close()
     peer_connections.clear()
@@ -678,34 +994,42 @@ async def shutdown_event() -> None:
 
 @app.get("/api/health")
 async def health() -> dict[str, Any]:
-    ros: roslibpy.Ros | None = getattr(app.state, "ros_client", None)
+    now = datetime.utcnow()
+    timeout = timedelta(seconds=settings.heartbeat_timeout_seconds)
+    active = [robot for robot, ts in robot_heartbeats.items() if now - ts < timeout]
     return {
         "status": "ok",
-        "ros_connected": bool(ros and ros.is_connected),
+        "ros_connected": bool(active),
         "gateway": settings.gateway_name,
+        "active_robots": active,
     }
 
-
-def publish_twist(ros: roslibpy.Ros, robot_id: str, cmd: TwistCommand) -> None:
-    topic_name = f"/{robot_id}/cmd_vel"
-    ros_topic = roslibpy.Topic(
-        ros,
-        topic_name,
-        "geometry_msgs/msg/Twist",
+@app.post("/api/robots/{robot_id}/cmd_vel", response_model=RobotCommandOut)
+async def send_cmd_vel(
+    robot_id: str,
+    cmd: TwistCommand,
+    current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+) -> RobotCommandOut:
+    namespace = robot_id.strip()
+    if not namespace:
+        raise HTTPException(status_code=400, detail="robot namespace required")
+    command = RobotCommand(
+        robot_namespace=namespace,
+        linear_x=cmd.linear_x,
+        linear_y=cmd.linear_y,
+        linear_z=cmd.linear_z,
+        angular_x=cmd.angular_x,
+        angular_y=cmd.angular_y,
+        angular_z=cmd.angular_z,
+        requested_by=current_user.email,
     )
-    ros_topic.publish(
-        {
-            "linear": {"x": cmd.linear_x, "y": cmd.linear_y, "z": cmd.linear_z},
-            "angular": {"x": cmd.angular_x, "y": cmd.angular_y, "z": cmd.angular_z},
-        }
-    )
-    ros_topic.unadvertise()
-
-
-@app.post("/api/robots/{robot_id}/cmd_vel")
-async def send_cmd_vel(robot_id: str, cmd: TwistCommand, ros: roslibpy.Ros = Depends(ros_client)) -> dict[str, Any]:
-    publish_twist(ros, robot_id, cmd)
-    return {"robot": robot_id, "status": "queued"}
+    session.add(command)
+    await session.commit()
+    await session.refresh(command)
+    await cleanup_completed_commands(session, namespace)
+    await broadcast_robot_command(command)
+    return robot_command_to_out(command)
 
 
 @app.post("/api/internal/frames/{robot_id}")
@@ -714,18 +1038,79 @@ async def ingest_camera_frame(
     payload: FramePayload,
     x_api_key: str = Header(default=""),
 ) -> dict[str, Any]:
-    if settings.ros_push_key and x_api_key != settings.ros_push_key:
-        raise HTTPException(status_code=403, detail="invalid push key")
+    require_internal_api_key(x_api_key)
+    update_robot_heartbeat(robot_id)
     try:
-        image_bytes = base64.b64decode(payload.data)
+        decoded = base64.b64decode(payload.data)
     except binascii.Error as exc:
         raise HTTPException(status_code=400, detail=f"invalid frame payload: {exc}") from exc
+    if payload.compressed:
+        try:
+            image_bytes = gzip.decompress(decoded)
+        except (OSError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=f"invalid compressed frame payload: {exc}") from exc
+    else:
+        image_bytes = decoded
     queue = get_frame_queue(robot_id)
     if queue.full():
         with contextlib.suppress(asyncio.QueueEmpty):
             queue.get_nowait()
     queue.put_nowait((payload.width, payload.height, image_bytes))
     return {"robot": robot_id, "status": "queued"}
+
+
+@app.websocket("/api/internal/ws/lobbies")
+async def robot_command_bridge(websocket: WebSocket) -> None:
+    api_key = websocket.query_params.get("api_key") or websocket.headers.get("x-api-key", "")
+    require_internal_api_key(api_key or "")
+    await websocket.accept()
+    try:
+        while True:
+            message = await websocket.receive_json()
+            msg_type = message.get("type")
+            if msg_type == "subscribe":
+                robots = [value.strip() for value in message.get("robots", []) if value.strip()]
+                await register_robot_ws(websocket, robots)
+                for robot in robots:
+                    update_robot_heartbeat(robot)
+                await send_pending_commands_to_connection(websocket, robots)
+                await websocket.send_json({"type": "subscribed", "robots": robots})
+            elif msg_type == "heartbeat":
+                robots = [value.strip() for value in message.get("robots", []) if value.strip()]
+                if not robots:
+                    async with robot_ws_lock:
+                        robots = list(websocket_robot_map.get(id(websocket), []))
+                for robot in robots:
+                    update_robot_heartbeat(robot)
+                await websocket.send_json({"type": "heartbeat", "robots": robots, "status": "ok"})
+            elif msg_type == "complete":
+                robot = (message.get("robot") or "").strip()
+                command_id = message.get("command_id")
+                status = message.get("status") or "completed"
+                ack_payload = {"type": "ack", "command_id": command_id, "status": status}
+                if not command_id or not robot:
+                    ack_payload["error"] = "command_id and robot required"
+                    await websocket.send_json(ack_payload)
+                    continue
+                async with AsyncSessionLocal() as session:
+                    command = await session.get(RobotCommand, command_id)
+                    if not command or command.robot_namespace != robot:
+                        ack_payload["error"] = "command not found"
+                        await websocket.send_json(ack_payload)
+                        continue
+                    command.status = status
+                    command.message = message.get("message")
+                    command.completed_at = datetime.utcnow()
+                    await session.commit()
+                    await cleanup_completed_commands(session, robot)
+                ack_payload["recorded"] = True
+                await websocket.send_json(ack_payload)
+            else:
+                await websocket.send_json({"type": "error", "error": "unknown message", "payload": message})
+    except WebSocketDisconnect:
+        pass
+    finally:
+        await unregister_robot_ws(websocket)
 
 
 @app.websocket("/api/ws/{robot_id}")
@@ -746,25 +1131,53 @@ async def websocket_proxy(websocket: WebSocket, robot_id: str) -> None:
 
 
 @app.post("/api/robots/{robot_id}/webrtc")
-async def start_webrtc(robot_id: str, offer: WebRTCOffer) -> dict[str, str]:
+async def start_webrtc(
+    robot_id: str,
+    offer: WebRTCOffer,
+    current_user: User = Depends(get_current_user),
+) -> dict[str, str]:
     queue = get_frame_queue(robot_id)
     if queue.empty():
         logger.warning("No frames received yet for %s; WebRTC stream may be blank", robot_id)
     pc = RTCPeerConnection()
     peer_connections.add(pc)
+    active_added = False
+
+    def _set_active(state: bool) -> None:
+        nonlocal active_added
+        if state:
+            if not active_added:
+                active_robot_streams[robot_id].add(current_user.email)
+                active_added = True
+        else:
+            if active_added:
+                viewers = active_robot_streams.get(robot_id)
+                if viewers is not None:
+                    viewers.discard(current_user.email)
+                    if not viewers:
+                        active_robot_streams.pop(robot_id, None)
+                active_added = False
 
     @pc.on("connectionstatechange")
     async def _on_state_change() -> None:
-        if pc.connectionState in {"failed", "closed"}:
+        state = pc.connectionState
+        if state == "connected":
+            _set_active(True)
+        elif state in {"failed", "closed", "disconnected"}:
+            _set_active(False)
             peer_connections.discard(pc)
             await pc.close()
 
-    pc.addTrack(RobotVideoTrack(robot_id))
-    rtc_offer = RTCSessionDescription(sdp=offer.sdp, type=offer.type)
-    await pc.setRemoteDescription(rtc_offer)
-    answer = await pc.createAnswer()
-    await pc.setLocalDescription(answer)
-    return {"sdp": pc.localDescription.sdp, "type": pc.localDescription.type}
+    try:
+        pc.addTrack(RobotVideoTrack(robot_id))
+        rtc_offer = RTCSessionDescription(sdp=offer.sdp, type=offer.type)
+        await pc.setRemoteDescription(rtc_offer)
+        answer = await pc.createAnswer()
+        await pc.setLocalDescription(answer)
+        return {"sdp": pc.localDescription.sdp, "type": pc.localDescription.type}
+    finally:
+        if pc.connectionState in {"closed", "failed"}:
+            _set_active(False)
 
 
 def get_frame_queue(robot_id: str) -> asyncio.Queue[Tuple[int, int, bytes]]:
@@ -786,50 +1199,3 @@ class RobotVideoTrack(VideoStreamTrack):
         frame = VideoFrame.from_ndarray(array, format="bgra")
         frame.pts, frame.time_base = await self.next_timestamp()
         return frame
-
-
-async def monitor_ros_connection(delay: int = 5) -> None:
-    while True:
-        ros = await _connect_ros()
-        if ros is None:
-            await asyncio.sleep(delay)
-            continue
-        app.state.ros_client = ros
-        logger.info(
-            "Gateway %s connected to ROS bridge %s:%s",
-            settings.gateway_name,
-            settings.ros_bridge_host,
-            settings.ros_bridge_port,
-        )
-        try:
-            while ros.is_connected:
-                await asyncio.sleep(delay)
-        except asyncio.CancelledError:  # pragma: no cover - shutdown path
-            ros.terminate()
-            raise
-        finally:
-            ros.terminate()
-            if getattr(app.state, "ros_client", None) is ros:
-                app.state.ros_client = None
-            logger.warning("ROS bridge connection lost; retrying in %ss", delay)
-        await asyncio.sleep(delay)
-
-
-async def _connect_ros(max_wait: float = 10.0) -> roslibpy.Ros | None:
-    try:
-        ros = roslibpy.Ros(
-            host=settings.ros_bridge_host,
-            port=settings.ros_bridge_port,
-            is_secure=False,
-        )
-        ros.run()
-        elapsed = 0.0
-        while not ros.is_connected and elapsed < max_wait:
-            await asyncio.sleep(0.1)
-            elapsed += 0.1
-        if ros.is_connected:
-            return ros
-        ros.terminate()
-    except Exception as exc:  # pragma: no cover - network failures
-        logger.warning("ROS bridge connection attempt failed: %s", exc)
-    return None

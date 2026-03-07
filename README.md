@@ -10,27 +10,31 @@ Experiment with creating a dashboard to remotely control simulated robots:
 ## Authentication & lobbies
 
 - Users can register/login/logout via the dashboard (or directly against the FastAPI endpoints under `/api/auth/*`). Credentials are stored in PostgreSQL with bcrypt hashes and JWT tokens secure subsequent calls.
-- After signing in, the dashboard lists existing lobbies. Creating a lobby stores ROS bridge connection info and returns an access key you can share with operators/bots.
+- After signing in, the dashboard lists existing lobbies. Creating a lobby stores metadata (name, description, public/private flag) and returns an access key you can share with operators/bots.
 - Lobby APIs:
   - `POST /api/auth/register` and `POST /api/auth/login` → returns `{ access_token, user }`
-  - `GET /api/lobbies` → lists every lobby (the access key only shows for the owner)
-  - `POST /api/lobbies` → create a lobby with `name`, `ros_host`, `ros_port`, optional `description`
+  - `GET /api/lobbies` → lists every lobby you can access (owners see private lobbies plus their keys)
+  - `POST /api/lobbies` → create a lobby with `name`, optional `description`, and `is_public`
+  - `GET /api/lobbies/{id}` → fetch lobby details plus registered robots (only available to the owner or when the lobby is public)
+  - `PATCH /api/lobbies/{id}` / `DELETE /api/lobbies/{id}` → edit or soft-delete lobbies you own
 - Bot APIs:
-  - `GET /api/bots` → list every registered bot along with its lobby/owner metadata
+  - `GET /api/bots` → list active bots (filtered to non-deleted entries)
   - `POST /api/bots` → register a bot (name + ROS namespace) under a lobby you own
+  - `PATCH /api/bots/{id}` / `DELETE /api/bots/{id}` → edit or soft-delete bot metadata
 - Internal ROS handshake:
-  - `POST /api/internal/lobbies/{lobby_name}/online` with the lobby `access_key` kicks off the gateway’s ROS bridge connection monitor so Cloud Run can wait for rosbridge to come online after deploy.
-- The dashboard now includes a bot management card plus a dropdown in the teleop panel so you can pick a registered bot namespace (or fall back to manual entry).
+  - `POST /api/internal/lobbies/{lobby_name}/online` with the lobby `access_key` simply validates ownership so bots can pair using the shared key.
+  - Bridges push camera frames (gzip-compressed + base64) via `POST /api/internal/frames/{robot_namespace}` and maintain a persistent WebSocket connection to `/api/internal/ws/lobbies?api_key=...`. The API pushes queued velocity commands down that socket (tagged by robot namespace), and the bridge responds with `complete` messages after publishing to rosbridge. Heartbeats are also sent over the same WebSocket channel, so no extra polling endpoints are required.
+- The dashboard ships with lobby management and teleoperation views so owners can copy lobby keys, tweak privacy, and curate bots from the browser.
 - The gateway can seed users, lobbies, and bots from JSON provided via `SEED_USERS_JSON` / `SEED_LOBBIES_JSON` / `SEED_BOTS_JSON`. The default compose file seeds `dmn322` / `TEST123!`, a `ros-core` lobby whose `access_key` reuses the shared `ROS_PUSH_KEY` env var (fed into both the ROS camera forwarder and `ROS_PUSH_KEY` on the API), and two bots (`bot_alpha`, `bot_beta`) that match the simulated robots. Example:
 
 ```bash
 export ROS_PUSH_KEY=super-secret
 export SEED_USERS_JSON='[{"email":"dmn322","password":"TEST123!"}]'
-export SEED_LOBBIES_JSON='[{"name":"ros-core","ros_host":"ros-core","ros_port":9090,"description":"Default ROS core lobby","access_key":"'"$ROS_PUSH_KEY"'","owner_email":"dmn322"}]'
+export SEED_LOBBIES_JSON='[{"name":"ros-core","description":"Default ROS core lobby","access_key":"'"$ROS_PUSH_KEY"'","owner_email":"dmn322","is_public":true}]'
 export SEED_BOTS_JSON='[{"name":"Arena Bot Alpha","ros_namespace":"bot_alpha","lobby_name":"ros-core","owner_email":"dmn322"},{"name":"Arena Bot Beta","ros_namespace":"bot_beta","lobby_name":"ros-core","owner_email":"dmn322"}]'
 ```
-- The `ros-core` service runs `rosbridge_server` plus a `camera_forwarder` ROS 2 node. The node subscribes to `CAMERA_NAMESPACES` (comma-separated list of robot namespaces) and pushes base64 frames to `API_PUSH_URL` using `ROS_PUSH_KEY` for authentication.
-- The `sim` service is wired to `ros-core` via `ROS_BRIDGE_HOST=ros-core` / `ROS_BRIDGE_PORT=9090` so its controllers publish frames over rosbridge without any manual tweaks.
+- The `ros-core` service runs `rosbridge_server` plus a bridge node that pushes camera frames and opens an authenticated WebSocket to `/api/internal/ws/lobbies` for command delivery. Set `API_BASE_URL` (default `http://robot-gateway:8080/api`) and `ROS_PUSH_KEY` so the node can authenticate when hitting `/api/internal/*` endpoints.
+- The `sim` service still connects to rosbridge via `ROS_BRIDGE_HOST=ros-core` / `ROS_BRIDGE_PORT=9090`, but the API no longer needs public rosbridge credentials because robots initiate every connection.
 
 ## Data flow & stack
 

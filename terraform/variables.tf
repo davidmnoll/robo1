@@ -40,18 +40,6 @@ variable "access_token_expire_minutes" {
   default     = 60
 }
 
-variable "ros_bridge_host" {
-  description = "Host/IP for the upstream ROS bridge websocket"
-  type        = string
-  default     = "ros-core"
-}
-
-variable "ros_bridge_port" {
-  description = "Port for the ROS bridge websocket"
-  type        = number
-  default     = 9090
-}
-
 variable "ros_push_key" {
   description = "Shared secret the ROS camera forwarder will use when POSTing frames"
   type        = string

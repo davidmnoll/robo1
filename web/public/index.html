@@ -18,28 +18,48 @@
         padding: 2rem 1rem 4rem;
       }
       main {
-        max-width: 900px;
+        max-width: 1100px;
         margin: 0 auto;
-      }
-      h1 {
-        text-align: center;
-        margin-bottom: 0.5rem;
-      }
-      p.subtitle {
-        text-align: center;
-        color: #94a3b8;
-        margin-bottom: 2rem;
-      }
-      .grid {
-        display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-        gap: 1.25rem;
+        display: flex;
+        flex-direction: column;
+        gap: 1.5rem;
       }
       .card {
-        background: #141821;
-        border-radius: 16px;
+        background: #111522;
+        border-radius: 18px;
         padding: 1.5rem;
         box-shadow: 0 20px 60px rgba(0,0,0,.45);
+      }
+      header.hero {
+        display: flex;
+        flex-wrap: wrap;
+        justify-content: space-between;
+        gap: 1rem;
+        align-items: flex-start;
+      }
+      header.hero h1 {
+        margin: 0 0 0.5rem 0;
+      }
+      header.hero p {
+        margin: 0;
+        color: #94a3b8;
+      }
+      .status {
+        padding: 0.4rem 0.75rem;
+        border-radius: 999px;
+        font-weight: 600;
+        display: inline-flex;
+        align-items: center;
+        gap: 0.35rem;
+        font-size: 0.9rem;
+      }
+      .connected {
+        background: rgba(34,197,94,0.15);
+        color: #4ade80;
+      }
+      .disconnected {
+        background: rgba(248,113,113,0.15);
+        color: #f87171;
       }
       label {
         text-transform: uppercase;
@@ -47,17 +67,20 @@
         letter-spacing: 0.08em;
         color: #94a3b8;
       }
-      input, select {
+      input, textarea, select {
         width: 100%;
         margin-top: 0.25rem;
+        margin-bottom: 0.9rem;
         padding: 0.65rem 0.75rem;
         border-radius: 10px;
         border: 1px solid rgba(255,255,255,0.08);
-        background: rgba(15,23,42,0.7);
+        background: rgba(15,23,42,0.75);
         color: #f8fafc;
+        font-size: 1rem;
       }
-      input.readonly {
-        opacity: 0.7;
+      textarea {
+        min-height: 100px;
+        resize: vertical;
       }
       button {
         background: linear-gradient(135deg, #2563eb, #14b8a6);
@@ -65,930 +88,1558 @@
         font-weight: 600;
         border: none;
         border-radius: 10px;
-        padding: 0.65rem 1rem;
+        padding: 0.65rem 1.1rem;
         cursor: pointer;
-        transition: transform 0.15s ease;
+        transition: transform 0.15s ease, opacity 0.15s ease;
       }
-      button:hover {
+      button:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+      }
+      button.secondary {
+        background: rgba(148,163,184,0.2);
+        color: #cbd5f5;
+      }
+      button.ghost {
+        background: transparent;
+        border: 1px solid rgba(148,163,184,0.3);
+        color: #cbd5f5;
+      }
+      button:hover:not(:disabled) {
         transform: translateY(-2px);
       }
-      .status {
-        text-align: center;
-        padding: 0.4rem 0.75rem;
-        border-radius: 999px;
-        font-weight: 600;
-        margin-bottom: 0.75rem;
+      .hero {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 1.5rem;
       }
-      .connected {
+      .hero-actions {
+        margin-left: auto;
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+        justify-content: flex-end;
+      }
+      .user-menu {
+        position: relative;
+      }
+      .menu-toggle {
+        width: 42px;
+        height: 42px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 1.3rem;
+        border-radius: 50%;
+      }
+      .menu-panel {
+        position: absolute;
+        top: calc(100% + 0.5rem);
+        right: 0;
+        background: rgba(15,23,42,0.95);
+        border: 1px solid rgba(148,163,184,0.3);
+        border-radius: 10px;
+        padding: 0.75rem;
+        min-width: 200px;
+        box-shadow: 0 10px 30px rgba(2,6,23,0.5);
+        z-index: 10;
+      }
+      .menu-panel p {
+        margin: 0 0 0.5rem 0;
+        font-size: 0.85rem;
+        color: #94a3b8;
+      }
+      .view {
+        display: none;
+      }
+      .view.active {
+        display: block;
+      }
+      .lobby-list {
+        display: flex;
+        flex-direction: column;
+        gap: 1rem;
+      }
+      #lobby-list {
+        display: flex;
+        flex-direction: column;
+        gap: 1.5rem;
+      }
+      .offline-section {
+        border-top: 1px solid rgba(148,163,184,0.2);
+        padding-top: 1rem;
+      }
+      .offline-toggle {
+        width: 100%;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        font-weight: 600;
+      }
+      .offline-toggle span {
+        font-size: 0.85rem;
+        color: #94a3b8;
+      }
+      .lobby-card {
+        background: rgba(15,23,42,0.85);
+        border: 1px solid rgba(255,255,255,0.05);
+        border-radius: 14px;
+        padding: 1rem;
+      }
+      .lobby-card.offline {
+        opacity: 0.55;
+        filter: grayscale(0.4);
+      }
+      .lobby-card.offline button {
+        pointer-events: none;
+      }
+      .lobby-card h3 {
+        margin: 0;
+        font-size: 1.25rem;
+      }
+      .badge {
+        padding: 0.2rem 0.6rem;
+        border-radius: 999px;
+        font-size: 0.75rem;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        font-weight: 600;
+      }
+      .role-pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.4rem;
+        padding: 0.25rem 0.75rem;
+        border-radius: 999px;
+        font-size: 0.75rem;
+        letter-spacing: 0.08em;
+        font-weight: 600;
+        text-transform: uppercase;
+        background: rgba(59,130,246,0.15);
+        color: #93c5fd;
+        margin: 0.25rem 0 0.75rem;
+      }
+      .role-pill.owner {
         background: rgba(34,197,94,0.2);
         color: #4ade80;
       }
-      .disconnected {
+      .role-pill.participant {
+        background: rgba(148,163,184,0.2);
+        color: #e2e8f0;
+      }
+      .badge.public {
+        background: rgba(34,197,94,0.2);
+        color: #4ade80;
+      }
+      .badge.private {
         background: rgba(248,113,113,0.2);
         color: #f87171;
       }
-      .controls-grid {
-        display: grid;
-        grid-template-columns: repeat(3, minmax(60px, 1fr));
-        gap: 0.75rem;
-        max-width: 320px;
-        margin: 0 auto;
-      }
-      .controls-grid button {
-        padding: 1.25rem;
-        font-size: 1.5rem;
-        background: rgba(37,99,235,0.15);
-        border: 1px solid rgba(59,130,246,0.2);
-      }
-      .controls-grid button:active {
-        background: rgba(37,99,235,0.35);
-      }
-      .spacer {
-        visibility: hidden;
-      }
-      .sensor-data {
-        border: 1px solid rgba(255,255,255,.08);
-        border-radius: 12px;
-        padding: 1rem;
-        margin-top: 1rem;
-      }
-      .sensor-data h3 {
-        margin: 0 0 0.35rem;
-        font-size: 1rem;
-        color: #38bdf8;
-      }
-      #front-distance {
-        font-size: 2rem;
-        text-align: center;
-      }
-      pre {
-        background: rgba(15,23,42,0.9);
-        border-radius: 12px;
-        padding: 1rem;
-        overflow: auto;
-        font-size: 0.85rem;
-      }
-      .log {
-        max-height: 200px;
-      }
-      .keyboard-hint {
-        text-align: center;
-        margin-top: 1rem;
-        color: #94a3b8;
-      }
-      .button-row {
+      .lobby-actions {
         display: flex;
         flex-wrap: wrap;
         gap: 0.5rem;
         margin-top: 0.75rem;
       }
-      .button-row button {
-        flex: 1;
-        min-width: 120px;
-      }
-      .button-secondary {
-        background: #475569;
-      }
-      .lobby-list {
-        margin-top: 1rem;
+      .tab-nav {
         display: flex;
-        flex-direction: column;
         gap: 0.75rem;
+        margin: 1rem 0;
       }
-      .lobby-item {
-        background: #0f172a;
-        border: 1px solid rgba(255,255,255,0.08);
-        border-radius: 10px;
-        padding: 0.75rem;
+      .tab-nav button {
+        flex: 1;
+        background: rgba(15,23,42,0.8);
+        border: 1px solid rgba(59,130,246,0.25);
       }
-      .lobby-item h4 {
-        margin: 0 0 0.25rem 0;
+      .tab-nav button.active {
+        background: linear-gradient(135deg, #2563eb, #14b8a6);
       }
-      .lobby-meta {
-        color: #94a3b8;
+      .robot-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+        gap: 1rem;
+      }
+      .robot-card {
+        background: rgba(15,23,42,0.85);
+        border: 1px solid rgba(59,130,246,0.1);
+        border-radius: 12px;
+        padding: 1rem;
+      }
+      .robot-card h4 {
+        margin: 0 0 0.4rem 0;
+      }
+      .robot-status {
         font-size: 0.85rem;
-        margin: 0.2rem 0;
+        color: #94a3b8;
+        margin-bottom: 0.5rem;
+      }
+      .robot-status.occupied {
+        color: #fbbf24;
+      }
+      .teleop-layout {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+        gap: 1rem;
+        align-items: start;
       }
       video {
         width: 100%;
         border-radius: 12px;
-        background: #000;
-        margin-top: 0.5rem;
+        background: #0f172a;
+        min-height: 220px;
       }
-      .video-actions {
+      .telemetry-panel {
+        background: rgba(15,23,42,0.85);
+        border: 1px solid rgba(148,163,184,0.2);
+        border-radius: 12px;
+        padding: 1rem;
+        margin-top: 1rem;
+      }
+      .video-wrapper {
+        position: relative;
+        border-radius: 12px;
+        overflow: hidden;
+        background: #0b1120;
+        border: 1px solid rgba(148,163,184,0.2);
+      }
+      .video-wrapper video {
+        display: block;
+        width: 100%;
+        min-height: 240px;
+        background: #000;
+      }
+      .hud-overlay {
+        position: absolute;
+        inset: 0;
+        padding: 1rem;
+        display: flex;
+        flex-direction: column;
+        justify-content: space-between;
+        pointer-events: none;
+      }
+      .hud-row {
         display: flex;
         gap: 0.75rem;
-        margin-top: 0.75rem;
         flex-wrap: wrap;
+      }
+      .hud-panel {
+        background: rgba(2,6,23,0.6);
+        border: 1px solid rgba(148,163,184,0.35);
+        border-radius: 12px;
+        padding: 0.5rem 0.75rem;
+        min-width: 150px;
+        pointer-events: auto;
+      }
+      .hud-panel strong {
+        display: block;
+        font-size: 1.1rem;
+        color: #f8fafc;
+      }
+      .hud-log {
+        flex: 1;
+        min-width: 240px;
+      }
+      .hud-log pre {
+        max-height: 150px;
+        overflow: auto;
+        background: transparent;
+        padding: 0;
+        margin: 0;
+        border: none;
+      }
+      #video-fullscreen-btn {
+        position: absolute;
+        top: 0.75rem;
+        right: 0.75rem;
+        z-index: 5;
+        pointer-events: auto;
+      }
+      .status-grid {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.75rem;
+        margin-top: 0.5rem;
+      }
+      pre {
+        background: rgba(2,6,23,0.9);
+        border-radius: 10px;
+        padding: 0.75rem;
+        max-height: 200px;
+        overflow: auto;
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+      .form-row {
+        display: flex;
+        gap: 1rem;
+        flex-wrap: wrap;
+      }
+      .form-row > div {
+        flex: 1;
+      }
+      .hint {
+        color: #94a3b8;
+        font-size: 0.9rem;
+      }
+      .empty-state {
+        border: 1px dashed rgba(148,163,184,0.4);
+        border-radius: 12px;
+        padding: 1rem;
+        text-align: center;
+        color: #94a3b8;
+      }
+      .key-row {
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+        background: rgba(15,23,42,0.85);
+        border-radius: 10px;
+        padding: 0.5rem 0.75rem;
+        margin-bottom: 1rem;
+        border: 1px solid rgba(148,163,184,0.2);
+      }
+      code {
+        font-family: 'JetBrains Mono', Consolas, monospace;
+        font-size: 0.95rem;
       }
     </style>
   </head>
   <body>
     <main>
-      <h1>Robot Arena Dashboard</h1>
-      <p class="subtitle">Send twist commands through the API gateway and stream telemetry via WebSocket.</p>
+      <header class="hero">
+        <div>
+          <h1>Robot Arena Dashboard</h1>
+          <p>Coordinate lobby access, manage bots, and teleoperate robots from your browser.</p>
+        </div>
+        <div class="hero-actions">
+          <div class="status disconnected" id="api-status">API unreachable</div>
+          <div class="user-menu" id="user-menu" hidden>
+            <button id="menu-toggle" class="ghost menu-toggle" type="button" aria-haspopup="true" aria-expanded="false">
+              ☰
+            </button>
+            <div id="menu-panel" class="menu-panel" hidden>
+              <p id="menu-user-email"></p>
+              <button id="logout-btn" class="secondary" type="button">Logout</button>
+            </div>
+          </div>
+        </div>
+      </header>
 
-      <section class="card" style="margin-bottom:1.5rem;">
-        <h2 style="margin-top:0;">Account</h2>
+      <section class="card" id="account-card">
+        <h2>Account</h2>
         <div id="auth-status" class="status disconnected">Not signed in</div>
-        <label for="auth-email">Username / Email</label>
-        <input id="auth-email" type="text" placeholder="dmn322 or user@example.com">
-        <label for="auth-password">Password</label>
-        <input id="auth-password" type="password" placeholder="••••••••">
-        <div class="button-row">
+        <div class="form-row">
+          <div>
+            <label for="auth-email">Username / Email</label>
+            <input id="auth-email" type="text" placeholder="Enter your username or email">
+          </div>
+          <div>
+            <label for="auth-password">Password</label>
+            <input id="auth-password" type="password" placeholder="••••••••">
+          </div>
+        </div>
+        <div class="lobby-actions">
           <button id="register-btn">Sign Up</button>
           <button id="login-btn">Sign In</button>
-          <button id="logout-btn" class="button-secondary">Logout</button>
+          <span id="auth-message" class="hint"></span>
         </div>
-        <p id="auth-message" class="keyboard-hint" style="text-align:left;"></p>
       </section>
 
-      <section class="card" style="margin-bottom:1.5rem;">
-        <h2 style="margin-top:0;">Lobbies</h2>
-        <p id="lobby-message" class="keyboard-hint" style="text-align:left;">Sign in to create or join lobbies.</p>
-        <div id="lobby-form" style="display:none;">
-          <label for="lobby-name">Lobby Name</label>
-          <input id="lobby-name" placeholder="My ROS bridge">
-          <label for="lobby-host">ROS Bridge Host</label>
-          <input id="lobby-host" value="ros-core">
-          <label for="lobby-port">ROS Bridge Port</label>
-          <input id="lobby-port" type="number" value="9090">
-          <label for="lobby-desc">Description</label>
-          <input id="lobby-desc" placeholder="Optional notes">
-          <button id="create-lobby-btn">Create Lobby</button>
-        </div>
-        <div id="lobby-list" class="lobby-list"></div>
-      </section>
-
-      <section class="card" style="margin-bottom:1.5rem;">
-        <h2 style="margin-top:0;">Registered Bots</h2>
-        <p id="bot-message" class="keyboard-hint" style="text-align:left;">Sign in to manage bots.</p>
-        <div id="bot-form" style="display:none;">
-          <label for="bot-lobby-select">Lobby</label>
-          <select id="bot-lobby-select"></select>
-          <label for="bot-name">Bot Name</label>
-          <input id="bot-name" placeholder="Display name">
-          <label for="bot-namespace">ROS Namespace</label>
-          <input id="bot-namespace" placeholder="bot_alpha">
-          <label for="bot-desc">Description</label>
-          <input id="bot-desc" placeholder="Optional notes">
-          <button id="create-bot-btn">Register Bot</button>
-        </div>
-        <div id="bot-list" class="lobby-list"></div>
-      </section>
-
-      <section class="card" style="margin-bottom:1.5rem;">
-        <div id="video-status" class="status disconnected">Video idle</div>
-        <video id="robot-video" autoplay playsinline muted></video>
-        <div class="video-actions">
-          <button id="video-btn">Start Video</button>
-          <button id="video-stop-btn" style="background:#ef4444;">Stop Video</button>
-        </div>
-        <p id="video-meta" class="keyboard-hint" style="margin-top:0.5rem;text-align:left;">Sim: -- s | Delay: -- s</p>
-        <div style="margin-top:1.25rem;">
-          <p style="color:#94a3b8;margin-top:0;">Teleoperation</p>
-          <div class="controls-grid">
-            <div class="spacer"></div>
-            <button data-action="forward">&#8593;</button>
-            <div class="spacer"></div>
-            <button data-action="left">&#8592;</button>
-            <button data-action="stop">&#9632;</button>
-            <button data-action="right">&#8594;</button>
-            <div class="spacer"></div>
-            <button data-action="backward">&#8595;</button>
-            <div class="spacer"></div>
+      <section class="card" id="dashboard-card" hidden>
+        <div class="lobby-actions" style="justify-content: space-between; align-items: center;">
+          <div>
+            <h2 style="margin:0;">Lobby Directory</h2>
+            <p class="hint" style="margin:0;">Browse public arenas or manage the ones you own.</p>
           </div>
-          <p class="keyboard-hint">Space bar stops the robot.</p>
+          <button id="new-lobby-btn">New Lobby</button>
+        </div>
+
+        <div id="view-lobbies" class="view active">
+          <div id="lobby-empty" class="empty-state" hidden>Sign in to view and create lobbies.</div>
+          <div id="lobby-list">
+            <div id="lobby-online-list" class="lobby-list"></div>
+            <section id="offline-section" class="offline-section" hidden>
+              <button id="offline-toggle-btn" class="ghost offline-toggle" type="button" aria-expanded="false">
+                <span id="offline-toggle-label">Show offline lobbies</span>
+                <span id="offline-count">(0)</span>
+              </button>
+              <div id="offline-list" class="lobby-list" hidden></div>
+            </section>
+          </div>
+        </div>
+
+        <div id="view-lobby-detail" class="view">
+          <div class="lobby-actions" style="justify-content: space-between;">
+            <button id="detail-back-btn" class="ghost">← Back to lobbies</button>
+            <div class="lobby-actions">
+              <button id="detail-edit-btn" class="secondary">Edit lobby</button>
+              <button id="detail-join-btn">Join lobby</button>
+            </div>
+          </div>
+          <h2 id="detail-title" style="margin-bottom:0.25rem;"></h2>
+          <p class="hint" id="detail-owner"></p>
+          <p id="detail-description" class="hint"></p>
+          <div id="detail-visibility" class="badge"></div>
+          <div id="detail-role" class="role-pill"></div>
+          <p class="hint" id="detail-role-hint"></p>
+          <div class="key-row" id="detail-key-row" hidden>
+            <div>
+              <label>Access key</label>
+              <code id="detail-key-value">---</code>
+              <p id="detail-key-message" class="hint"></p>
+            </div>
+            <button id="detail-copy-key-btn" class="secondary" type="button">Copy</button>
+          </div>
+
+          <div class="tab-nav">
+            <button data-tab="lobby" class="active">Lobby</button>
+            <button data-tab="teleop" hidden>Teleop</button>
+          </div>
+
+          <div data-panel="lobby" class="view active">
+            <p class="hint">Select an available robot to start controlling it. Busy robots display the active streamer.</p>
+            <div id="detail-robots" class="robot-grid"></div>
+          </div>
+          <div data-panel="teleop" class="view">
+            <div id="teleop-empty" class="empty-state">Select a robot from the lobby tab to begin streaming.</div>
+            <div id="teleop-pane" class="teleop-layout" hidden>
+              <div>
+                <div class="video-wrapper" id="video-wrapper">
+                  <video id="robot-video" autoplay playsinline></video>
+                  <button id="video-fullscreen-btn" class="ghost" type="button" aria-label="Toggle fullscreen">⤢</button>
+                  <div class="hud-overlay">
+                    <div class="hud-row">
+                      <div class="hud-panel">
+                        <p class="hint" style="margin:0;">Linear speed</p>
+                        <strong id="linear-speed-value">0.00 m/s</strong>
+                      </div>
+                      <div class="hud-panel">
+                        <p class="hint" style="margin:0;">Angular speed</p>
+                        <strong id="angular-speed-value">0.00 rad/s</strong>
+                      </div>
+                      <div class="hud-panel">
+                        <p class="hint" style="margin:0;">Front distance</p>
+                        <strong id="front-distance-value">-- m</strong>
+                      </div>
+                    </div>
+                    <div class="hud-row">
+                      <div class="hud-panel hud-log">
+                        <p class="hint" style="margin:0 0 0.25rem;">Telemetry log</p>
+                        <pre id="telemetry">Waiting for telemetry...</pre>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+                <div class="status-grid">
+                  <div class="status disconnected" id="video-status">Video idle</div>
+                  <div class="status disconnected" id="ws-status">WS idle</div>
+                </div>
+                <p class="hint" id="video-meta">No active stream</p>
+              </div>
+              <div>
+                <h3 style="margin-top:0;">Active robot</h3>
+                <p class="hint" id="active-robot-label">None selected</p>
+                <p class="hint" id="teleop-instructions" style="margin-top:0.5rem;">
+                  Keyboard: W/S or ↑/↓ adjust throttle, A/D or ←/→ yaw, Q/E for flight-sim style yaw nudge, space resets speeds.
+                </p>
+                <div class="lobby-actions">
+                  <button id="leave-robot-btn" class="secondary">Leave robot</button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div id="view-lobby-manage" class="view">
+          <button id="manage-back-btn" class="ghost">← Back to lobbies</button>
+          <h2 id="manage-title">Create lobby</h2>
+          <form id="lobby-form">
+            <label for="lobby-name">Name</label>
+            <input id="lobby-name" required placeholder="Arena Prime">
+            <label for="lobby-desc">Description</label>
+            <textarea id="lobby-desc" placeholder="What makes this lobby special?"></textarea>
+            <label for="lobby-visibility">Visibility</label>
+            <select id="lobby-visibility">
+              <option value="public">Public</option>
+              <option value="private">Private</option>
+            </select>
+            <div class="key-row" id="key-row" hidden>
+              <div>
+                <label>Access key</label>
+                <code id="lobby-key">---</code>
+              </div>
+              <button type="button" id="copy-key-btn" class="secondary">Copy</button>
+            </div>
+            <div class="lobby-actions">
+              <button type="submit" id="save-lobby-btn">Save lobby</button>
+              <button type="button" id="delete-lobby-btn" class="secondary">Delete lobby</button>
+            </div>
+            <p id="lobby-message" class="hint"></p>
+          </form>
+
+          <section id="bot-management" class="telemetry-panel">
+            <h3 style="margin-top:0;">Robots in lobby</h3>
+            <div id="manage-robot-list" class="robot-grid"></div>
+            <h4>Add / edit robot</h4>
+            <form id="bot-form">
+              <div class="form-row">
+                <div>
+                  <label for="bot-name">Display name</label>
+                  <input id="bot-name" required placeholder="Arena Bot">
+                </div>
+                <div>
+                  <label for="bot-namespace">Namespace</label>
+                  <input id="bot-namespace" required placeholder="bot_alpha">
+                </div>
+              </div>
+              <label for="bot-desc">Description</label>
+              <textarea id="bot-desc" placeholder="Optional summary"></textarea>
+              <div class="lobby-actions">
+                <button type="submit" id="save-bot-btn">Save robot</button>
+                <button type="button" id="cancel-bot-edit" class="secondary">Cancel edit</button>
+              </div>
+              <p id="bot-message" class="hint"></p>
+            </form>
+          </section>
         </div>
       </section>
-
-      <div class="grid" style="grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));">
-        <section class="card">
-          <div id="api-status" class="status disconnected">API unreachable</div>
-          <label for="api-base">API Endpoint (e.g. http://localhost:8081/api)</label>
-          <input id="api-base" placeholder="http://localhost:8081/api">
-          <label for="teleop-lobby-select">Control Lobby</label>
-          <select id="teleop-lobby-select"></select>
-          <label for="bot-select">Registered Bot</label>
-          <select id="bot-select"></select>
-          <label for="robot-id">Robot Namespace</label>
-          <input id="robot-id" value="bot_alpha" placeholder="bot_alpha">
-          <label for="linear-speed">Linear Speed (m/s)</label>
-          <input id="linear-speed" type="number" value="0.2" step="0.1">
-          <label for="angular-speed">Angular Speed (rad/s)</label>
-          <input id="angular-speed" type="number" value="0.4" step="0.1">
-          <button id="connect-btn" style="margin-top:1rem;">Connect WebSocket</button>
-          <div class="sensor-data">
-            <h3>Front Distance</h3>
-            <div id="front-distance">-- m</div>
-          </div>
-        </section>
-
-        <section class="card">
-          <h2 style="margin-top:0;">Telemetry Log</h2>
-          <div id="ws-status" class="status disconnected">WS disconnected</div>
-          <pre id="telemetry" class="log">Waiting for telemetry...</pre>
-        </section>
-      </div>
     </main>
 
     <script>
-      const apiStatus = document.getElementById('api-status');
-      const wsStatus = document.getElementById('ws-status');
-      const telemetryLog = document.getElementById('telemetry');
-      const frontDistance = document.getElementById('front-distance');
-      const robotInput = document.getElementById('robot-id');
-      const linearInput = document.getElementById('linear-speed');
-      const angularInput = document.getElementById('angular-speed');
-      const connectBtn = document.getElementById('connect-btn');
-      const apiBaseInput = document.getElementById('api-base');
-      const videoElement = document.getElementById('robot-video');
-      const videoBtn = document.getElementById('video-btn');
-      const videoStopBtn = document.getElementById('video-stop-btn');
-      const videoStatus = document.getElementById('video-status');
-      const videoMeta = document.getElementById('video-meta');
-      const authEmailInput = document.getElementById('auth-email');
-      const authPasswordInput = document.getElementById('auth-password');
-      const authStatus = document.getElementById('auth-status');
-      const authMessage = document.getElementById('auth-message');
-      const registerBtn = document.getElementById('register-btn');
-      const loginBtn = document.getElementById('login-btn');
-      const logoutBtn = document.getElementById('logout-btn');
-      const lobbyMessage = document.getElementById('lobby-message');
-      const lobbyForm = document.getElementById('lobby-form');
-      const lobbyList = document.getElementById('lobby-list');
-      const lobbyNameInput = document.getElementById('lobby-name');
-      const lobbyHostInput = document.getElementById('lobby-host');
-      const lobbyPortInput = document.getElementById('lobby-port');
-      const lobbyDescInput = document.getElementById('lobby-desc');
-      const createLobbyBtn = document.getElementById('create-lobby-btn');
-      const botMessage = document.getElementById('bot-message');
-      const botForm = document.getElementById('bot-form');
-      const botList = document.getElementById('bot-list');
-      const botLobbySelect = document.getElementById('bot-lobby-select');
-      const botNameInput = document.getElementById('bot-name');
-      const botNamespaceInput = document.getElementById('bot-namespace');
-      const botDescInput = document.getElementById('bot-desc');
-      const createBotBtn = document.getElementById('create-bot-btn');
-      const botSelect = document.getElementById('bot-select');
-      const teleopLobbySelect = document.getElementById('teleop-lobby-select');
+      (function() {
+        const apiStatus = document.getElementById('api-status');
+        const authEmailInput = document.getElementById('auth-email');
+        const authPasswordInput = document.getElementById('auth-password');
+        const authStatus = document.getElementById('auth-status');
+        const authMessage = document.getElementById('auth-message');
+        const accountCard = document.getElementById('account-card');
+        const dashboardCard = document.getElementById('dashboard-card');
+        const registerBtn = document.getElementById('register-btn');
+        const loginBtn = document.getElementById('login-btn');
+        const logoutBtn = document.getElementById('logout-btn');
+        const userMenu = document.getElementById('user-menu');
+        const menuToggle = document.getElementById('menu-toggle');
+        const menuPanel = document.getElementById('menu-panel');
+        const menuUserEmail = document.getElementById('menu-user-email');
+        const lobbyListEl = document.getElementById('lobby-online-list');
+        const lobbyEmptyEl = document.getElementById('lobby-empty');
+        const offlineSection = document.getElementById('offline-section');
+        const offlineToggleBtn = document.getElementById('offline-toggle-btn');
+        const offlineToggleLabel = document.getElementById('offline-toggle-label');
+        const offlineCountEl = document.getElementById('offline-count');
+        const offlineListEl = document.getElementById('offline-list');
+        const newLobbyBtn = document.getElementById('new-lobby-btn');
+        const detailView = document.getElementById('view-lobby-detail');
+        const listView = document.getElementById('view-lobbies');
+        const manageView = document.getElementById('view-lobby-manage');
+        const detailBackBtn = document.getElementById('detail-back-btn');
+        const detailEditBtn = document.getElementById('detail-edit-btn');
+        const detailJoinBtn = document.getElementById('detail-join-btn');
+        const manageBackBtn = document.getElementById('manage-back-btn');
+        const detailTitle = document.getElementById('detail-title');
+        const detailOwner = document.getElementById('detail-owner');
+        const detailDescription = document.getElementById('detail-description');
+        const detailVisibility = document.getElementById('detail-visibility');
+        const detailRole = document.getElementById('detail-role');
+        const detailRoleHint = document.getElementById('detail-role-hint');
+        const detailKeyRow = document.getElementById('detail-key-row');
+        const detailKeyValue = document.getElementById('detail-key-value');
+        const detailKeyMessage = document.getElementById('detail-key-message');
+        const detailCopyKeyBtn = document.getElementById('detail-copy-key-btn');
+        const detailRobots = document.getElementById('detail-robots');
+        const tabButtons = document.querySelectorAll('.tab-nav button');
+        const lobbyTabBtn = document.querySelector('[data-tab="lobby"]');
+        const teleopTabBtn = document.querySelector('[data-tab="teleop"]');
+        const tabPanels = document.querySelectorAll('[data-panel]');
+        const teleopPane = document.getElementById('teleop-pane');
+        const teleopEmpty = document.getElementById('teleop-empty');
+        const wsStatus = document.getElementById('ws-status');
+        const telemetryLog = document.getElementById('telemetry');
+        const frontDistanceValue = document.getElementById('front-distance-value');
+        const linearSpeedValue = document.getElementById('linear-speed-value');
+        const angularSpeedValue = document.getElementById('angular-speed-value');
+        const activeRobotLabel = document.getElementById('active-robot-label');
+        const leaveRobotBtn = document.getElementById('leave-robot-btn');
+        const videoWrapper = document.getElementById('video-wrapper');
+        const videoFullscreenBtn = document.getElementById('video-fullscreen-btn');
+        const videoElement = document.getElementById('robot-video');
+        const videoStatus = document.getElementById('video-status');
+        const videoMeta = document.getElementById('video-meta');
+        const lobbyForm = document.getElementById('lobby-form');
+        const lobbyNameInput = document.getElementById('lobby-name');
+        const lobbyDescInput = document.getElementById('lobby-desc');
+        const lobbyVisibilityInput = document.getElementById('lobby-visibility');
+        const lobbyMessage = document.getElementById('lobby-message');
+        const keyRow = document.getElementById('key-row');
+        const lobbyKeyEl = document.getElementById('lobby-key');
+        const copyKeyBtn = document.getElementById('copy-key-btn');
+        const deleteLobbyBtn = document.getElementById('delete-lobby-btn');
+        const manageTitle = document.getElementById('manage-title');
+        const robotListManage = document.getElementById('manage-robot-list');
+        const botForm = document.getElementById('bot-form');
+        const botNameInput = document.getElementById('bot-name');
+        const botNamespaceInput = document.getElementById('bot-namespace');
+        const botDescInput = document.getElementById('bot-desc');
+        const botMessage = document.getElementById('bot-message');
+        const cancelBotEditBtn = document.getElementById('cancel-bot-edit');
 
-      const apiMetaTag = document.querySelector('meta[name="robot-gateway-api-base"]');
-      const metaValue = apiMetaTag ? (apiMetaTag.getAttribute('content') || '').trim() : '';
-      const deploymentApiBase = /^https?:\/\//.test(metaValue) ? metaValue : '';
-      const defaultOrigin = window.location.origin.replace(/\/$/, '');
-      let computedDefaultApi = deploymentApiBase || `${defaultOrigin}/api`;
-      const currentPort = window.location.port;
-      if (!deploymentApiBase && currentPort === '4173') {
-        // dashboard served via nginx dev port; default API to 8081 on same host
-        computedDefaultApi = `${window.location.protocol}//${window.location.hostname}:8081/api`;
-      }
-      const storedApiBase = localStorage.getItem('arenaApiBase');
-      apiBaseInput.value = storedApiBase || computedDefaultApi;
+        const apiMetaTag = document.querySelector('meta[name="robot-gateway-api-base"]');
+        const metaValue = apiMetaTag ? (apiMetaTag.getAttribute('content') || '').trim() : '';
+        const resolvedMeta = metaValue && metaValue !== '__API_BASE_URL__' ? metaValue : '';
+        const fallbackApiBase = 'http://localhost:8081/api';
+        const staticApiBase = (resolvedMeta || fallbackApiBase).replace(/\/+$/, '');
+        const LINEAR_STEP = 0.1;
+        const LINEAR_FINE_STEP = 0.05;
+        const ANGULAR_STEP = 0.1;
+        const ANGULAR_FINE_STEP = 0.05;
+        const MAX_LINEAR_SPEED = 1.0;
+        const MAX_ANGULAR_SPEED = 1.0;
+        const LOBBY_CACHE_KEY = 'arenaLobbyCache';
 
-      function apiBase() {
-        let value = (apiBaseInput.value || '').trim();
-        if (!value) value = computedDefaultApi;
-        value = value.replace(/\/+$/, '');
-        if (!value.endsWith('/api')) {
-          value = `${value}/api`;
+        function readLobbyCache() {
+          try {
+            const raw = localStorage.getItem(LOBBY_CACHE_KEY);
+            return raw ? JSON.parse(raw) : {};
+          } catch (error) {
+            console.warn('Failed to parse lobby cache', error);
+            return {};
+          }
         }
-        return value;
-      }
 
-      apiBaseInput.addEventListener('change', () => {
-        const normalized = apiBase();
-        apiBaseInput.value = normalized;
-        localStorage.setItem('arenaApiBase', normalized);
-        checkApiHealth();
-      });
-
-      let ws;
-      let lastRobotId = robotInput.value.trim();
-      let pc;
-      let authToken = localStorage.getItem('arenaToken') || '';
-      let currentUserEmail = localStorage.getItem('arenaUserEmail') || '';
-      let currentLobbies = [];
-      let currentBots = [];
-      let selectedBotNamespace = '';
-      let selectedLobbyId = '';
-      let botAutoSelectPending = true;
-
-      function authHeaders() {
-        return authToken ? { 'Authorization': `Bearer ${authToken}` } : {};
-      }
-
-      function setAuth(token, email) {
-        authToken = token || '';
-        currentUserEmail = email || '';
-        if (token) {
-          localStorage.setItem('arenaToken', token);
-          localStorage.setItem('arenaUserEmail', email);
-        } else {
-          localStorage.removeItem('arenaToken');
-          localStorage.removeItem('arenaUserEmail');
+        function loadCachedLobbies(email) {
+          if (!email) return [];
+          const cache = readLobbyCache();
+          const entry = cache[email];
+          return Array.isArray(entry) ? entry : [];
         }
-        updateAuthUI();
-      }
 
-      function updateAuthUI() {
-        if (authToken) {
-          authStatus.textContent = `Signed in as ${currentUserEmail}`;
-          authStatus.className = 'status connected';
-          selectedLobbyId = '';
-          selectedBotNamespace = '';
-          botAutoSelectPending = true;
-          lobbyForm.style.display = 'block';
-          lobbyMessage.textContent = 'Create a lobby or share keys with teammates.';
-          botForm.style.display = 'block';
-          botMessage.textContent = 'Register bots under your owned lobbies.';
-          fetchLobbies();
-          fetchBots();
-        } else {
-          authStatus.textContent = 'Not signed in';
-          authStatus.className = 'status disconnected';
-          lobbyForm.style.display = 'none';
-          lobbyList.innerHTML = '';
-          lobbyMessage.textContent = 'Sign in to create or join lobbies.';
-          botForm.style.display = 'none';
-          botList.innerHTML = '';
-          botMessage.textContent = 'Sign in to manage bots.';
-          currentLobbies = [];
-          currentBots = [];
-          selectedLobbyId = '';
-          selectedBotNamespace = '';
-          botAutoSelectPending = true;
-          updateBotLobbyOptions();
-          updateTeleopLobbyOptions();
-          updateBotSelect([]);
+        function saveCachedLobbies(email, items) {
+          if (!email) return;
+          const cache = readLobbyCache();
+          cache[email] = items;
+          localStorage.setItem(LOBBY_CACHE_KEY, JSON.stringify(cache));
         }
-      }
 
-      async function checkApiHealth() {
-        try {
-          const resp = await fetch(`${apiBase()}/health`);
-          if (!resp.ok) throw new Error('API error');
-          const json = await resp.json();
-          apiStatus.textContent = json.ros_connected ? 'API & ROS connected' : 'API up, ROS unavailable';
-          apiStatus.className = `status ${json.ros_connected ? 'connected' : 'disconnected'}`;
-        } catch (err) {
-          apiStatus.textContent = 'API unreachable';
-          apiStatus.className = 'status disconnected';
+        function setMenuOpen(open) {
+          state.menuOpen = Boolean(open);
+          menuPanel.hidden = !state.menuOpen;
+          menuToggle.setAttribute('aria-expanded', String(state.menuOpen));
         }
-      }
 
-      async function sendVelocity(linear, angular) {
-        const robot = robotInput.value.trim() || 'bot_alpha';
-        const base = apiBase();
-        const payload = {
-          linear_x: linear,
-          linear_y: 0,
-          linear_z: 0,
-          angular_x: 0,
-          angular_y: 0,
-          angular_z: angular,
+        const initialToken = localStorage.getItem('arenaToken') || '';
+        const initialEmail = localStorage.getItem('arenaUserEmail') || '';
+
+        const state = {
+          authToken: initialToken,
+          userEmail: initialEmail,
+          lobbies: [],
+          cachedLobbies: loadCachedLobbies(initialEmail),
+          offlineLobbies: [],
+          offlineCollapsed: true,
+          menuOpen: false,
+          currentLobby: null,
+          manageLobby: null,
+          view: 'lobbies',
+          lobbyTab: 'lobby',
+          activeRobot: null,
+          ws: null,
+          pc: null,
+          linearSpeed: 0,
+          angularSpeed: 0,
         };
-        try {
-          await fetch(`${base}/robots/${encodeURIComponent(robot)}/cmd_vel`, {
+
+        function apiBase() {
+          if (staticApiBase.endsWith('/api')) return staticApiBase;
+          return `${staticApiBase}/api`;
+        }
+
+        function authHeaders() {
+          return state.authToken ? { 'Authorization': 'Bearer ' + state.authToken } : {};
+        }
+
+        function setAuth(token, email) {
+          state.authToken = token || '';
+          state.userEmail = email || '';
+          if (state.authToken) {
+            localStorage.setItem('arenaToken', state.authToken);
+            localStorage.setItem('arenaUserEmail', state.userEmail);
+          } else {
+            localStorage.removeItem('arenaToken');
+            localStorage.removeItem('arenaUserEmail');
+          }
+          state.cachedLobbies = loadCachedLobbies(state.userEmail);
+          state.offlineLobbies = [];
+          state.offlineCollapsed = true;
+          setMenuOpen(false);
+          updateAuthState();
+        }
+
+        function updateAuthState() {
+          const authed = Boolean(state.authToken);
+          accountCard.hidden = authed;
+          dashboardCard.hidden = !authed;
+          userMenu.hidden = !authed;
+          if (authed) {
+            authStatus.textContent = `Signed in as ${state.userEmail}`;
+            authStatus.className = 'status connected';
+            menuUserEmail.textContent = state.userEmail || 'Signed in';
+            setMenuOpen(false);
+            lobbyEmptyEl.hidden = true;
+            showView('lobbies');
+            fetchLobbies();
+          } else {
+            authStatus.textContent = 'Not signed in';
+            authStatus.className = 'status disconnected';
+            setMenuOpen(false);
+            state.lobbies = [];
+            state.offlineLobbies = [];
+            lobbyEmptyEl.hidden = false;
+            lobbyEmptyEl.textContent = 'Sign in to view and create lobbies.';
+            offlineSection.hidden = true;
+            renderLobbies();
+            showView('lobbies');
+            teardownTeleop();
+            state.currentLobby = null;
+          }
+        }
+
+        function showView(view) {
+          state.view = view;
+          listView.classList.toggle('active', view === 'lobbies');
+          detailView.classList.toggle('active', view === 'detail');
+          manageView.classList.toggle('active', view === 'manage');
+          listView.hidden = view !== 'lobbies';
+          detailView.hidden = view !== 'detail';
+          manageView.hidden = view !== 'manage';
+          if (view !== 'detail') {
+            setLobbyTab('lobby');
+            teardownTeleop();
+          }
+        }
+
+        async function fetchLobbies() {
+          if (!state.authToken) {
+            lobbyEmptyEl.hidden = false;
+            lobbyEmptyEl.textContent = 'Sign in to view and create lobbies.';
+            lobbyListEl.innerHTML = '';
+            return;
+          }
+          try {
+            const resp = await fetch(`${apiBase()}/lobbies`, { headers: authHeaders() });
+            if (resp.status === 401) {
+              authMessage.textContent = 'Session expired. Please sign in again.';
+              setAuth('', '');
+              return;
+            }
+            if (!resp.ok) throw new Error('Failed to load lobbies');
+            const data = await resp.json();
+            const items = Array.isArray(data.items) ? data.items : [];
+            state.lobbies = items;
+            state.cachedLobbies = items.slice();
+            state.offlineLobbies = [];
+            saveCachedLobbies(state.userEmail, state.cachedLobbies);
+            renderLobbies();
+          } catch (err) {
+            console.error('Failed to load lobbies', err);
+            state.lobbies = [];
+            state.offlineLobbies = state.cachedLobbies.slice();
+            renderLobbies();
+            if (!state.offlineLobbies.length) {
+              lobbyEmptyEl.hidden = false;
+              lobbyEmptyEl.textContent = 'Failed to load lobbies.';
+            }
+          }
+        }
+
+        function renderLobbies() {
+          lobbyListEl.innerHTML = '';
+          const authed = Boolean(state.authToken);
+          if (!authed) {
+            lobbyEmptyEl.hidden = false;
+            lobbyEmptyEl.textContent = 'Sign in to view and create lobbies.';
+            updateOfflineSection();
+            return;
+          }
+          if (state.lobbies.length) {
+            lobbyEmptyEl.hidden = true;
+            renderLobbyCards(state.lobbies, lobbyListEl);
+          } else {
+            lobbyEmptyEl.hidden = false;
+            lobbyEmptyEl.textContent = state.offlineLobbies.length
+              ? 'Lobbies unavailable. Expand Offline to view cached entries.'
+              : 'No lobbies yet. Create one to get started.';
+          }
+          updateOfflineSection();
+        }
+
+        function renderLobbyCards(lobbies, container, options = {}) {
+          container.innerHTML = '';
+          lobbies.forEach((lobby) => {
+            const card = document.createElement('div');
+            card.className = 'lobby-card';
+            if (options.offline) {
+              card.classList.add('offline');
+            }
+            const badgeClass = lobby.is_public ? 'public' : 'private';
+            card.innerHTML = `
+              <div style="display:flex;justify-content:space-between;align-items:center;gap:0.5rem;">
+                <h3>${lobby.name}</h3>
+                <span class="badge ${badgeClass}">${lobby.is_public ? 'Public' : 'Private'}</span>
+              </div>
+              <p class="hint" style="margin:0.25rem 0;">Owned by ${lobby.owner_email}</p>
+              <p class="hint" style="margin-bottom:0.5rem;">${lobby.description || 'No description'}</p>
+              <p class="hint">Robots: ${lobby.bot_count}</p>
+            `;
+            if (options.offline) {
+              const offlineNote = document.createElement('p');
+              offlineNote.className = 'hint';
+              offlineNote.textContent = 'Offline copy — reconnect to interact.';
+              card.appendChild(offlineNote);
+            }
+            const actions = document.createElement('div');
+            actions.className = 'lobby-actions';
+            const joinBtn = document.createElement('button');
+            joinBtn.textContent = options.offline ? 'Offline' : 'Join';
+            if (options.offline) {
+              joinBtn.disabled = true;
+              joinBtn.title = 'Reconnect to open this lobby.';
+            } else {
+              joinBtn.addEventListener('click', () => openLobbyDetail(lobby.id));
+            }
+            actions.appendChild(joinBtn);
+            if (lobby.is_owner) {
+              const editBtn = document.createElement('button');
+              editBtn.className = 'secondary';
+              editBtn.textContent = options.offline ? 'Edit (offline)' : 'Edit';
+              if (options.offline) {
+                editBtn.disabled = true;
+              } else {
+                editBtn.addEventListener('click', () => openManageLobby(lobby.id));
+              }
+              const copyBtn = document.createElement('button');
+              copyBtn.className = 'ghost';
+              copyBtn.textContent = 'Copy key';
+              copyBtn.addEventListener('click', () => copyText(lobby.access_key, 'Lobby key copied'));
+              actions.appendChild(editBtn);
+              actions.appendChild(copyBtn);
+            }
+            card.appendChild(actions);
+            container.appendChild(card);
+          });
+        }
+
+        function updateOfflineSection() {
+          const count = state.offlineLobbies.length;
+          offlineCountEl.textContent = `(${count})`;
+          const hideSection = !state.authToken || count === 0;
+          offlineSection.hidden = hideSection;
+          if (hideSection) {
+            offlineListEl.innerHTML = '';
+            return;
+          }
+          offlineToggleLabel.textContent = state.offlineCollapsed ? 'Show offline lobbies' : 'Hide offline lobbies';
+          offlineToggleBtn.setAttribute('aria-expanded', String(!state.offlineCollapsed));
+          offlineListEl.hidden = state.offlineCollapsed;
+          if (state.offlineCollapsed) {
+            offlineListEl.innerHTML = '';
+          } else {
+            renderLobbyCards(state.offlineLobbies, offlineListEl, { offline: true });
+          }
+        }
+
+        async function openLobbyDetail(lobbyId) {
+          if (!state.authToken) return;
+          try {
+            const resp = await fetch(`${apiBase()}/lobbies/${lobbyId}`, { headers: authHeaders() });
+            if (!resp.ok) throw new Error(await resp.text());
+            const data = await resp.json();
+            state.currentLobby = data;
+            showView('detail');
+            setLobbyTab('lobby');
+            renderLobbyDetail();
+          } catch (err) {
+            console.error(err);
+          }
+        }
+
+        function renderLobbyDetail() {
+          const lobby = state.currentLobby;
+          if (!lobby) return;
+          detailTitle.textContent = lobby.name;
+          detailOwner.textContent = `Owner: ${lobby.owner_email}`;
+          detailDescription.textContent = lobby.description || 'No description provided.';
+          detailVisibility.textContent = lobby.is_public ? 'Public lobby' : 'Private lobby';
+          detailVisibility.className = `badge ${lobby.is_public ? 'public' : 'private'}`;
+          const role = lobby.is_owner ? 'Owner' : 'Participant';
+          detailRole.textContent = `Your role: ${role}`;
+          detailRole.className = `role-pill ${lobby.is_owner ? 'owner' : 'participant'}`;
+          detailRoleHint.textContent = lobby.is_owner
+            ? 'Share this access key with bots or operators you trust.'
+            : 'Only lobby owners can view and share the access key.';
+          if (lobby.is_owner && lobby.access_key) {
+            detailKeyRow.hidden = false;
+            detailKeyValue.textContent = lobby.access_key;
+            detailKeyMessage.textContent = '';
+          } else {
+            detailKeyRow.hidden = true;
+            detailKeyValue.textContent = lobby.is_owner ? '---' : 'Restricted';
+            detailKeyMessage.textContent = '';
+          }
+          detailEditBtn.style.display = lobby.is_owner ? 'inline-flex' : 'none';
+          detailJoinBtn.style.display = 'none';
+          renderLobbyRobots();
+        }
+
+        function renderLobbyRobots() {
+          const lobby = state.currentLobby;
+          detailRobots.innerHTML = '';
+          if (!lobby || !lobby.bots?.length) {
+            const empty = document.createElement('div');
+            empty.className = 'empty-state';
+            empty.textContent = 'No robots registered in this lobby.';
+            detailRobots.appendChild(empty);
+            return;
+          }
+          lobby.bots.forEach((bot) => {
+            if (bot.is_deleted) return;
+            const card = document.createElement('div');
+            card.className = 'robot-card';
+            const streamerNames = bot.active_streamers || [];
+            const isBusy = streamerNames.length > 0 && !streamerNames.includes(state.userEmail);
+            card.innerHTML = `
+              <h4>${bot.name}</h4>
+              <p class="hint">Namespace: ${bot.ros_namespace}</p>
+              <p class="hint">${bot.description || '—'}</p>
+              <p class="robot-status ${isBusy ? 'occupied' : ''}">${streamerNames.length ? `Streaming: ${streamerNames.join(', ')}` : 'Available'}</p>
+            `;
+            const button = document.createElement('button');
+            button.textContent = streamerNames.includes(state.userEmail) ? 'Resume control' : 'Control robot';
+            button.disabled = isBusy;
+            button.addEventListener('click', () => selectRobot(bot));
+            card.appendChild(button);
+            detailRobots.appendChild(card);
+          });
+        }
+
+        function setLobbyTab(tab) {
+          if (tab === 'teleop' && teleopTabBtn.hidden) {
+            tab = 'lobby';
+          }
+          state.lobbyTab = tab;
+          tabButtons.forEach((btn) => btn.classList.toggle('active', btn.dataset.tab === tab));
+          tabPanels.forEach((panel) => {
+            const match = panel.getAttribute('data-panel') === tab;
+            panel.classList.toggle('active', match);
+            panel.hidden = !match;
+          });
+          updateTeleopKeyState();
+        }
+
+        function setTeleopAvailability(enabled) {
+          teleopTabBtn.hidden = !enabled;
+          if (!enabled && state.lobbyTab === 'teleop') {
+            setLobbyTab('lobby');
+          }
+        }
+
+        function clamp(value, min, max) {
+          return Math.min(Math.max(value, min), max);
+        }
+
+        function updateSpeedIndicators() {
+          linearSpeedValue.textContent = `${state.linearSpeed.toFixed(2)} m/s`;
+          angularSpeedValue.textContent = `${state.angularSpeed.toFixed(2)} rad/s`;
+        }
+
+        function resetSpeeds() {
+          state.linearSpeed = 0;
+          state.angularSpeed = 0;
+          updateSpeedIndicators();
+          sendVelocity(0, 0);
+        }
+
+        function adjustLinearSpeed(delta) {
+          state.linearSpeed = clamp(state.linearSpeed + delta, -MAX_LINEAR_SPEED, MAX_LINEAR_SPEED);
+          updateSpeedIndicators();
+          sendVelocity(state.linearSpeed, state.angularSpeed);
+        }
+
+        function adjustAngularSpeed(delta) {
+          state.angularSpeed = clamp(state.angularSpeed + delta, -MAX_ANGULAR_SPEED, MAX_ANGULAR_SPEED);
+          updateSpeedIndicators();
+          sendVelocity(state.linearSpeed, state.angularSpeed);
+        }
+
+        function updateFullscreenButton() {
+          if (!videoFullscreenBtn || !videoWrapper) return;
+          const active = document.fullscreenElement === videoWrapper;
+          videoFullscreenBtn.textContent = active ? '⤡' : '⤢';
+          videoFullscreenBtn.title = active ? 'Exit fullscreen' : 'Enter fullscreen';
+        }
+
+        function selectRobot(bot) {
+          state.activeRobot = bot;
+          activeRobotLabel.textContent = `${bot.name} (${bot.ros_namespace})`;
+          setTeleopAvailability(true);
+          resetSpeeds();
+          setLobbyTab('teleop');
+          teleopEmpty.hidden = true;
+          teleopPane.hidden = false;
+          startTeleop(bot.ros_namespace);
+        }
+
+        function startTeleop(namespace) {
+          if (!namespace) return;
+          openWebSocket(namespace);
+          startVideo(namespace);
+        }
+
+        function teardownTeleop() {
+          state.activeRobot = null;
+          activeRobotLabel.textContent = 'None selected';
+          setTeleopAvailability(false);
+          resetSpeeds();
+          teleopPane.hidden = true;
+          teleopEmpty.hidden = false;
+          logTelemetry('Teleop idle');
+          frontDistanceValue.textContent = '-- m';
+          if (state.ws) {
+            state.ws.close();
+            state.ws = null;
+          }
+          if (state.pc) {
+            state.pc.close();
+            state.pc = null;
+          }
+          if (videoElement.srcObject) {
+            videoElement.srcObject.getTracks().forEach((t) => t.stop());
+            videoElement.srcObject = null;
+          }
+          if (document.fullscreenElement === videoWrapper) {
+            document.exitFullscreen?.();
+          }
+          videoStatus.textContent = 'Video idle';
+          videoStatus.className = 'status disconnected';
+          videoMeta.textContent = 'No active stream';
+          wsStatus.textContent = 'WS idle';
+          wsStatus.className = 'status disconnected';
+          updateTeleopKeyState();
+          updateFullscreenButton();
+        }
+
+        function openWebSocket(namespace) {
+          const wsBase = resolveWsBaseUrl();
+          if (state.ws) state.ws.close();
+          const ws = new WebSocket(`${wsBase}/ws/${encodeURIComponent(namespace)}`);
+          state.ws = ws;
+          wsStatus.textContent = 'Connecting...';
+          wsStatus.className = 'status disconnected';
+          ws.onopen = () => {
+            wsStatus.textContent = `WS connected (${namespace})`;
+            wsStatus.className = 'status connected';
+            logTelemetry(`WebSocket connected to ${namespace}`);
+          };
+          ws.onmessage = (event) => {
+            try {
+              const data = JSON.parse(event.data);
+              logTelemetry(JSON.stringify(data));
+              if (typeof data.front_distance === 'number') {
+                frontDistanceValue.textContent = `${data.front_distance.toFixed(2)} m`;
+              }
+            } catch {
+              logTelemetry(event.data);
+            }
+          };
+          ws.onclose = () => {
+            wsStatus.textContent = 'WS disconnected';
+            wsStatus.className = 'status disconnected';
+          };
+          ws.onerror = (event) => {
+            console.error('WS error', event);
+          };
+        }
+
+        function resolveWsBaseUrl() {
+          try {
+            const parsed = new URL(apiBase(), window.location.origin);
+            const wsProtocol = parsed.protocol === 'https:' ? 'wss:' : 'ws:';
+            const path = parsed.pathname.replace(/\/$/, '');
+            return `${wsProtocol}//${parsed.host}${path}`;
+          } catch (error) {
+            console.warn('Invalid API base, defaulting to window origin', error);
+            const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            return `${proto}//${window.location.host}/api`;
+          }
+        }
+
+        function sendVelocity(linear, angular) {
+          if (!state.activeRobot) return;
+          const namespace = state.activeRobot.ros_namespace;
+          const payload = {
+            linear_x: linear,
+            linear_y: 0,
+            linear_z: 0,
+            angular_x: 0,
+            angular_y: 0,
+            angular_z: angular,
+          };
+          fetch(`${apiBase()}/robots/${encodeURIComponent(namespace)}/cmd_vel`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', ...authHeaders() },
             body: JSON.stringify(payload),
-          });
-        } catch (err) {
-          console.error('Command failed', err);
+          }).catch((err) => console.error('Command failed', err));
         }
-      }
 
-      function logTelemetry(message) {
-        const ts = new Date().toLocaleTimeString();
-        telemetryLog.textContent = `[${ts}] ${message}\n` + telemetryLog.textContent;
-      }
-
-      function resolveWsBaseUrl() {
-        try {
-          const parsed = new URL(apiBase(), window.location.origin);
-          const wsProtocol = parsed.protocol === 'https:' ? 'wss:' : 'ws:';
-          const path = parsed.pathname.replace(/\/$/, '');
-          return `${wsProtocol}//${parsed.host}${path}`;
-        } catch (error) {
-          console.warn('Invalid API base, defaulting to window origin', error);
-          const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-          return `${proto}//${window.location.host}/api`;
+        function logTelemetry(message) {
+          const ts = new Date().toLocaleTimeString();
+          telemetryLog.textContent = `[${ts}] ${message}\\n` + telemetryLog.textContent;
         }
-      }
 
-      function openWebSocket() {
-        const robot = robotInput.value.trim() || 'bot_alpha';
-        if (ws) ws.close();
-        const wsBase = resolveWsBaseUrl();
-        ws = new WebSocket(`${wsBase}/ws/${encodeURIComponent(robot)}`);
-        wsStatus.textContent = 'Connecting...';
-        wsStatus.className = 'status disconnected';
-        ws.onopen = () => {
-          wsStatus.textContent = `WS connected (${robot})`;
-          wsStatus.className = 'status connected';
-          logTelemetry(`WebSocket connected to ${robot}`);
-        };
-        ws.onmessage = (event) => {
-          try {
-            const data = JSON.parse(event.data);
-            logTelemetry(JSON.stringify(data));
-            if (typeof data.front_distance === 'number') {
-              frontDistance.textContent = `${data.front_distance.toFixed(2)} m`;
-            }
-          } catch {
-            logTelemetry(event.data);
+        function startVideo(namespace) {
+          if (state.pc) {
+            state.pc.close();
+            state.pc = null;
           }
-        };
-        ws.onclose = () => {
-          wsStatus.textContent = 'WS disconnected';
-          wsStatus.className = 'status disconnected';
-          logTelemetry('WebSocket closed');
-        };
-        ws.onerror = (event) => {
-          console.error('WS error', event);
-        };
-        lastRobotId = robot;
-      }
+          const pc = new RTCPeerConnection();
+          state.pc = pc;
+          const inboundStream = new MediaStream();
+          pc.addEventListener('track', (event) => {
+            inboundStream.addTrack(event.track);
+            videoElement.srcObject = inboundStream;
+          });
+          pc.addTransceiver('video', { direction: 'recvonly' });
+          videoStatus.textContent = 'Video connecting...';
+          videoStatus.className = 'status disconnected';
+          pc.addEventListener('connectionstatechange', () => {
+            if (pc.connectionState === 'connected') {
+              videoStatus.textContent = `Video streaming (${namespace})`;
+              videoStatus.className = 'status connected';
+              videoMeta.textContent = 'ROS stream active';
+            } else if (pc.connectionState === 'failed') {
+              videoStatus.textContent = 'Video error';
+              videoStatus.className = 'status disconnected';
+            }
+          });
+          pc.createOffer()
+            .then((offer) => {
+              return pc.setLocalDescription(offer).then(() => offer);
+            })
+            .then((offer) => {
+              return fetch(`${apiBase()}/robots/${encodeURIComponent(namespace)}/webrtc`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', ...authHeaders() },
+                body: JSON.stringify({ sdp: offer.sdp, type: offer.type }),
+              });
+            })
+            .then((resp) => {
+              if (!resp.ok) throw new Error('WebRTC signaling failed');
+              return resp.json();
+            })
+            .then((answer) => pc.setRemoteDescription(answer))
+            .catch((err) => {
+              console.error('Video setup failed', err);
+              videoStatus.textContent = 'Video error';
+              videoStatus.className = 'status disconnected';
+              videoMeta.textContent = 'Unable to stream';
+            });
+        }
 
-      function initControls() {
-        const SPEED = () => parseFloat(linearInput.value) || 0;
-        const TURN = () => parseFloat(angularInput.value) || 0;
-        const mapping = {
-          forward: () => sendVelocity(SPEED(), 0),
-          backward: () => sendVelocity(-SPEED(), 0),
-          left: () => sendVelocity(0, TURN()),
-          right: () => sendVelocity(0, -TURN()),
-          stop: () => sendVelocity(0, 0),
-        };
+        function updateTeleopKeyState() {
+          window.__teleopKeysEnabled = Boolean(state.activeRobot && state.view === 'detail' && state.lobbyTab === 'teleop');
+        }
 
-        document.querySelectorAll('.controls-grid button').forEach((button) => {
-          const action = button.dataset.action;
-          if (!action || !mapping[action]) return;
-          if (action === 'stop') {
-            button.addEventListener('click', mapping[action]);
+        function handleKey(event, isKeyDown) {
+          if (!window.__teleopKeysEnabled) return;
+          const key = event.key.toLowerCase();
+          if (event.repeat && isKeyDown) return;
+          if (key === ' ') {
+            event.preventDefault();
+            if (isKeyDown) resetSpeeds();
             return;
           }
-          button.addEventListener('mousedown', mapping[action]);
-          button.addEventListener('mouseup', mapping.stop);
-          button.addEventListener('mouseleave', mapping.stop);
-          button.addEventListener('touchstart', (event) => {
-            event.preventDefault();
-            mapping[action]();
-          }, { passive: false });
-          button.addEventListener('touchend', mapping.stop);
-        });
-
-        const keys = {};
-        document.addEventListener('keydown', (event) => {
-          const key = (event.key || '').toLowerCase();
-          if (!key) return;
-          if (keys[key]) return;
-          keys[key] = true;
-          switch (key) {
-            case 'w':
-            case 'arrowup':
-              mapping.forward();
-              break;
-            case 's':
-            case 'arrowdown':
-              mapping.backward();
-              break;
-            case 'a':
-            case 'arrowleft':
-              mapping.left();
-              break;
-            case 'd':
-            case 'arrowright':
-              mapping.right();
-              break;
-            case ' ':
-              mapping.stop();
-              break;
-          }
-        });
-        document.addEventListener('keyup', (event) => {
-          const key = (event.key || '').toLowerCase();
-          if (!key) return;
-          keys[key] = false;
-          if (['w','s','a','d','arrowup','arrowdown','arrowleft','arrowright'].includes(key)) {
-            mapping.stop();
-          }
-        });
-      }
-
-      connectBtn.addEventListener('click', () => {
-        openWebSocket();
-      });
-
-      teleopLobbySelect.addEventListener('change', () => {
-        selectedLobbyId = teleopLobbySelect.value;
-        botAutoSelectPending = true;
-        updateBotSelect(currentBots);
-      });
-
-      botSelect.addEventListener('change', () => {
-        const value = botSelect.value;
-        botAutoSelectPending = false;
-        applyBotSelection(value, Boolean(value));
-      });
-
-      robotInput.addEventListener('input', () => {
-        if (selectedBotNamespace) {
-          botSelect.value = '';
-          selectedBotNamespace = '';
-          botAutoSelectPending = false;
-          applyBotSelection('', false);
-        }
-      });
-
-      registerBtn.addEventListener('click', registerUser);
-      loginBtn.addEventListener('click', loginUser);
-      logoutBtn.addEventListener('click', logoutUser);
-      createLobbyBtn.addEventListener('click', createLobby);
-      createBotBtn.addEventListener('click', createBot);
-
-      async function registerUser() {
-        authMessage.textContent = '';
-        const username = authEmailInput.value.trim();
-        const password = authPasswordInput.value;
-        if (!username || !password) {
-          authMessage.textContent = 'Enter a username/email and password.';
-          return;
-        }
-        if (password.length > 32) {
-          authMessage.textContent = 'Password must be at most 32 characters.';
-          return;
-        }
-        try {
-          const resp = await fetch(`${apiBase()}/auth/register`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              email: username,
-              password,
-            }),
-          });
-          if (!resp.ok) throw new Error(await resp.text());
-          const data = await resp.json();
-          setAuth(data.access_token, data.user.email);
-          authMessage.textContent = 'Registration successful.';
-        } catch (err) {
-          console.error(err);
-          authMessage.textContent = 'Registration failed.';
-        }
-      }
-
-      async function loginUser() {
-        authMessage.textContent = '';
-        const username = authEmailInput.value.trim();
-        const password = authPasswordInput.value;
-        if (!username || !password) {
-          authMessage.textContent = 'Enter a username/email and password.';
-          return;
-        }
-        if (password.length > 32) {
-          authMessage.textContent = 'Password must be at most 32 characters.';
-          return;
-        }
-        try {
-          const resp = await fetch(`${apiBase()}/auth/login`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              email: username,
-              password,
-            }),
-          });
-          if (!resp.ok) throw new Error(await resp.text());
-          const data = await resp.json();
-          setAuth(data.access_token, data.user.email);
-          authMessage.textContent = 'Signed in.';
-        } catch (err) {
-          console.error(err);
-          authMessage.textContent = 'Sign-in failed.';
-        }
-      }
-
-      function logoutUser() {
-        setAuth('', '');
-        authMessage.textContent = 'Logged out.';
-      }
-
-      async function fetchLobbies() {
-        if (!authToken) {
-          lobbyList.innerHTML = '';
-          currentLobbies = [];
-          updateBotLobbyOptions();
-          return;
-        }
-        try {
-          const resp = await fetch(`${apiBase()}/lobbies`, {
-            headers: authHeaders(),
-          });
-          if (resp.status === 401) {
-            setAuth('', '');
-            authMessage.textContent = 'Session expired. Please log in again.';
-            throw new Error('Unauthorized');
-          }
-          if (!resp.ok) throw new Error(await resp.text());
-          const data = await resp.json();
-          currentLobbies = data.items || [];
-          renderLobbies(currentLobbies);
-          updateBotLobbyOptions();
-          updateTeleopLobbyOptions();
-        } catch (err) {
-          console.error(err);
-          lobbyList.innerHTML = '<p class="keyboard-hint" style="text-align:left;">Failed to load lobbies.</p>';
-        }
-      }
-
-      function renderLobbies(lobbies) {
-        if (!lobbies.length) {
-          lobbyList.innerHTML = '<p class="keyboard-hint" style="text-align:left;">No lobbies yet.</p>';
-          return;
-        }
-        lobbyList.innerHTML = lobbies.map((lobby) => `
-          <div class="lobby-item">
-            <h4>${lobby.name}</h4>
-            <p class="lobby-meta">Host: ${lobby.ros_host}:${lobby.ros_port}</p>
-            <p class="lobby-meta">Owner: ${lobby.owner_email}</p>
-            <p class="lobby-meta">Key: ${lobby.access_key || 'hidden'}</p>
-            <p class="lobby-meta">Created: ${new Date(lobby.created_at).toLocaleString()}</p>
-            ${lobby.description ? `<p>${lobby.description}</p>` : ''}
-          </div>
-        `).join('');
-      }
-
-      function updateTeleopLobbyOptions() {
-        if (!currentLobbies.length) {
-          teleopLobbySelect.innerHTML = '<option value="">No lobbies available</option>';
-          teleopLobbySelect.disabled = true;
-          selectedLobbyId = '';
-          botAutoSelectPending = true;
-          updateBotSelect(currentBots);
-          return;
-        }
-        teleopLobbySelect.disabled = false;
-        if (!selectedLobbyId || !currentLobbies.some((lobby) => String(lobby.id) === selectedLobbyId)) {
-          selectedLobbyId = String(currentLobbies[0].id);
-          botAutoSelectPending = true;
-        }
-        teleopLobbySelect.innerHTML = currentLobbies
-          .map((lobby) => `<option value="${lobby.id}">${lobby.name}</option>`)
-          .join('');
-        teleopLobbySelect.value = selectedLobbyId;
-        updateBotSelect(currentBots);
-      }
-
-      function updateBotLobbyOptions() {
-        const owned = currentLobbies.filter((lobby) => lobby.owner_email === currentUserEmail);
-        if (!owned.length) {
-          botLobbySelect.innerHTML = '<option value="">No owned lobbies</option>';
-          botLobbySelect.disabled = true;
-           botLobbySelect.value = '';
-          return;
-        }
-        botLobbySelect.disabled = false;
-        const options = ['<option value="">Select a lobby</option>'].concat(
-          owned.map((lobby) => `<option value="${lobby.id}">${lobby.name}</option>`)
-        );
-        botLobbySelect.innerHTML = options.join('');
-        botLobbySelect.value = '';
-      }
-
-      async function fetchBots() {
-        if (!authToken) {
-          currentBots = [];
-          botList.innerHTML = '';
-          selectedBotNamespace = '';
-          botAutoSelectPending = true;
-          updateBotSelect([]);
-          return;
-        }
-        try {
-          const resp = await fetch(`${apiBase()}/bots`, {
-            headers: authHeaders(),
-          });
-          if (resp.status === 401) {
-            setAuth('', '');
-            botMessage.textContent = 'Session expired. Please log in again.';
-            throw new Error('Unauthorized');
-          }
-          if (!resp.ok) throw new Error(await resp.text());
-          const data = await resp.json();
-          currentBots = data.items || [];
-          renderBots(currentBots);
-          updateBotSelect(currentBots);
-        } catch (err) {
-          console.error(err);
-          botList.innerHTML = '<p class="keyboard-hint" style="text-align:left;">Failed to load bots.</p>';
-        }
-      }
-
-      function renderBots(bots) {
-        if (!bots.length) {
-          botList.innerHTML = '<p class="keyboard-hint" style="text-align:left;">No bots yet.</p>';
-          return;
-        }
-        botList.innerHTML = bots.map((bot) => `
-          <div class="lobby-item">
-            <h4>${bot.name}</h4>
-            <p class="lobby-meta">Namespace: ${bot.ros_namespace}</p>
-            <p class="lobby-meta">Lobby: ${bot.lobby_name}</p>
-            <p class="lobby-meta">Owner: ${bot.owner_email}</p>
-            <p class="lobby-meta">Created: ${new Date(bot.created_at).toLocaleString()}</p>
-            ${bot.description ? `<p>${bot.description}</p>` : ''}
-          </div>
-        `).join('');
-      }
-
-      async function createBot() {
-        if (!authToken) {
-          botMessage.textContent = 'Sign in to register bots.';
-          return;
-        }
-        const lobbyId = Number(botLobbySelect.value);
-        const name = botNameInput.value.trim();
-        const namespace = botNamespaceInput.value.trim();
-        if (!lobbyId) {
-          botMessage.textContent = 'Select a lobby.';
-          return;
-        }
-        if (!name || !namespace) {
-          botMessage.textContent = 'Enter a bot name and namespace.';
-          return;
-        }
-        try {
-          const body = {
-            lobby_id: lobbyId,
-            name,
-            ros_namespace: namespace,
-            description: botDescInput.value || null,
+          if (!isKeyDown) return;
+          const actions = {
+            w: () => adjustLinearSpeed(LINEAR_STEP),
+            arrowup: () => adjustLinearSpeed(LINEAR_STEP),
+            i: () => adjustLinearSpeed(LINEAR_STEP),
+            s: () => adjustLinearSpeed(-LINEAR_STEP),
+            arrowdown: () => adjustLinearSpeed(-LINEAR_STEP),
+            k: () => adjustLinearSpeed(-LINEAR_STEP),
+            r: () => adjustLinearSpeed(LINEAR_FINE_STEP),
+            f: () => adjustLinearSpeed(-LINEAR_FINE_STEP),
+            pageup: () => adjustLinearSpeed(LINEAR_FINE_STEP),
+            pagedown: () => adjustLinearSpeed(-LINEAR_FINE_STEP),
+            a: () => adjustAngularSpeed(ANGULAR_STEP),
+            arrowleft: () => adjustAngularSpeed(ANGULAR_STEP),
+            j: () => adjustAngularSpeed(ANGULAR_STEP),
+            d: () => adjustAngularSpeed(-ANGULAR_STEP),
+            arrowright: () => adjustAngularSpeed(-ANGULAR_STEP),
+            l: () => adjustAngularSpeed(-ANGULAR_STEP),
+            q: () => adjustAngularSpeed(ANGULAR_FINE_STEP),
+            e: () => adjustAngularSpeed(-ANGULAR_FINE_STEP),
           };
-          const resp = await fetch(`${apiBase()}/bots`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', ...authHeaders() },
-            body: JSON.stringify(body),
+          const action = actions[key];
+          if (action) {
+            event.preventDefault();
+            action();
+          }
+        }
+
+        window.addEventListener('keydown', (event) => handleKey(event, true));
+        window.addEventListener('keyup', (event) => handleKey(event, false));
+
+        leaveRobotBtn.addEventListener('click', () => {
+          teardownTeleop();
+        });
+
+        if (videoFullscreenBtn && videoWrapper) {
+          videoFullscreenBtn.addEventListener('click', () => {
+            if (document.fullscreenElement === videoWrapper) {
+              document.exitFullscreen?.();
+            } else {
+              videoWrapper.requestFullscreen?.().catch((err) => console.warn('Fullscreen failed', err));
+            }
           });
+          document.addEventListener('fullscreenchange', updateFullscreenButton);
+        }
+
+        function copyText(text, successMessage, target = lobbyMessage) {
+          if (!text) return;
+          navigator.clipboard.writeText(text).then(() => {
+            if (!target) return;
+            target.textContent = successMessage;
+            setTimeout(() => {
+              if (target.textContent === successMessage) {
+                target.textContent = '';
+              }
+            }, 2000);
+          });
+        }
+
+        async function openManageLobby(lobbyId) {
+          if (!state.authToken) return;
+          if (lobbyId) {
+            const detail = await fetchLobbyDetail(lobbyId);
+            state.manageLobby = detail;
+            manageTitle.textContent = `Manage ${detail.name}`;
+            populateLobbyForm(detail);
+            renderManageRobots();
+            showView('manage');
+            resetBotForm();
+          } else {
+            state.manageLobby = null;
+            manageTitle.textContent = 'Create lobby';
+            populateLobbyForm(null);
+            renderManageRobots();
+            showView('manage');
+            resetBotForm();
+          }
+        }
+
+        async function fetchLobbyDetail(lobbyId) {
+          const resp = await fetch(`${apiBase()}/lobbies/${lobbyId}`, { headers: authHeaders() });
           if (!resp.ok) throw new Error(await resp.text());
-          botMessage.textContent = 'Bot registered.';
+          return resp.json();
+        }
+
+        function populateLobbyForm(lobby) {
+          lobbyNameInput.value = lobby?.name || '';
+          lobbyDescInput.value = lobby?.description || '';
+          lobbyVisibilityInput.value = lobby?.is_public ? 'public' : 'private';
+          lobbyMessage.textContent = '';
+          if (lobby?.access_key) {
+            keyRow.hidden = false;
+            lobbyKeyEl.textContent = lobby.access_key;
+          } else {
+            keyRow.hidden = true;
+          }
+          deleteLobbyBtn.style.display = lobby ? 'inline-flex' : 'none';
+        }
+
+        function renderManageRobots() {
+          const lobby = state.manageLobby;
+          robotListManage.innerHTML = '';
+          if (!lobby?.bots?.length) {
+            const empty = document.createElement('div');
+            empty.className = 'empty-state';
+            empty.textContent = 'No robots yet. Use the form below to add one.';
+            robotListManage.appendChild(empty);
+            return;
+          }
+          lobby.bots.forEach((bot) => {
+            if (bot.is_deleted) return;
+            const card = document.createElement('div');
+            card.className = 'robot-card';
+            card.innerHTML = `
+              <h4>${bot.name}</h4>
+              <p class="hint">Namespace: ${bot.ros_namespace}</p>
+              <p class="hint">${bot.description || '—'}</p>
+            `;
+            const actions = document.createElement('div');
+            actions.className = 'lobby-actions';
+            const editBtn = document.createElement('button');
+            editBtn.className = 'secondary';
+            editBtn.textContent = 'Edit';
+            editBtn.addEventListener('click', () => startBotEdit(bot));
+            const deleteBtn = document.createElement('button');
+            deleteBtn.className = 'ghost';
+            deleteBtn.textContent = 'Archive';
+            deleteBtn.addEventListener('click', () => deleteBot(bot.id));
+            actions.appendChild(editBtn);
+            actions.appendChild(deleteBtn);
+            card.appendChild(actions);
+            robotListManage.appendChild(card);
+          });
+        }
+
+        function startBotEdit(bot) {
+          botForm.dataset.editingId = bot.id;
+          botNameInput.value = bot.name;
+          botNamespaceInput.value = bot.ros_namespace;
+          botDescInput.value = bot.description || '';
+          botMessage.textContent = `Editing ${bot.name}`;
+        }
+
+        function resetBotForm() {
+          delete botForm.dataset.editingId;
           botNameInput.value = '';
           botNamespaceInput.value = '';
           botDescInput.value = '';
-          fetchBots();
-        } catch (err) {
-          console.error(err);
-          botMessage.textContent = 'Failed to register bot.';
+          botMessage.textContent = '';
         }
-      }
 
-      function applyBotSelection(namespace, autoConnect = false) {
-        selectedBotNamespace = namespace || '';
-        if (namespace) {
-          robotInput.value = namespace;
-          robotInput.classList.add('readonly');
-          robotInput.setAttribute('readonly', 'readonly');
-        } else {
-          robotInput.classList.remove('readonly');
-          robotInput.removeAttribute('readonly');
-        }
-        if (namespace && autoConnect) {
-          openWebSocket();
-          startVideo();
-        }
-      }
-
-      function updateBotSelect(bots) {
-        const filtered = selectedLobbyId
-          ? bots.filter((bot) => String(bot.lobby_id) === selectedLobbyId)
-          : [];
-        if (!filtered.length) {
-          botSelect.innerHTML = '<option value="">No bots registered for this lobby</option>';
-          botSelect.disabled = true;
-          botSelect.value = '';
-          selectedBotNamespace = '';
-          applyBotSelection('', false);
-          return;
-        }
-        botSelect.disabled = false;
-        const options = ['<option value="">Custom namespace</option>'].concat(
-          filtered.map((bot) => `<option value="${bot.ros_namespace}">${bot.name} (${bot.ros_namespace})</option>`)
-        );
-        botSelect.innerHTML = options.join('');
-        const hasMatch = selectedBotNamespace && filtered.some((bot) => bot.ros_namespace === selectedBotNamespace);
-        if (hasMatch) {
-          botSelect.value = selectedBotNamespace;
-          applyBotSelection(selectedBotNamespace, false);
-          return;
-        }
-        if (botAutoSelectPending) {
-          selectedBotNamespace = filtered[0].ros_namespace;
-          botSelect.value = selectedBotNamespace;
-          botAutoSelectPending = false;
-          applyBotSelection(selectedBotNamespace, true);
-        } else {
-          botSelect.value = '';
-          selectedBotNamespace = '';
-          applyBotSelection('', false);
-        }
-      }
-
-      async function createLobby() {
-        if (!authToken) {
-          lobbyMessage.textContent = 'Sign in to create a lobby.';
-          return;
-        }
-        try {
+        lobbyForm.addEventListener('submit', async (event) => {
+          event.preventDefault();
+          if (!state.authToken) return;
+          lobbyMessage.textContent = 'Saving...';
           const body = {
             name: lobbyNameInput.value,
-            ros_host: lobbyHostInput.value,
-            ros_port: Number(lobbyPortInput.value),
             description: lobbyDescInput.value || null,
+            is_public: lobbyVisibilityInput.value === 'public',
           };
-          const resp = await fetch(`${apiBase()}/lobbies`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', ...authHeaders() },
-            body: JSON.stringify(body),
-          });
-          if (!resp.ok) throw new Error(await resp.text());
-          const data = await resp.json();
-          lobbyMessage.textContent = `Lobby created. Key: ${data.access_key || 'hidden'}`;
-          lobbyNameInput.value = '';
-          lobbyDescInput.value = '';
-          fetchLobbies();
-        } catch (err) {
-          console.error(err);
-          lobbyMessage.textContent = 'Failed to create lobby.';
-        }
-      }
-
-      async function startVideo() {
-        const robot = robotInput.value.trim() || 'bot_alpha';
-        if (pc) {
-          pc.close();
-        }
-        pc = new RTCPeerConnection();
-        const inboundStream = new MediaStream();
-        pc.addEventListener('track', (event) => {
-          inboundStream.addTrack(event.track);
-          videoElement.srcObject = inboundStream;
+          try {
+            if (state.manageLobby) {
+              const resp = await fetch(`${apiBase()}/lobbies/${state.manageLobby.id}`, {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json', ...authHeaders() },
+                body: JSON.stringify(body),
+              });
+              if (!resp.ok) throw new Error(await resp.text());
+              lobbyMessage.textContent = 'Lobby updated.';
+              const updated = await fetchLobbyDetail(state.manageLobby.id);
+              state.manageLobby = updated;
+              if (state.currentLobby?.id === updated.id) {
+                state.currentLobby = updated;
+                renderLobbyDetail();
+              }
+              keyRow.hidden = !updated.access_key;
+              lobbyKeyEl.textContent = updated.access_key || '';
+            } else {
+              const resp = await fetch(`${apiBase()}/lobbies`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', ...authHeaders() },
+                body: JSON.stringify(body),
+              });
+              if (!resp.ok) throw new Error(await resp.text());
+              const created = await resp.json();
+              lobbyMessage.textContent = 'Lobby created. Key copied to clipboard.';
+              copyText(created.access_key, 'Lobby key copied');
+              const detail = await fetchLobbyDetail(created.id);
+              state.manageLobby = detail;
+              populateLobbyForm(detail);
+              renderManageRobots();
+            }
+            fetchLobbies();
+          } catch (err) {
+            console.error(err);
+            lobbyMessage.textContent = 'Failed to save lobby.';
+          }
         });
-        pc.addTransceiver('video', { direction: 'recvonly' });
-        try {
-          const offer = await pc.createOffer();
-          await pc.setLocalDescription(offer);
-          const resp = await fetch(`${apiBase()}/robots/${encodeURIComponent(robot)}/webrtc`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', ...authHeaders() },
-            body: JSON.stringify({ sdp: offer.sdp, type: offer.type })
+
+        deleteLobbyBtn.addEventListener('click', async () => {
+          if (!state.manageLobby) return;
+          if (!confirm('Delete this lobby?')) return;
+          try {
+            const resp = await fetch(`${apiBase()}/lobbies/${state.manageLobby.id}`, {
+              method: 'DELETE',
+              headers: authHeaders(),
+            });
+            if (!resp.ok) throw new Error(await resp.text());
+            lobbyMessage.textContent = 'Lobby deleted.';
+            const deletedId = state.manageLobby.id;
+            state.manageLobby = null;
+            if (state.currentLobby?.id === deletedId) {
+              state.currentLobby = null;
+              teardownTeleop();
+            }
+            fetchLobbies();
+            showView('lobbies');
+          } catch (err) {
+            console.error(err);
+            lobbyMessage.textContent = 'Failed to delete lobby.';
+          }
+        });
+
+        copyKeyBtn.addEventListener('click', () => {
+          if (state.manageLobby?.access_key) {
+            copyText(state.manageLobby.access_key, 'Lobby key copied');
+          }
+        });
+
+        botForm.addEventListener('submit', async (event) => {
+          event.preventDefault();
+          if (!state.manageLobby) {
+            botMessage.textContent = 'Save the lobby first.';
+            return;
+          }
+          const payload = {
+            name: botNameInput.value,
+            ros_namespace: botNamespaceInput.value,
+            description: botDescInput.value || null,
+          };
+          try {
+            if (botForm.dataset.editingId) {
+              const resp = await fetch(`${apiBase()}/bots/${botForm.dataset.editingId}`, {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json', ...authHeaders() },
+                body: JSON.stringify(payload),
+              });
+              if (!resp.ok) throw new Error(await resp.text());
+              botMessage.textContent = 'Robot updated.';
+            } else {
+              payload.lobby_id = state.manageLobby.id;
+              const resp = await fetch(`${apiBase()}/bots`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', ...authHeaders() },
+                body: JSON.stringify(payload),
+              });
+              if (!resp.ok) throw new Error(await resp.text());
+              botMessage.textContent = 'Robot added.';
+            }
+            const detail = await fetchLobbyDetail(state.manageLobby.id);
+            state.manageLobby = detail;
+            if (state.currentLobby?.id === detail.id) {
+              state.currentLobby = detail;
+              renderLobbyDetail();
+            }
+            renderManageRobots();
+            resetBotForm();
+          } catch (err) {
+            console.error(err);
+            botMessage.textContent = 'Failed to save robot.';
+          }
+        });
+
+        cancelBotEditBtn.addEventListener('click', (event) => {
+          event.preventDefault();
+          resetBotForm();
+        });
+
+        async function deleteBot(botId) {
+          if (!confirm('Archive this robot?')) return;
+          try {
+            const resp = await fetch(`${apiBase()}/bots/${botId}`, {
+              method: 'DELETE',
+              headers: authHeaders(),
+            });
+            if (!resp.ok) throw new Error(await resp.text());
+            const detail = await fetchLobbyDetail(state.manageLobby.id);
+            state.manageLobby = detail;
+            if (state.currentLobby?.id === detail.id) {
+              state.currentLobby = detail;
+              renderLobbyDetail();
+            }
+            renderManageRobots();
+          } catch (err) {
+            console.error(err);
+          }
+        }
+
+        async function handleAuth(path) {
+          authMessage.textContent = 'Working...';
+          try {
+            const resp = await fetch(`${apiBase()}/auth/${path}`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ email: authEmailInput.value, password: authPasswordInput.value }),
+            });
+            if (!resp.ok) throw new Error(await resp.text());
+            const data = await resp.json();
+            setAuth(data.access_token, data.user.email);
+            authMessage.textContent = path === 'login' ? 'Welcome back!' : 'Account created.';
+          } catch (err) {
+            console.error(err);
+            authMessage.textContent = 'Authentication failed.';
+          }
+        }
+
+        menuToggle.addEventListener('click', (event) => {
+          event.stopPropagation();
+          setMenuOpen(!state.menuOpen);
+        });
+
+        document.addEventListener('click', (event) => {
+          if (!state.menuOpen) return;
+          if (!userMenu.contains(event.target)) {
+            setMenuOpen(false);
+          }
+        });
+
+        offlineToggleBtn.addEventListener('click', () => {
+          state.offlineCollapsed = !state.offlineCollapsed;
+          updateOfflineSection();
+        });
+
+        detailCopyKeyBtn.addEventListener('click', () => {
+          if (state.currentLobby?.access_key) {
+            copyText(state.currentLobby.access_key, 'Lobby key copied', detailKeyMessage);
+          }
+        });
+
+        registerBtn.addEventListener('click', () => handleAuth('register'));
+        loginBtn.addEventListener('click', () => handleAuth('login'));
+        logoutBtn.addEventListener('click', () => {
+          setAuth('', '');
+          setMenuOpen(false);
+          authMessage.textContent = 'Signed out.';
+        });
+
+        newLobbyBtn.addEventListener('click', () => openManageLobby(null));
+        detailBackBtn.addEventListener('click', () => showView('lobbies'));
+        manageBackBtn.addEventListener('click', () => showView('lobbies'));
+        detailEditBtn.addEventListener('click', () => {
+          if (state.currentLobby?.id) openManageLobby(state.currentLobby.id);
+        });
+        detailJoinBtn.addEventListener('click', () => setLobbyTab('lobby'));
+
+        tabButtons.forEach((btn) => {
+          btn.addEventListener('click', () => {
+            setLobbyTab(btn.dataset.tab);
           });
-          if (!resp.ok) {
-            throw new Error(`WebRTC signaling failed: ${resp.status}`);
+        });
+
+        async function checkApiHealth() {
+          try {
+            const resp = await fetch(`${apiBase()}/health`);
+            if (!resp.ok) throw new Error('API error');
+            const json = await resp.json();
+            apiStatus.textContent = json.ros_connected ? 'API & ROS connected' : 'API up, ROS unavailable';
+            apiStatus.className = `status ${json.ros_connected ? 'connected' : 'disconnected'}`;
+          } catch (err) {
+            apiStatus.textContent = 'API unreachable';
+            apiStatus.className = 'status disconnected';
           }
-          const answer = await resp.json();
-          await pc.setRemoteDescription(answer);
-          videoStatus.textContent = `Video streaming (${robot})`;
-          videoStatus.className = 'status connected';
-          videoMeta.textContent = 'ROS stream active';
-        } catch (err) {
-          console.error('Video setup failed', err);
-          videoStatus.textContent = 'Video error';
-          videoStatus.className = 'status disconnected';
-          if (pc) {
-            pc.close();
-            pc = null;
-          }
-          videoMeta.textContent = 'Sim: -- s | Delay: -- s';
         }
-      }
 
-      function stopVideo() {
-        if (pc) {
-          pc.close();
-          pc = null;
-        }
-        if (videoElement.srcObject) {
-          videoElement.srcObject.getTracks().forEach((track) => track.stop());
-          videoElement.srcObject = null;
-        }
-        videoStatus.textContent = 'Video idle';
-        videoStatus.className = 'status disconnected';
-        videoMeta.textContent = 'Sim: -- s | Delay: -- s';
-      }
-
-      videoBtn.addEventListener('click', startVideo);
-      videoStopBtn.addEventListener('click', stopVideo);
-
-      window.addEventListener('beforeunload', () => {
-        if (pc) pc.close();
-        if (ws) ws.close();
-      });
-
-      checkApiHealth();
-      setInterval(checkApiHealth, 10_000);
-      initControls();
-      updateAuthUI();
+        setInterval(checkApiHealth, 30000);
+        checkApiHealth();
+        updateAuthState();
+        updateTeleopKeyState();
+        updateSpeedIndicators();
+        setTeleopAvailability(false);
+        updateFullscreenButton();
+      })();
     </script>
   </body>
 </html>

@@ -144,16 +144,6 @@ resource "google_cloud_run_service" "api" {
         }
 
         env {
-          name  = "ROS_BRIDGE_HOST"
-          value = var.ros_bridge_host
-        }
-
-        env {
-          name  = "ROS_BRIDGE_PORT"
-          value = tostring(var.ros_bridge_port)
-        }
-
-        env {
           name  = "ROS_PUSH_KEY"
           value = var.ros_push_key
         }

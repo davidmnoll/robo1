@@ -24,6 +24,7 @@ services:
     environment:
       - ROS_DOMAIN_ID=0
       - CAMERA_NAMESPACES=bot_alpha,bot_beta
+      - API_BASE_URL=http://robot-gateway:8080/api
       - API_PUSH_URL=http://robot-gateway:8080/api/internal/frames
       - ROS_PUSH_KEY=${ROS_PUSH_KEY:-local-dev-key}
     ports:
@@ -53,11 +54,9 @@ services:
       context: ./api
     container_name: robot-gateway
     environment:
-      - ROS_BRIDGE_HOST=ros-core
-      - ROS_BRIDGE_PORT=9090
       - ROS_PUSH_KEY=${ROS_PUSH_KEY:-local-dev-key}
       - 'SEED_USERS_JSON=[{"email":"dmn322","password":"TEST123!"}]'
-      - "SEED_LOBBIES_JSON=[{\"name\":\"ros-core\",\"ros_host\":\"ros-core\",\"ros_port\":9090,\"description\":\"Default ROS core lobby\",\"access_key\":\"${ROS_PUSH_KEY:-local-dev-key}\",\"owner_email\":\"dmn322\"}]"
+      - "SEED_LOBBIES_JSON=[{\"name\":\"ros-core\",\"description\":\"Default ROS core lobby\",\"access_key\":\"${ROS_PUSH_KEY:-local-dev-key}\",\"owner_email\":\"dmn322\",\"is_public\":true}]"
       - "SEED_BOTS_JSON=[{\"name\":\"Arena Bot Alpha\",\"ros_namespace\":\"bot_alpha\",\"lobby_name\":\"ros-core\",\"owner_email\":\"dmn322\"},{\"name\":\"Arena Bot Beta\",\"ros_namespace\":\"bot_beta\",\"lobby_name\":\"ros-core\",\"owner_email\":\"dmn322\"}]"
       - GATEWAY_NAME=gateway-1
       - DATABASE_URL=postgresql+asyncpg://robot:robot@db:5432/robotarena

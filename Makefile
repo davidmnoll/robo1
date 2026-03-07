@@ -13,6 +13,7 @@ help:
 	@echo "  make tmux-stack - Launch ros-core, sim, api, web in tmux (preferred)"
 	@echo "  make all        - Alias for make tmux-stack"
 	@echo "  make attach     - Attach to tmux session (arena)"
+	@echo "  make db-shell   - Open psql shell inside the db container"
 	@echo ""
 	@echo "Legacy TurtleBot3 helpers (not wired into the arena stack):"
 	@echo "  make sim / bridge / web / controller"
@@ -69,6 +70,9 @@ teleop:
 # Launch new tmux-based dev stack (ros-core, sim, api, web)
 tmux-stack:
 	./scripts/run_stack_tmux.sh
+
+db-shell:
+	docker compose exec db psql -U robot -d robotarena
 
 # Cleanup
 clean:

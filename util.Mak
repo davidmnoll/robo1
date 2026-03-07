@@ -23,6 +23,11 @@ create-service-account:
     --member="serviceAccount:terraform@robo1-489405.iam.gserviceaccount.com" \
     --role="roles/resourcemanager.projectIamAdmin"
 
+	gcloud projects add-iam-policy-binding robo1-489405 \
+       --member="serviceAccount:terraform@robo1-489405.iam.gserviceaccount.com" \
+       --role="roles/run.admin"
+
+
 
 	# After that, generate a key (so we can upload it as GCP_TERRAFORM_TOKEN):
 
