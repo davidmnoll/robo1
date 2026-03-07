@@ -787,9 +787,25 @@ def parse_seed_entries(raw: Optional[str], model: type[SeedModelT], label: str) 
     return entries
 
 
-def require_internal_api_key(provided: str) -> None:
-    if settings.lobby_key and provided != settings.lobby_key:
-        raise HTTPException(status_code=403, detail="invalid lobby key")
+async def require_internal_api_key(provided: str, session: Optional[AsyncSession] = None) -> None:
+    provided_key = (provided or "").strip()
+    if not provided_key:
+        raise HTTPException(status_code=403, detail="missing lobby key")
+    if settings.lobby_key and secrets.compare_digest(provided_key, settings.lobby_key):
+        return
+    owns_session = False
+    if session is None:
+        session = AsyncSessionLocal()
+        owns_session = True
+    try:
+        stmt = select(Lobby.id).where(Lobby.access_key == provided_key).where(Lobby.is_deleted.is_(False))
+        result = await session.execute(stmt)
+        lobby_id = result.scalar_one_or_none()
+        if lobby_id is None:
+            raise HTTPException(status_code=403, detail="invalid lobby key")
+    finally:
+        if owns_session and session is not None:
+            await session.close()
 
 
 def update_robot_heartbeat(robot_id: str) -> None:
@@ -1043,8 +1059,9 @@ async def ingest_camera_frame(
     robot_id: str,
     payload: FramePayload,
     x_api_key: str = Header(default=""),
+    session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
-    require_internal_api_key(x_api_key)
+    await require_internal_api_key(x_api_key, session)
     update_robot_heartbeat(robot_id)
     try:
         decoded = base64.b64decode(payload.data)
@@ -1068,7 +1085,8 @@ async def ingest_camera_frame(
 @app.websocket("/api/internal/ws/lobbies")
 async def robot_command_bridge(websocket: WebSocket) -> None:
     api_key = websocket.query_params.get("api_key") or websocket.headers.get("x-api-key", "")
-    require_internal_api_key(api_key or "")
+    async with AsyncSessionLocal() as session:
+        await require_internal_api_key(api_key or "", session)
     await websocket.accept()
     try:
         while True:
