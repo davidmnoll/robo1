@@ -182,12 +182,18 @@ websocket_robot_map: Dict[int, set[str]] = {}
 command_ws_lock = asyncio.Lock()
 
 app = FastAPI(title="Robot Gateway API", version="0.1.0")
+cors_allow_origins = settings.cors_allow_origins
+allow_credentials = True
+if "*" in cors_allow_origins:
+    # Wildcard origins are incompatible with credentialed requests per the CORS spec.
+    allow_credentials = False
+    cors_allow_origins = ["*"]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.cors_allow_origins,
+    allow_origins=cors_allow_origins,
     allow_methods=["*"],
     allow_headers=["*"],
-    allow_credentials=True,
+    allow_credentials=allow_credentials,
 )
 
 

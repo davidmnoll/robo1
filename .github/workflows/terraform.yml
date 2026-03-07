@@ -99,6 +99,7 @@ jobs:
         run: gcloud auth configure-docker gcr.io --quiet
 
       - name: Ensure API image exists
+        id: ensure_image
         env:
           IMAGE: gcr.io/${{ env.PROJECT_ID }}/robot-gateway:${{ github.sha }}
         run: |
@@ -114,6 +115,7 @@ jobs:
             echo "API image ${IMAGE} already exists."
           fi
           echo "TF_VAR_api_image=${IMAGE}" >> "${GITHUB_ENV}"
+          echo "api_image=${IMAGE}" >> "${GITHUB_OUTPUT}"
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
@@ -134,6 +136,7 @@ jobs:
         env:
           TF_VAR_project_id: ${{ env.PROJECT_ID }}
           TF_VAR_region: us-central1
+          TF_VAR_api_image: ${{ steps.ensure_image.outputs.api_image }}
 
       - name: Terraform Apply
         if: github.ref == 'refs/heads/main'
@@ -142,6 +145,7 @@ jobs:
         env:
           TF_VAR_project_id: ${{ env.PROJECT_ID }}
           TF_VAR_region: us-central1
+          TF_VAR_api_image: ${{ steps.ensure_image.outputs.api_image }}
 
       - name: Capture Terraform outputs
         if: github.ref == 'refs/heads/main'
