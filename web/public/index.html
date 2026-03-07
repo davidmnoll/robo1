@@ -1235,6 +1235,7 @@
             state.pc.close();
             state.pc = null;
           }
+          console.info('[video] starting WebRTC for', namespace);
           const pc = new RTCPeerConnection();
           state.pc = pc;
           const inboundStream = new MediaStream();
@@ -1246,6 +1247,7 @@
           videoStatus.textContent = 'Video connecting...';
           videoStatus.className = 'status disconnected';
           pc.addEventListener('connectionstatechange', () => {
+            console.info('[video] connection state changed:', pc.connectionState);
             if (pc.connectionState === 'connected') {
               videoStatus.textContent = `Video streaming (${namespace})`;
               videoStatus.className = 'status connected';
@@ -1255,11 +1257,16 @@
               videoStatus.className = 'status disconnected';
             }
           });
+          pc.addEventListener('iceconnectionstatechange', () => {
+            console.info('[video] ICE connection state:', pc.iceConnectionState);
+          });
           pc.createOffer()
             .then((offer) => {
+              console.info('[video] created offer, setting local description');
               return pc.setLocalDescription(offer).then(() => offer);
             })
             .then((offer) => {
+              console.info('[video] sending offer to gateway');
               return fetch(`${apiBase()}/robots/${encodeURIComponent(namespace)}/webrtc`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json', ...authHeaders() },
@@ -1270,7 +1277,10 @@
               if (!resp.ok) throw new Error('WebRTC signaling failed');
               return resp.json();
             })
-            .then((answer) => pc.setRemoteDescription(answer))
+            .then((answer) => {
+              console.info('[video] received answer, setting remote description');
+              return pc.setRemoteDescription(answer);
+            })
             .catch((err) => {
               console.error('Video setup failed', err);
               videoStatus.textContent = 'Video error';
