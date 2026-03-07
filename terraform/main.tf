@@ -52,6 +52,22 @@ locals {
     GATEWAY_NAME                = var.gateway_name
     CORS_ALLOW_ORIGINS          = local.cors_allow_origins_json
   }, local.env_seed_overrides)
+  region_host_suffix = {
+    "us-central1"     = "uc.r.appspot.com"
+    "us-east1"        = "ue.r.appspot.com"
+    "us-east4"        = "ue.r.appspot.com"
+    "us-west2"        = "uw.r.appspot.com"
+    "us-west3"        = "uw.r.appspot.com"
+    "us-west4"        = "uw.r.appspot.com"
+    "europe-west1"    = "ew.r.appspot.com"
+    "europe-west2"    = "ew.r.appspot.com"
+    "europe-west3"    = "ew.r.appspot.com"
+    "asia-northeast1" = "an.r.appspot.com"
+    "asia-south1"     = "as.r.appspot.com"
+  }
+  app_engine_domain_suffix = lookup(local.region_host_suffix, var.region, "uc.r.appspot.com")
+  app_engine_url_prefix    = var.app_engine_service_name == "default" ? var.project_id : "${var.app_engine_service_name}-dot-${var.project_id}"
+  app_engine_url           = "https://${local.app_engine_url_prefix}.${local.app_engine_domain_suffix}"
 }
 
 resource "google_project_service" "enabled" {

@@ -1,6 +1,6 @@
 output "app_engine_url" {
   description = "Public URL for the deployed App Engine service"
-  value       = google_app_engine_flexible_app_version.api.version_url
+  value       = local.app_engine_url
 }
 
 output "app_engine_service_name" {
