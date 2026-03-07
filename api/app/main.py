@@ -740,15 +740,19 @@ async def broadcast_robot_command(command: RobotCommand) -> None:
         "robot": command.robot_namespace,
         "command": robot_command_to_out(command).model_dump(mode="json"),
     }
+    logger.info("Broadcasting command %s to %s subscribers", command.id, command.robot_namespace)
     async with command_ws_lock:
         sockets = list(command_subscribers.get(command.robot_namespace, set()))
     for websocket in sockets:
+        peer = websocket.client or ("unknown", 0)
         try:
             await websocket.send_json(payload)
         except RuntimeError:
             # websocket likely closed; cleanup asynchronously
+            logger.warning("Websocket runtime error for %s:%s; unregistering", peer[0], peer[1])
             await unregister_robot_ws(websocket)
-        except Exception:
+        except Exception as exc:
+            logger.warning("Websocket send error for %s:%s: %s", peer[0], peer[1], exc)
             await unregister_robot_ws(websocket)
 
 
@@ -1094,6 +1098,8 @@ async def robot_command_bridge(websocket: WebSocket) -> None:
     async with AsyncSessionLocal() as session:
         await require_internal_api_key(api_key or "", session)
     await websocket.accept()
+    peer = websocket.client or ("unknown", 0)
+    logger.info("Command websocket connected from %s:%s", peer[0], peer[1])
     try:
         while True:
             message = await websocket.receive_json()
@@ -1105,6 +1111,7 @@ async def robot_command_bridge(websocket: WebSocket) -> None:
                     update_robot_heartbeat(robot)
                 await send_pending_commands_to_connection(websocket, robots)
                 await websocket.send_json({"type": "subscribed", "robots": robots})
+                logger.info("Registered websocket %s:%s for robots: %s", peer[0], peer[1], robots)
             elif msg_type == "heartbeat":
                 robots = [value.strip() for value in message.get("robots", []) if value.strip()]
                 if not robots:

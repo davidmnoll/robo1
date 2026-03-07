@@ -6,7 +6,7 @@ services:
       - CAMERA_NAMESPACES=${CAMERA_NAMESPACES:-bot_alpha,bot_beta}
       # - API_BASE_URL=${CLOUD_RUN_API_URL:?Set CLOUD_RUN_API_URL (App Engine base e.g. https://robot-gateway-.../api)}
       # - ROS_PUSH_KEY=${CLOUD_RUN_LOBBY_KEY:?Set CLOUD_RUN_LOBBY_KEY to lobby access key}
-      - API_BASE_URL=https://robot-gateway-117741782816.us-central1.run.app/api
+      - API_BASE_URL=https://robo1-489405.uc.r.appspot.com/api
       - ROS_PUSH_KEY=0Qwnn2YcqcHpnB9YNcBcbw
 
   sim:
