@@ -1,0 +1,14 @@
+version: "3.9"
+
+services:
+  ros-core:
+    environment:
+      - CAMERA_NAMESPACES=${CAMERA_NAMESPACES:-bot_alpha,bot_beta}
+      - API_BASE_URL=${CLOUD_RUN_API_URL:?Set CLOUD_RUN_API_URL (e.g. https://robot-gateway-.../api)}
+      - API_PUSH_URL=${CLOUD_RUN_API_URL:?Set CLOUD_RUN_API_URL}/internal/frames
+      - ROS_PUSH_KEY=${CLOUD_RUN_LOBBY_KEY:?Set CLOUD_RUN_LOBBY_KEY to lobby access key}
+
+  sim:
+    environment:
+      - ROS_BRIDGE_HOST=ros-core
+      - ROS_BRIDGE_PORT=9090

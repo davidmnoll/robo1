@@ -403,6 +403,8 @@ async def create_lobby(
     await session.commit()
     await session.refresh(lobby)
     lobby.owner = current_user
+    # Ensure relationships are hydrated before serialization to avoid lazy-load errors
+    await session.refresh(lobby, attribute_names=["owner", "bots"])
     return lobby_to_out(lobby, current_user)
 
 
