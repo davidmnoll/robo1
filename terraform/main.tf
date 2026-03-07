@@ -161,8 +161,8 @@ resource "google_app_engine_flexible_app_version" "api" {
   }
 
   automatic_scaling {
-    min_instances = var.app_engine_min_instances
-    max_instances = var.app_engine_max_instances
+    min_total_instances = var.app_engine_min_instances
+    max_total_instances = var.app_engine_max_instances
     cpu_utilization {
       target_utilization = 0.6
     }
