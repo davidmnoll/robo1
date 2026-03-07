@@ -160,8 +160,12 @@ resource "google_app_engine_flexible_app_version" "api" {
     disk_gb   = var.app_engine_disk_size_gb
   }
 
-  manual_scaling {
-    instances = 1
+  automatic_scaling {
+    min_num_instances = var.app_engine_min_instances
+    max_num_instances = var.app_engine_max_instances
+    cpu_utilization {
+      target_utilization = 0.6
+    }
   }
 
   liveness_check {

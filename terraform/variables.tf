@@ -25,7 +25,7 @@ variable "api_image" {
 variable "app_engine_version_id" {
   description = "Version identifier for the App Engine Flex deployment"
   type        = string
-  default     = "flex-v1"
+  default     = "flex-v2"
 }
 
 variable "app_engine_cpu" {
