@@ -173,7 +173,7 @@ async def get_session() -> AsyncSession:
 
 logger = logging.getLogger("gateway")
 logging.basicConfig(level=logging.INFO)
-frame_queues: Dict[str, asyncio.Queue[Tuple[int, int, bytes]]] = {}
+frame_queues: Dict[str, asyncio.Queue[Tuple[int, int, str, bytes]]] = {}
 peer_connections: set[RTCPeerConnection] = set()
 active_robot_streams: Dict[str, set[str]] = defaultdict(set)
 robot_heartbeats: Dict[str, datetime] = {}
@@ -1088,7 +1088,8 @@ async def ingest_camera_frame(
     if queue.full():
         with contextlib.suppress(asyncio.QueueEmpty):
             queue.get_nowait()
-    queue.put_nowait((payload.width, payload.height, image_bytes))
+    encoding = (payload.encoding or "bgra8").strip() or "bgra8"
+    queue.put_nowait((payload.width, payload.height, encoding, image_bytes))
     return {"robot": robot_id, "status": "queued"}
 
 
@@ -1217,7 +1218,7 @@ async def start_webrtc(
             _set_active(False)
 
 
-def get_frame_queue(robot_id: str) -> asyncio.Queue[Tuple[int, int, bytes]]:
+def get_frame_queue(robot_id: str) -> asyncio.Queue[Tuple[int, int, str, bytes]]:
     if robot_id not in frame_queues:
         frame_queues[robot_id] = asyncio.Queue(maxsize=1)
     return frame_queues[robot_id]
@@ -1230,9 +1231,78 @@ class RobotVideoTrack(VideoStreamTrack):
 
     async def recv(self) -> VideoFrame:
         queue = get_frame_queue(self.robot_id)
-        width, height, payload = await queue.get()
-        logger.info("RobotVideoTrack sending frame for %s: %sx%s", self.robot_id, width, height)
-        array = np.frombuffer(payload, dtype=np.uint8).reshape((height, width, 4))
+        width, height, encoding, payload = await queue.get()
+        logger.info(
+            "RobotVideoTrack sending frame for %s: %sx%s (%s)",
+            self.robot_id,
+            width,
+            height,
+            encoding,
+        )
+        payload_size = len(payload)
+        payload_channels = payload_size // max(width * height, 1)
+        logger.debug(
+            "Frame payload size=%s channels=%s for %s",
+            payload_size,
+            payload_channels,
+            self.robot_id,
+        )
+        try:
+            array = convert_image_to_bgra(width, height, encoding, payload)
+        except ValueError as exc:
+            logger.warning(
+                "Dropping invalid frame for %s (%s): %s", self.robot_id, encoding, exc
+            )
+            array = np.zeros((max(height, 1), max(width, 1), 4), dtype=np.uint8)
+        else:
+            logger.debug(
+                "Frame decoded for %s into array shape %s dtype %s",
+                self.robot_id,
+                array.shape,
+                array.dtype,
+            )
         frame = VideoFrame.from_ndarray(array, format="bgra")
         frame.pts, frame.time_base = await self.next_timestamp()
         return frame
+
+
+def convert_image_to_bgra(width: int, height: int, encoding: str, payload: bytes) -> np.ndarray:
+    if width <= 0 or height <= 0:
+        raise ValueError("frame dimensions must be positive")
+    encoding_normalized = (encoding or "bgra8").strip().lower()
+    pixel_count = width * height
+    buffer = np.frombuffer(payload, dtype=np.uint8)
+    if buffer.size % pixel_count != 0:
+        raise ValueError("payload size does not align with frame dimensions")
+
+    def _with_alpha(channels: np.ndarray) -> np.ndarray:
+        alpha = np.full((height, width, 1), 255, dtype=np.uint8)
+        return np.concatenate((channels, alpha), axis=2)
+
+    if encoding_normalized == "bgra8":
+        return buffer.reshape((height, width, 4))
+    if encoding_normalized == "rgba8":
+        rgba = buffer.reshape((height, width, 4))
+        return rgba[..., [2, 1, 0, 3]]
+    if encoding_normalized in {"bgr8", "rgb8"}:
+        channels = buffer.reshape((height, width, 3))
+        if encoding_normalized == "rgb8":
+            channels = channels[..., ::-1]
+        return _with_alpha(channels)
+    if encoding_normalized in {"mono8", "8uc1"}:
+        gray = buffer.reshape((height, width, 1))
+        mono = np.repeat(gray, 3, axis=2)
+        return _with_alpha(mono)
+
+    channel_count = buffer.size // pixel_count
+    if channel_count == 4:
+        return buffer.reshape((height, width, 4))
+    if channel_count == 3:
+        channels = buffer.reshape((height, width, 3))
+        return _with_alpha(channels)
+    if channel_count == 1:
+        gray = buffer.reshape((height, width, 1))
+        mono = np.repeat(gray, 3, axis=2)
+        return _with_alpha(mono)
+
+    raise ValueError(f"unsupported encoding '{encoding_normalized}' with {channel_count} channels")

@@ -77,6 +77,9 @@ class RobotBridgeNode(Node):
         try:
             resp = self.session.post(url, json=payload, headers=self.headers, timeout=2)
             resp.raise_for_status()
+            self.get_logger().debug(
+                "Pushed frame for %s (%sx%s encoded as %s)", robot_id, msg.width, msg.height, payload["encoding"]
+            )
         except requests.RequestException as exc:
             self.get_logger().warning(f"Failed to push frame for {robot_id}: {exc}")
 
@@ -123,6 +126,13 @@ class RobotBridgeNode(Node):
             self.get_logger().warning("Received invalid JSON on command websocket")
             return
         if payload.get("type") == "command":
+            robot = payload.get("robot")
+            cmd = payload.get("command") or {}
+            linear_x = float(cmd.get("linear_x", 0.0))
+            angular_z = float(cmd.get("angular_z", 0.0))
+            self.get_logger().info(
+                f"Queued command {cmd.get('id')} for {robot} (lin_x={linear_x:.3f} ang_z={angular_z:.3f})"
+            )
             self.command_queue.put(payload)
 
     def _ws_on_close(self, ws: websocket.WebSocketApp, close_status_code, close_msg) -> None:

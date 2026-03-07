@@ -760,6 +760,7 @@
           linearSpeed: 0,
           angularSpeed: 0,
         };
+        let lobbyFetchController = null;
 
         function apiBase() {
           if (staticApiBase.endsWith('/api')) return staticApiBase;
@@ -770,9 +771,19 @@
           return state.authToken ? { 'Authorization': 'Bearer ' + state.authToken } : {};
         }
 
+        function cancelLobbyFetch() {
+          if (lobbyFetchController) {
+            lobbyFetchController.abort();
+            lobbyFetchController = null;
+          }
+        }
+
         function setAuth(token, email) {
           state.authToken = token || '';
           state.userEmail = email || '';
+          if (!state.authToken) {
+            cancelLobbyFetch();
+          }
           if (state.authToken) {
             localStorage.setItem('arenaToken', state.authToken);
             localStorage.setItem('arenaUserEmail', state.userEmail);
@@ -832,13 +843,19 @@
 
         async function fetchLobbies() {
           if (!state.authToken) {
+            cancelLobbyFetch();
             lobbyEmptyEl.hidden = false;
             lobbyEmptyEl.textContent = 'Sign in to view and create lobbies.';
             lobbyListEl.innerHTML = '';
             return;
           }
+          cancelLobbyFetch();
+          lobbyFetchController = new AbortController();
           try {
-            const resp = await fetch(`${apiBase()}/lobbies`, { headers: authHeaders() });
+            const resp = await fetch(`${apiBase()}/lobbies`, {
+              headers: authHeaders(),
+              signal: lobbyFetchController.signal,
+            });
             if (resp.status === 401) {
               authMessage.textContent = 'Session expired. Please sign in again.';
               setAuth('', '');
@@ -853,6 +870,9 @@
             saveCachedLobbies(state.userEmail, state.cachedLobbies);
             renderLobbies();
           } catch (err) {
+            if (err && err.name === 'AbortError') {
+              return;
+            }
             console.error('Failed to load lobbies', err);
             state.lobbies = [];
             state.offlineLobbies = state.cachedLobbies.slice();
@@ -861,6 +881,8 @@
               lobbyEmptyEl.hidden = false;
               lobbyEmptyEl.textContent = 'Failed to load lobbies.';
             }
+          } finally {
+            lobbyFetchController = null;
           }
         }
 
