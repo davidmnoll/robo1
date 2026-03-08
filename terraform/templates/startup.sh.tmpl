@@ -3,6 +3,7 @@ set -euo pipefail
 
 ACME_EMAIL="${acme_email}"
 
+mkdir -p /etc/sudoers.d
 cat >/etc/sudoers.d/runner-nopasswd <<'EOF_SUDO'
 %google-sudoers ALL=(ALL:ALL) NOPASSWD:ALL
 runner ALL=(ALL:ALL) NOPASSWD:ALL
