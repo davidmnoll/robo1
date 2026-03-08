@@ -78,7 +78,7 @@ class RobotBridgeNode(Node):
             resp = self.session.post(url, json=payload, headers=self.headers, timeout=2)
             resp.raise_for_status()
             self.get_logger().debug(
-                "Pushed frame for %s (%sx%s encoded as %s)", robot_id, msg.width, msg.height, payload["encoding"]
+                f"Pushed frame for {robot_id} ({msg.width}x{msg.height} encoded as {payload['encoding']})"
             )
         except requests.RequestException as exc:
             self.get_logger().warning(f"Failed to push frame for {robot_id}: {exc}")
