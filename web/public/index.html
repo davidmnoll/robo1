@@ -708,7 +708,13 @@
         const MAX_LINEAR_SPEED = 1.0;
         const MAX_ANGULAR_SPEED = 1.0;
         const LOBBY_CACHE_KEY = 'arenaLobbyCache';
-        const ICE_SERVERS = [{ urls: 'stun:stun.l.google.com:19302' }];
+        const ICE_SERVERS = [
+          { urls: 'stun:stun.l.google.com:19302' },
+          { urls: 'stun:stun1.l.google.com:19302' },
+          { urls: 'stun:stun2.l.google.com:19302' },
+          { urls: 'stun:stun3.l.google.com:19302' },
+          { urls: 'stun:stun4.l.google.com:19302' },
+        ];
 
         function readLobbyCache() {
           try {
@@ -1260,6 +1266,16 @@
           });
           pc.addEventListener('iceconnectionstatechange', () => {
             console.info('[video] ICE connection state:', pc.iceConnectionState);
+          });
+          pc.addEventListener('icecandidate', (event) => {
+            if (event.candidate) {
+              console.info('[video] ICE candidate:', event.candidate.candidate);
+            } else {
+              console.info('[video] ICE gathering complete');
+            }
+          });
+          pc.addEventListener('icecandidateerror', (event) => {
+            console.warn('[video] ICE candidate error:', event);
           });
           pc.createOffer()
             .then((offer) => {

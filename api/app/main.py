@@ -1177,7 +1177,15 @@ async def start_webrtc(
     queue = get_frame_queue(robot_id)
     if queue.empty():
         logger.warning("No frames received yet for %s; WebRTC stream may be blank", robot_id)
-    ice_config = RTCConfiguration(iceServers=[RTCIceServer(urls="stun:stun.l.google.com:19302")])
+    ice_config = RTCConfiguration(
+        iceServers=[
+            RTCIceServer(urls="stun:stun.l.google.com:19302"),
+            RTCIceServer(urls="stun:stun1.l.google.com:19302"),
+            RTCIceServer(urls="stun:stun2.l.google.com:19302"),
+            RTCIceServer(urls="stun:stun3.l.google.com:19302"),
+            RTCIceServer(urls="stun:stun4.l.google.com:19302"),
+        ]
+    )
     pc = RTCPeerConnection(configuration=ice_config)
     peer_connections.add(pc)
     active_added = False
@@ -1200,12 +1208,25 @@ async def start_webrtc(
     @pc.on("connectionstatechange")
     async def _on_state_change() -> None:
         state = pc.connectionState
+        logger.info("WebRTC connection state for %s: %s", robot_id, state)
         if state == "connected":
             _set_active(True)
         elif state in {"failed", "closed", "disconnected"}:
             _set_active(False)
             peer_connections.discard(pc)
             await pc.close()
+
+    @pc.on("iceconnectionstatechange")
+    async def _on_ice_state_change() -> None:
+        logger.info("ICE connection state for %s: %s", robot_id, pc.iceConnectionState)
+
+    @pc.on("icecandidate")
+    async def _on_ice_candidate(event) -> None:
+        candidate = event
+        if candidate is None:
+            logger.info("ICE gathering complete for %s", robot_id)
+        else:
+            logger.info("ICE candidate for %s: %s", robot_id, candidate)
 
     try:
         pc.addTrack(RobotVideoTrack(robot_id))
