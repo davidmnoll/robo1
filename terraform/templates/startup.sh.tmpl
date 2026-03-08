@@ -16,17 +16,17 @@ cat >/usr/local/bin/deploy_api.sh <<'EOF_SCRIPT'
 #!/usr/bin/env bash
 set -euo pipefail
 
-IMAGE="${1:-}"
-if [[ -z "${IMAGE}" ]]; then
+IMAGE="$${1:-}"
+if [[ -z "$${IMAGE}" ]]; then
   echo "Usage: deploy_api.sh IMAGE" >&2
   exit 1
 fi
 
-/usr/bin/docker pull "${IMAGE}"
+/usr/bin/docker pull "$${IMAGE}"
 /usr/bin/docker rm -f robot-gateway >/dev/null 2>&1 || true
 /usr/bin/docker run -d --name robot-gateway --network host --restart=always \
   --env-file /etc/robot-gateway/env \
-  "${IMAGE}"
+  "$${IMAGE}"
 EOF_SCRIPT
 chmod +x /usr/local/bin/deploy_api.sh
 
