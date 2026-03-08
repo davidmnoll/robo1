@@ -50,7 +50,7 @@ chmod +x /usr/local/bin/deploy_api.sh
 
 /usr/local/bin/deploy_api.sh ${api_image}
 
-if [[ -n "${ACME_EMAIL}" ]]; then
+if [[ -n "$${ACME_EMAIL}" ]]; then
   cat >/etc/caddy/Caddyfile <<EOF_CADDY
 ${api_domain} {
     tls ${acme_email}
@@ -58,7 +58,7 @@ ${api_domain} {
 }
 EOF_CADDY
 else
-  cat >/etc/caddy/Caddyfile <<'EOF_CADDY'
+  cat >/etc/caddy/Caddyfile <<EOF_CADDY
 ${api_domain} {
     reverse_proxy http://127.0.0.1:${api_port}
 }
@@ -71,9 +71,9 @@ DOCKER_CADDY_ARGS=(
   -v /var/lib/caddy:/data
   -v /var/log/caddy:/config
 )
-if [[ -n "${ACME_EMAIL}" ]]; then
-  DOCKER_CADDY_ARGS+=(-e "CADDY_ACME_EMAIL=${ACME_EMAIL}")
+if [[ -n "$${ACME_EMAIL}" ]]; then
+  DOCKER_CADDY_ARGS+=(-e "CADDY_ACME_EMAIL=$${ACME_EMAIL}")
 fi
 
 /usr/bin/docker rm -f caddy >/dev/null 2>&1 || true
-/usr/bin/docker run "${DOCKER_CADDY_ARGS[@]}" caddy:2
+/usr/bin/docker run "$${DOCKER_CADDY_ARGS[@]}" caddy:2
