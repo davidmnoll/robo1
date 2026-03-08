@@ -50,14 +50,20 @@ chmod +x /usr/local/bin/deploy_api.sh
 
 /usr/local/bin/deploy_api.sh ${api_image}
 
-cat >/etc/caddy/Caddyfile <<'EOF_CADDY'
+if [[ -n "${ACME_EMAIL}" ]]; then
+  cat >/etc/caddy/Caddyfile <<EOF_CADDY
 ${api_domain} {
-%{ if acme_email != "" }
     tls ${acme_email}
-%{ endif }
     reverse_proxy http://127.0.0.1:${api_port}
 }
 EOF_CADDY
+else
+  cat >/etc/caddy/Caddyfile <<'EOF_CADDY'
+${api_domain} {
+    reverse_proxy http://127.0.0.1:${api_port}
+}
+EOF_CADDY
+fi
 
 DOCKER_CADDY_ARGS=(
   -d --name caddy --network host --restart=always
