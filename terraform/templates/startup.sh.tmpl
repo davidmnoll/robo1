@@ -12,6 +12,13 @@ curl -s https://packages.cloud.google.com/apt/doc/apt-key.gpg | gpg --dearmor \
 apt-get update
 apt-get install -y google-cloud-cli
 gcloud auth configure-docker gcr.io --quiet
+
+# Ensure metadata-created users (e.g., GitHub runner) can use passwordless sudo
+cat >/etc/sudoers.d/google-cloud <<'EOF_SUDO'
+%google-sudoers ALL=(ALL:ALL) NOPASSWD:ALL
+EOF_SUDO
+chmod 0440 /etc/sudoers.d/google-cloud
+
 systemctl enable docker
 systemctl start docker
 
