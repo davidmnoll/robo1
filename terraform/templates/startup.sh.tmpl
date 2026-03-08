@@ -15,8 +15,8 @@ apt-get install -y docker.io apt-transport-https ca-certificates gnupg
 # Install Google Cloud CLI so the VM can authenticate Docker pulls with its service account
 echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" \
   > /etc/apt/sources.list.d/google-cloud-sdk.list
-curl -s https://packages.cloud.google.com/apt/doc/apt-key.gpg | gpg --dearmor \
-  -o /usr/share/keyrings/cloud.google.gpg
+curl -s https://packages.cloud.google.com/apt/doc/apt-key.gpg | \
+  gpg --dearmor --yes --batch -o /usr/share/keyrings/cloud.google.gpg
 apt-get update
 apt-get install -y google-cloud-cli
 gcloud auth configure-docker gcr.io --quiet
@@ -24,7 +24,7 @@ gcloud auth configure-docker gcr.io --quiet
 systemctl enable docker
 systemctl start docker
 
-mkdir -p /etc/robot-gateway /var/lib/caddy /var/log/caddy
+mkdir -p /etc/robot-gateway /etc/caddy /var/lib/caddy /var/log/caddy
 
 cat >/etc/robot-gateway/env <<'EOF_ENV'
 ${env_content}
