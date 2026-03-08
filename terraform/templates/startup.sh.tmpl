@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+apt-get update
+apt-get install -y docker.io
+systemctl enable docker
+systemctl start docker
+
+mkdir -p /etc/robot-gateway /var/lib/caddy /var/log/caddy
+
+cat >/etc/robot-gateway/env <<'EOF_ENV'
+${env_content}
+EOF_ENV
+
+cat >/usr/local/bin/deploy_api.sh <<'EOF_SCRIPT'
+#!/usr/bin/env bash
+set -euo pipefail
+
+IMAGE="${1:-}"
+if [[ -z "${IMAGE}" ]]; then
+  echo "Usage: deploy_api.sh IMAGE" >&2
+  exit 1
+fi
+
+/usr/bin/docker pull "${IMAGE}"
+/usr/bin/docker rm -f robot-gateway >/dev/null 2>&1 || true
+/usr/bin/docker run -d --name robot-gateway --network host --restart=always \
+  --env-file /etc/robot-gateway/env \
+  "${IMAGE}"
+EOF_SCRIPT
+chmod +x /usr/local/bin/deploy_api.sh
+
+/usr/local/bin/deploy_api.sh ${api_image}
+
+cat >/etc/caddy/Caddyfile <<'EOF_CADDY'
+${api_domain} {
+    reverse_proxy http://127.0.0.1:${api_port}
+}
+EOF_CADDY
+
+/usr/bin/docker rm -f caddy >/dev/null 2>&1 || true
+/usr/bin/docker run -d --name caddy --network host --restart=always \
+  -v /etc/caddy/Caddyfile:/etc/caddy/Caddyfile \
+  -v /var/lib/caddy:/data \
+  -v /var/log/caddy:/config \
+  caddy:2

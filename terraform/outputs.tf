@@ -1,11 +1,21 @@
-output "app_engine_url" {
-  description = "Public URL for the deployed App Engine service"
-  value       = "https://${var.project_id}.${local.app_engine_domain_suffix}"
+output "api_url" {
+  description = "Public URL for the API endpoint (fronted by Caddy + sslip.io)"
+  value       = "https://${google_compute_address.api_ip.address}.sslip.io"
 }
 
-output "app_engine_service_name" {
-  description = "Name of the App Engine service"
-  value       = var.app_engine_service_name
+output "api_vm_ip" {
+  description = "Static external IP assigned to the API VM"
+  value       = google_compute_address.api_ip.address
+}
+
+output "api_vm_name" {
+  description = "Name of the Compute Engine VM hosting the API"
+  value       = var.api_vm_name
+}
+
+output "api_vm_zone" {
+  description = "Zone where the API VM resides"
+  value       = var.zone
 }
 
 output "db_instance_connection_name" {

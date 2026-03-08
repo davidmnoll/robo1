@@ -23,56 +23,34 @@ provider "google" {
   region  = var.region
 }
 
-data "google_project" "project" {
-  project_id = var.project_id
-}
-
 locals {
   required_services = [
-    "appengineflex.googleapis.com",
-    "appengine.googleapis.com",
     "sqladmin.googleapis.com",
     "compute.googleapis.com",
     "iam.googleapis.com",
-    "containerregistry.googleapis.com",
-    "artifactregistry.googleapis.com"
+    "artifactregistry.googleapis.com",
+    "containerregistry.googleapis.com"
   ]
 
   cloud_sql_instance_name   = coalesce(var.cloud_sql_instance_name, "${var.project_id}-api-db")
   cloud_sql_connection_name = "${var.project_id}:${var.region}:${local.cloud_sql_instance_name}"
   db_name                   = coalesce(var.db_name, "robotarena")
   db_user                   = coalesce(var.db_user, "robot")
-  database_url              = "postgresql+asyncpg://${local.db_user}:${random_password.db_password.result}@/${local.db_name}?host=/cloudsql/${local.cloud_sql_connection_name}"
   cors_allow_origins_json   = jsonencode(var.cors_allow_origins)
   env_seed_overrides = { for item in [
     { key = "SEED_USERS_JSON", value = var.seed_users_json },
     { key = "SEED_LOBBIES_JSON", value = var.seed_lobbies_json },
     { key = "SEED_BOTS_JSON", value = var.seed_bots_json },
   ] : item.key => item.value if length(trimspace(item.value)) > 0 }
-  app_engine_env = merge({
-    DATABASE_URL                = local.database_url
+  api_env = merge({
+    DATABASE_URL                = "postgresql+asyncpg://${local.db_user}:${random_password.db_password.result}@${google_sql_database_instance.postgres.ip_address[0].ip_address}/${local.db_name}"
     SECRET_KEY                  = random_password.api_secret_key.result
     ACCESS_TOKEN_EXPIRE_MINUTES = tostring(var.access_token_expire_minutes)
     ROS_PUSH_KEY                = var.ros_push_key
     GATEWAY_NAME                = var.gateway_name
     CORS_ALLOW_ORIGINS          = local.cors_allow_origins_json
   }, local.env_seed_overrides)
-  region_host_suffix = {
-    "us-central1"     = "uc.r.appspot.com"
-    "us-east1"        = "ue.r.appspot.com"
-    "us-east4"        = "ue.r.appspot.com"
-    "us-west2"        = "uw.r.appspot.com"
-    "us-west3"        = "uw.r.appspot.com"
-    "us-west4"        = "uw.r.appspot.com"
-    "europe-west1"    = "ew.r.appspot.com"
-    "europe-west2"    = "ew.r.appspot.com"
-    "europe-west3"    = "ew.r.appspot.com"
-    "asia-northeast1" = "an.r.appspot.com"
-    "asia-south1"     = "as.r.appspot.com"
-  }
-  app_engine_domain_suffix = lookup(local.region_host_suffix, var.region, "uc.r.appspot.com")
-  app_engine_url_prefix    = var.project_id
-  app_engine_url           = "https://${local.app_engine_url_prefix}.${local.app_engine_domain_suffix}"
+  api_env_content = join("\n", [for k, v in local.api_env : "${k}=${v}"])
 }
 
 resource "google_project_service" "enabled" {
@@ -107,6 +85,10 @@ resource "google_sql_database_instance" "postgres" {
     tier = var.db_instance_tier
     ip_configuration {
       ipv4_enabled = true
+      authorized_networks {
+        name  = "api-vm"
+        value = google_compute_address.api_ip.address
+      }
     }
     disk_autoresize = true
     disk_size       = var.db_disk_size_gb
@@ -128,140 +110,94 @@ resource "google_sql_user" "app" {
   password = random_password.db_password.result
 }
 
-resource "google_service_account" "api_runner" {
-  account_id   = "robot-gateway"
-  display_name = "Robot gateway App Engine"
+resource "google_compute_address" "api_ip" {
+  name    = "${var.api_vm_name}-ip"
+  region  = var.region
+  project = var.project_id
+}
+
+resource "google_service_account" "api_vm" {
+  account_id   = "robot-gateway-vm"
+  display_name = "Robot gateway VM"
   project      = var.project_id
 }
 
-resource "google_project_iam_member" "app_cloudsql_client" {
-  project = var.project_id
-  role    = "roles/cloudsql.client"
-  member  = "serviceAccount:${google_service_account.api_runner.email}"
-}
-
-resource "google_project_iam_member" "app_logs_writer" {
+resource "google_project_iam_member" "api_vm_logs_writer" {
   project = var.project_id
   role    = "roles/logging.logWriter"
-  member  = "serviceAccount:${google_service_account.api_runner.email}"
+  member  = "serviceAccount:${google_service_account.api_vm.email}"
 }
 
-resource "google_project_iam_member" "app_registry_reader" {
-  project = var.project_id
-  role    = "roles/storage.objectViewer"
-  member  = "serviceAccount:${google_service_account.api_runner.email}"
-}
-
-resource "google_project_iam_member" "app_artifact_registry_reader" {
+resource "google_project_iam_member" "api_vm_artifact_reader" {
   project = var.project_id
   role    = "roles/artifactregistry.reader"
-  member  = "serviceAccount:${google_service_account.api_runner.email}"
+  member  = "serviceAccount:${google_service_account.api_vm.email}"
 }
 
-resource "google_project_iam_member" "default_service_registry_reader" {
+resource "google_project_iam_member" "api_vm_storage_viewer" {
   project = var.project_id
   role    = "roles/storage.objectViewer"
-  member  = "serviceAccount:${var.project_id}@appspot.gserviceaccount.com"
+  member  = "serviceAccount:${google_service_account.api_vm.email}"
 }
 
-resource "google_project_iam_member" "default_service_artifact_registry_reader" {
-  project = var.project_id
-  role    = "roles/artifactregistry.reader"
-  member  = "serviceAccount:${var.project_id}@appspot.gserviceaccount.com"
+resource "google_compute_firewall" "api_http" {
+  name    = "${var.api_vm_name}-http"
+  network = "default"
+  allow {
+    protocol = "tcp"
+    ports    = ["80", "443"]
+  }
+  target_tags   = var.api_vm_network_tags
+  source_ranges = ["0.0.0.0/0"]
 }
 
-resource "google_project_iam_member" "compute_service_registry_reader" {
-  project = var.project_id
-  role    = "roles/storage.objectViewer"
-  member  = "serviceAccount:${data.google_project.project.number}-compute@developer.gserviceaccount.com"
+resource "google_compute_firewall" "api_udp" {
+  name    = "${var.api_vm_name}-udp"
+  network = "default"
+  allow {
+    protocol = "udp"
+    ports    = ["1024-65535"]
+  }
+  target_tags   = var.api_vm_network_tags
+  source_ranges = ["0.0.0.0/0"]
 }
 
-resource "google_project_iam_member" "compute_service_artifact_registry_reader" {
-  project = var.project_id
-  role    = "roles/artifactregistry.reader"
-  member  = "serviceAccount:${data.google_project.project.number}-compute@developer.gserviceaccount.com"
-}
+resource "google_compute_instance" "api_vm" {
+  name         = var.api_vm_name
+  machine_type = var.api_vm_machine_type
+  zone         = var.zone
+  tags         = var.api_vm_network_tags
 
-resource "google_project_iam_member" "gae_service_agent_registry_reader" {
-  project = var.project_id
-  role    = "roles/storage.objectViewer"
-  member  = "serviceAccount:service-${data.google_project.project.number}@gae-api-prod.google.com.iam.gserviceaccount.com"
-}
-
-resource "google_project_iam_member" "gae_service_agent_artifact_registry_reader" {
-  project = var.project_id
-  role    = "roles/artifactregistry.reader"
-  member  = "serviceAccount:service-${data.google_project.project.number}@gae-api-prod.google.com.iam.gserviceaccount.com"
-}
-
-resource "google_app_engine_flexible_app_version" "api" {
-  project         = var.project_id
-  service         = var.app_engine_service_name
-  version_id      = var.app_engine_version_id
-  runtime         = "custom"
-  service_account = google_service_account.api_runner.email
-
-  deployment {
-    container {
-      image = var.api_image
+  boot_disk {
+    initialize_params {
+      image = "projects/ubuntu-os-cloud/global/images/family/ubuntu-2204-lts"
+      size  = var.api_vm_disk_size_gb
     }
   }
 
-  resources {
-    cpu       = var.app_engine_cpu
-    memory_gb = var.app_engine_memory_gb
-    disk_gb   = var.app_engine_disk_size_gb
-  }
-
-  automatic_scaling {
-    min_total_instances = var.app_engine_min_instances
-    max_total_instances = var.app_engine_max_instances
-    cpu_utilization {
-      target_utilization = 0.6
+  network_interface {
+    network = "default"
+    access_config {
+      nat_ip = google_compute_address.api_ip.address
     }
   }
 
-  liveness_check {
-    path = "/api/health"
-  }
+  metadata_startup_script = templatefile("${path.module}/templates/startup.sh.tmpl", {
+    api_image   = var.api_image
+    api_port    = var.api_app_port
+    api_domain  = "${google_compute_address.api_ip.address}.sslip.io"
+    env_content = local.api_env_content
+  })
 
-  readiness_check {
-    path = "/api/health"
-  }
-
-  env_variables = local.app_engine_env
-
-  beta_settings = {
-    "cloud_sql_instances" = local.cloud_sql_connection_name
-  }
-
-  lifecycle {
-    create_before_destroy = true
+  service_account {
+    email  = google_service_account.api_vm.email
+    scopes = ["https://www.googleapis.com/auth/cloud-platform"]
   }
 
   depends_on = [
-    google_sql_database_instance.postgres,
-    google_project_iam_member.app_cloudsql_client,
-    google_project_iam_member.app_logs_writer,
-    google_project_iam_member.app_registry_reader,
-    google_project_iam_member.app_artifact_registry_reader,
-    google_project_iam_member.default_service_registry_reader,
-    google_project_iam_member.default_service_artifact_registry_reader,
-    google_project_iam_member.compute_service_registry_reader,
-    google_project_iam_member.compute_service_artifact_registry_reader,
-    google_project_iam_member.gae_service_agent_registry_reader,
-    google_project_iam_member.gae_service_agent_artifact_registry_reader
+    google_project_service.enabled,
+    google_project_iam_member.api_vm_logs_writer,
+    google_project_iam_member.api_vm_artifact_reader,
+    google_project_iam_member.api_vm_storage_viewer
   ]
-}
-
-resource "google_app_engine_service_split_traffic" "default" {
-  service          = var.app_engine_service_name
-  migrate_traffic  = false
-  split {
-    allocations = {
-      "${google_app_engine_flexible_app_version.api.version_id}" = 1.0
-    }
-  }
-
-  depends_on = [google_app_engine_flexible_app_version.api]
 }

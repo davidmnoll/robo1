@@ -5,15 +5,15 @@ variable "project_id" {
 }
 
 variable "region" {
-  description = "Primary region for App Engine Flex and Cloud SQL"
+  description = "Primary region for Compute Engine and Cloud SQL"
   type        = string
   default     = "us-central1"
 }
 
-variable "app_engine_location" {
-  description = "App Engine location (e.g. us-central). Only set once per project."
+variable "zone" {
+  description = "Compute Engine zone for the API VM"
   type        = string
-  default     = "us-central"
+  default     = "us-central1-a"
 }
 
 variable "api_image" {
@@ -22,40 +22,34 @@ variable "api_image" {
   default     = "gcr.io/robo1-489405/robot-gateway:latest"
 }
 
-variable "app_engine_version_id" {
-  description = "Version identifier for the App Engine Flex deployment"
+variable "api_vm_name" {
+  description = "Name of the Compute Engine VM hosting the API"
   type        = string
-  default     = "flex-v2"
+  default     = "robot-gateway-api"
 }
 
-variable "app_engine_cpu" {
-  description = "vCPU count allocated to each App Engine Flex instance"
-  type        = number
-  default     = 1
+variable "api_vm_machine_type" {
+  description = "Compute Engine machine type for the API VM"
+  type        = string
+  default     = "e2-small"
 }
 
-variable "app_engine_memory_gb" {
-  description = "Memory (GB) allocated to each App Engine Flex instance"
+variable "api_vm_disk_size_gb" {
+  description = "Boot disk size (GB) for the API VM"
   type        = number
-  default     = 2
+  default     = 30
 }
 
-variable "app_engine_disk_size_gb" {
-  description = "Disk size (GB) allocated to each App Engine Flex instance"
-  type        = number
-  default     = 10
+variable "api_vm_network_tags" {
+  description = "Network tags applied to the API VM for firewall rules"
+  type        = list(string)
+  default     = ["robot-gateway"]
 }
 
-variable "app_engine_min_instances" {
-  description = "Minimum number of App Engine Flex instances to keep warm"
+variable "api_app_port" {
+  description = "Port exposed by the FastAPI container (proxied by Caddy)"
   type        = number
-  default     = 1
-}
-
-variable "app_engine_max_instances" {
-  description = "Maximum number of App Engine Flex instances"
-  type        = number
-  default     = 1
+  default     = 8080
 }
 
 variable "access_token_expire_minutes" {
@@ -134,9 +128,4 @@ variable "db_user" {
   description = "Application database user name"
   type        = string
   default     = null
-}
-variable "app_engine_service_name" {
-  description = "App Engine service name (first deploy must be 'default')"
-  type        = string
-  default     = "default"
 }
