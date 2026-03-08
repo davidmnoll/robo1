@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+cat >/etc/sudoers.d/runner-nopasswd <<'EOF_SUDO'
+%google-sudoers ALL=(ALL:ALL) NOPASSWD:ALL
+runner ALL=(ALL:ALL) NOPASSWD:ALL
+EOF_SUDO
+chmod 0440 /etc/sudoers.d/runner-nopasswd
+
 apt-get update
 apt-get install -y docker.io apt-transport-https ca-certificates gnupg
 
@@ -15,13 +21,6 @@ gcloud auth configure-docker gcr.io --quiet
 
 systemctl enable docker
 systemctl start docker
-
-# Ensure metadata-created users (e.g., GitHub runner) can use passwordless sudo
-cat >/etc/sudoers.d/runner-nopasswd <<'EOF_SUDO'
-%google-sudoers ALL=(ALL:ALL) NOPASSWD:ALL
-runner ALL=(ALL:ALL) NOPASSWD:ALL
-EOF_SUDO
-chmod 0440 /etc/sudoers.d/runner-nopasswd
 
 mkdir -p /etc/robot-gateway /var/lib/caddy /var/log/caddy
 
