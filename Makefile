@@ -108,15 +108,16 @@ gcloud-app-logs:
 	  exit 1; \
 	fi; \
 	gcloud config set project "${PROJECT_ID}" >/dev/null; \
-	if [ -n "${APP_VERSION}" ]; then \
-	  FILTER="resource.type=\"gae_app\" AND resource.labels.version_id=\"${APP_VERSION}\""; \
+	if [ -n "${LIMIT:-}" ]; then \
+	  LIMIT_VALUE="${LIMIT}"; \
 	else \
-	  FILTER="resource.type=\"gae_app\""; \
+	  LIMIT_VALUE=200; \
 	fi; \
+	FILTER="resource.type=\"gae_app\" AND resource.labels.version_id=\"flex-v2\""; \
 	if [ -n "${APP_SERVICE}" ]; then \
 	  FILTER="${FILTER} AND resource.labels.module_id=\"${APP_SERVICE}\""; \
 	fi; \
-	gcloud logging read "$${FILTER}" --limit="${LIMIT:-50}" --format='value(timestamp,textPayload)'
+	gcloud logging read "$${FILTER}" --limit="$${LIMIT_VALUE}" --format='value(timestamp,textPayload)'
 
 cloud-sim:
 	echo "Starting ROS bridge + Webots sim against $$CLOUD_RUN_API_URL"; \

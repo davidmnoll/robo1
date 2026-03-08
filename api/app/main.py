@@ -171,8 +171,10 @@ async def get_session() -> AsyncSession:
         yield session
 
 
-logger = logging.getLogger("gateway")
 logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("gateway")
+logging.getLogger("aioice").setLevel(logging.DEBUG)
+logging.getLogger("aiortc").setLevel(logging.DEBUG)
 frame_queues: Dict[str, asyncio.Queue[Tuple[int, int, str, bytes]]] = {}
 peer_connections: set[RTCPeerConnection] = set()
 active_robot_streams: Dict[str, set[str]] = defaultdict(set)
@@ -1210,6 +1212,15 @@ async def start_webrtc(
         state = pc.connectionState
         logger.info("WebRTC connection state for %s: %s", robot_id, state)
         if state == "connected":
+            stats = await pc.getStats()
+            for report in stats.values():
+                if report.type == "candidate-pair" and report.state == "succeeded":
+                    logger.info(
+                        "Selected ICE candidate pair for %s: local=%s remote=%s",
+                        robot_id,
+                        report.localCandidateId,
+                        report.remoteCandidateId,
+                    )
             _set_active(True)
         elif state in {"failed", "closed", "disconnected"}:
             _set_active(False)
