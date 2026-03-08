@@ -176,6 +176,8 @@ jobs:
             echo "Missing VM details; cannot deploy API container" >&2
             exit 1
           fi
+          echo "Waiting for VM startup script to finish..."
+          sleep 90
           gcloud compute ssh "${API_VM_NAME}" --zone "${API_VM_ZONE}" \
             --command "sudo /usr/local/bin/deploy_api.sh ${API_IMAGE}"
 
