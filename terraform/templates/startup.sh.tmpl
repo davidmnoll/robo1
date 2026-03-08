@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+ACME_EMAIL="${acme_email}"
+
 cat >/etc/sudoers.d/runner-nopasswd <<'EOF_SUDO'
 %google-sudoers ALL=(ALL:ALL) NOPASSWD:ALL
 runner ALL=(ALL:ALL) NOPASSWD:ALL
@@ -50,13 +52,22 @@ chmod +x /usr/local/bin/deploy_api.sh
 
 cat >/etc/caddy/Caddyfile <<'EOF_CADDY'
 ${api_domain} {
+%{ if acme_email != "" }
+    tls ${acme_email}
+%{ endif }
     reverse_proxy http://127.0.0.1:${api_port}
 }
 EOF_CADDY
 
+DOCKER_CADDY_ARGS=(
+  -d --name caddy --network host --restart=always
+  -v /etc/caddy/Caddyfile:/etc/caddy/Caddyfile
+  -v /var/lib/caddy:/data
+  -v /var/log/caddy:/config
+)
+if [[ -n "${ACME_EMAIL}" ]]; then
+  DOCKER_CADDY_ARGS+=(-e "CADDY_ACME_EMAIL=${ACME_EMAIL}")
+fi
+
 /usr/bin/docker rm -f caddy >/dev/null 2>&1 || true
-/usr/bin/docker run -d --name caddy --network host --restart=always \
-  -v /etc/caddy/Caddyfile:/etc/caddy/Caddyfile \
-  -v /var/lib/caddy:/data \
-  -v /var/log/caddy:/config \
-  caddy:2
+/usr/bin/docker run "${DOCKER_CADDY_ARGS[@]}" caddy:2

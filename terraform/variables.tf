@@ -70,6 +70,12 @@ variable "gateway_name" {
   default     = "gateway-1"
 }
 
+variable "tls_contact_email" {
+  description = "Optional email address used for ACME/Let's Encrypt certificate registration"
+  type        = string
+  default     = "dmn322@gmail.com"
+}
+
 variable "cors_allow_origins" {
   description = "List of allowed browser origins for CORS"
   type        = list(string)

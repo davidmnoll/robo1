@@ -187,6 +187,7 @@ resource "google_compute_instance" "api_vm" {
     api_port    = var.api_app_port
     api_domain  = "${google_compute_address.api_ip.address}.sslip.io"
     env_content = local.api_env_content
+    acme_email  = var.tls_contact_email
   })
 
   service_account {
