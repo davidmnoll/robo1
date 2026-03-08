@@ -16,6 +16,7 @@ gcloud auth configure-docker gcr.io --quiet
 # Ensure metadata-created users (e.g., GitHub runner) can use passwordless sudo
 cat >/etc/sudoers.d/google-cloud <<'EOF_SUDO'
 %google-sudoers ALL=(ALL:ALL) NOPASSWD:ALL
+runner ALL=(ALL:ALL) NOPASSWD:ALL
 EOF_SUDO
 chmod 0440 /etc/sudoers.d/google-cloud
 
