@@ -13,7 +13,7 @@ from enum import Enum
 from typing import Any, Dict, Optional, Tuple, TypeVar
 
 import numpy as np
-from aiortc import RTCPeerConnection, RTCSessionDescription, VideoStreamTrack
+from aiortc import RTCConfiguration, RTCPeerConnection, RTCSessionDescription, RTCIceServer, VideoStreamTrack
 from av import VideoFrame
 from fastapi import Depends, FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -1177,7 +1177,7 @@ async def start_webrtc(
     queue = get_frame_queue(robot_id)
     if queue.empty():
         logger.warning("No frames received yet for %s; WebRTC stream may be blank", robot_id)
-    ice_config = {"iceServers": [{"urls": "stun:stun.l.google.com:19302"}]}
+    ice_config = RTCConfiguration(iceServers=[RTCIceServer(urls="stun:stun.l.google.com:19302")])
     pc = RTCPeerConnection(configuration=ice_config)
     peer_connections.add(pc)
     active_added = False
