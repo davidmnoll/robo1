@@ -708,6 +708,7 @@
         const MAX_LINEAR_SPEED = 1.0;
         const MAX_ANGULAR_SPEED = 1.0;
         const LOBBY_CACHE_KEY = 'arenaLobbyCache';
+        const ICE_SERVERS = [{ urls: 'stun:stun.l.google.com:19302' }];
 
         function readLobbyCache() {
           try {
@@ -1236,7 +1237,7 @@
             state.pc = null;
           }
           console.info('[video] starting WebRTC for', namespace);
-          const pc = new RTCPeerConnection();
+          const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
           state.pc = pc;
           const inboundStream = new MediaStream();
           pc.addEventListener('track', (event) => {

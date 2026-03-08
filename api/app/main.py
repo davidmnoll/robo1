@@ -1177,7 +1177,8 @@ async def start_webrtc(
     queue = get_frame_queue(robot_id)
     if queue.empty():
         logger.warning("No frames received yet for %s; WebRTC stream may be blank", robot_id)
-    pc = RTCPeerConnection()
+    ice_config = {"iceServers": [{"urls": "stun:stun.l.google.com:19302"}]}
+    pc = RTCPeerConnection(configuration=ice_config)
     peer_connections.add(pc)
     active_added = False
 
