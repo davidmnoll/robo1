@@ -178,20 +178,8 @@ jobs:
           echo "Resetting ${API_VM_NAME} in ${API_VM_ZONE}..."
           gcloud compute instances reset "${API_VM_NAME}" --zone "${API_VM_ZONE}"
 
-      - name: Deploy API container to VM
-        if: github.ref == 'refs/heads/main'
-        env:
-          API_VM_NAME: ${{ steps.tf_outputs.outputs.api_vm_name }}
-          API_VM_ZONE: ${{ steps.tf_outputs.outputs.api_vm_zone }}
-          API_IMAGE: ${{ steps.ensure_image.outputs.api_image }}
-        run: |
-          set -euo pipefail
-          if [ -z "${API_VM_NAME:-}" ] || [ -z "${API_VM_ZONE:-}" ]; then
-            echo "Missing VM details; cannot deploy API container" >&2
-            exit 1
-          fi
-          gcloud compute ssh "${API_VM_NAME}" --zone "${API_VM_ZONE}" \
-            --command "sudo /usr/local/bin/deploy_api.sh ${API_IMAGE}"
+      # Note: The startup script already deploys the container when VM resets,
+      # so no separate SSH deploy step is needed.
 
   deploy_dashboard:
     runs-on: ubuntu-latest
