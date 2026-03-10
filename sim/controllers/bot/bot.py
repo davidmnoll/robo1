@@ -1,27 +1,46 @@
 """
-Simple placeholder controller used by both arena robots.
+Robot controller using native ROS2 for TurtleBot3.
 
-Each robot moves forward and steers away from obstacles detected by the
-front IR sensors. When a controller argument like "ROBOT_ID=bot_alpha"
-is supplied from the world file, it is exposed via the ROBOT_ID
-environment variable for future ROS integrations.
+Publishes camera images and subscribes to cmd_vel via ROS2 DDS.
+Connects to Discovery Server specified in ROS_DISCOVERY_SERVER env var.
 """
 
 from __future__ import annotations
 
-import contextlib
-import os
 import sys
+import os
+import threading
 import time
-from pathlib import Path
-from typing import Callable, Dict, Optional
 
-from controller import Camera, Robot
+# Debug output
+def debug(msg):
+    print(f"[BOT] {msg}", flush=True)
+
+debug(f"Python: {sys.executable}")
+debug(f"CWD: {os.getcwd()}")
 
 try:
-    import roslibpy
-except ImportError:  # pragma: no cover - optional dependency in sim env
-    roslibpy = None
+    from controller import Robot
+    debug("controller import OK")
+except ImportError as e:
+    debug(f"controller import FAILED: {e}")
+    sys.exit(1)
+
+import contextlib
+from pathlib import Path
+from typing import Callable, Dict, List, Any
+
+# Import ROS2
+try:
+    import rclpy
+    from rclpy.node import Node
+    from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
+    from geometry_msgs.msg import Twist
+    from sensor_msgs.msg import Image
+    debug("rclpy import OK")
+except ImportError as e:
+    debug(f"rclpy import FAILED: {e}")
+    rclpy = None
 
 
 def parse_controller_args(args: list[str]) -> Dict[str, str]:
@@ -50,137 +69,146 @@ def build_logger(robot_id: str) -> Callable[[str], None]:
     return _log
 
 
-class CameraStreamer:
-    def __init__(
-        self,
-        robot_id: str,
-        host: str,
-        port: int,
-        log_fn: Callable[[str], None],
-        max_attempts: int = 30,
-    ) -> None:
-        if roslibpy is None:
-            raise RuntimeError("roslibpy unavailable; cannot stream camera")
+class ROS2Bridge:
+    """Native ROS2 bridge for camera publishing and cmd_vel subscription."""
+
+    def __init__(self, robot_id: str, log_fn: Callable[[str], None]):
         self.robot_id = robot_id
         self.log = log_fn
-        self.ros: Optional[roslibpy.Ros] = None
-        self.topic: Optional[roslibpy.Topic] = None
+        self.node = None
+        self.camera_pub = None
+        self.cmd_sub = None
+        self.latest_cmd = {"linear": 0.0, "angular": 0.0, "timestamp": 0.0}
+        self._spin_thread = None
         self._publish_count = 0
-        for attempt in range(1, max_attempts + 1):
-            self.log(f"connecting to rosbridge ({host}:{port}) attempt {attempt}/{max_attempts}")
-            candidate = roslibpy.Ros(host=host, port=port, is_secure=False)
-            try:
-                candidate.run()
-            except Exception as exc:
-                self.log(f"rosbridge connection failed: {exc}")
-                time.sleep(1.0)
-                continue
-            for _ in range(100):
-                if candidate.is_connected:
-                    break
-                time.sleep(0.1)
-            if candidate.is_connected:
-                self.ros = candidate
-                break
-            self.log("rosbridge still unavailable; retrying in 1s")
-            time.sleep(1.0)
-        if not self.ros or not self.ros.is_connected:
-            raise RuntimeError("rosbridge connection timed out")
-        topic_name = f"/{robot_id}/camera/image_raw"
-        self.topic = roslibpy.Topic(
-            self.ros,
-            topic_name,
-            "sensor_msgs/msg/Image",
-        )
-        self.log(f"rosbridge camera stream via {host}:{port}")
+        self._cmd_count = 0
 
-    def publish(self, camera: Camera, sim_time: float) -> None:
+        if rclpy is None:
+            raise RuntimeError("rclpy not available")
+
+        # Initialize ROS2
+        self.log(f"Initializing ROS2 for {robot_id}")
+        self.log(f"ROS_DISCOVERY_SERVER={os.getenv('ROS_DISCOVERY_SERVER', 'not set')}")
+        self.log(f"RMW_IMPLEMENTATION={os.getenv('RMW_IMPLEMENTATION', 'not set')}")
+
+        try:
+            rclpy.init()
+        except RuntimeError:
+            # Already initialized
+            pass
+
+        self.node = rclpy.create_node(f"{robot_id}_controller")
+
+        # QoS for camera - BEST_EFFORT for video
+        camera_qos = QoSProfile(
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1
+        )
+
+        # Create camera publisher
+        camera_topic = f"/{robot_id}/camera/image_raw"
+        self.camera_pub = self.node.create_publisher(Image, camera_topic, camera_qos)
+        self.log(f"Publishing camera to {camera_topic}")
+
+        # Create cmd_vel subscriber (use default QoS for reliability)
+        cmd_topic = f"/{robot_id}/cmd_vel"
+        self.cmd_sub = self.node.create_subscription(
+            Twist,
+            cmd_topic,
+            self._cmd_callback,
+            10
+        )
+        self.log(f"Subscribed to {cmd_topic}")
+
+        # Spin in background thread
+        self._spin_thread = threading.Thread(target=self._spin, daemon=True)
+        self._spin_thread.start()
+        self.log("ROS2 bridge initialized")
+
+    def _spin(self):
+        """Background thread for ROS2 spinning."""
+        while rclpy.ok():
+            rclpy.spin_once(self.node, timeout_sec=0.01)
+            time.sleep(0.001)
+
+    def _cmd_callback(self, msg: Twist):
+        """Handle incoming cmd_vel messages."""
+        self.latest_cmd["linear"] = msg.linear.x
+        self.latest_cmd["angular"] = msg.angular.z
+        self.latest_cmd["timestamp"] = time.time()
+        self._cmd_count += 1
+        self.log(f"CMD #{self._cmd_count}: linear={msg.linear.x:.3f} angular={msg.angular.z:.3f}")
+
+    def get_cmd(self) -> Dict[str, float]:
+        """Get latest command."""
+        return self.latest_cmd
+
+    def publish_camera(self, camera: Any, sim_time: float):
+        """Publish camera image."""
+        if self.camera_pub is None:
+            return
+
         image_data = camera.getImage()
         if image_data is None:
             return
+
         width = camera.getWidth()
         height = camera.getHeight()
-        if not self.topic:
-            raise RuntimeError("rosbridge topic unavailable")
-        secs = int(sim_time)
-        nsecs = int((sim_time - secs) * 1e9)
-        message = {
-            "header": {
-                "stamp": {"sec": secs, "nanosec": nsecs},
-                "frame_id": f"{self.robot_id}_camera",
-            },
-            "height": height,
-            "width": width,
-            "encoding": "BGRA8",
-            "is_bigendian": 0,
-            "step": width * 4,
-            "data": list(image_data),
-        }
-        self.topic.publish(message)
+
+        msg = Image()
+        msg.header.stamp.sec = int(sim_time)
+        msg.header.stamp.nanosec = int((sim_time - int(sim_time)) * 1e9)
+        msg.header.frame_id = f"{self.robot_id}_camera"
+        msg.height = height
+        msg.width = width
+        msg.encoding = "bgra8"
+        msg.is_bigendian = False
+        msg.step = width * 4
+        msg.data = bytes(image_data)
+
+        self.camera_pub.publish(msg)
         self._publish_count += 1
         if self._publish_count % 30 == 0:
             self.log(f"published {self._publish_count} camera frames")
 
-    def shutdown(self) -> None:
-        if self.topic:
-            with contextlib.suppress(Exception):
-                self.topic.unsubscribe()
-        if self.ros:
-            with contextlib.suppress(Exception):
-                self.ros.terminate()
-
-
-def create_cmd_velocity_listener(
-    robot_id: str,
-    host: str,
-    port: int,
-    log_fn: Callable[[str], None],
-    max_attempts: int = 30,
-) -> Optional[tuple[roslibpy.Ros, roslibpy.Topic, Dict[str, float]]]:
-    if roslibpy is None:
-        log_fn("roslibpy unavailable; cmd_vel listener disabled")
-        return None
-    ros: Optional[roslibpy.Ros] = None
-    for attempt in range(1, max_attempts + 1):
-        log_fn(f"connecting to cmd_vel on rosbridge attempt {attempt}/{max_attempts}")
-        candidate = roslibpy.Ros(host=host, port=port, is_secure=False)
+    def shutdown(self):
+        """Cleanup ROS2 resources."""
+        if self.node:
+            self.node.destroy_node()
         try:
-            candidate.run()
-        except Exception as exc:
-            log_fn(f"failed to connect to rosbridge for cmd_vel: {exc}")
-            time.sleep(1.0)
-            continue
-        for _ in range(100):
-            if candidate.is_connected:
-                break
-            time.sleep(0.1)
-        if candidate.is_connected:
-            ros = candidate
-            break
-        log_fn("rosbridge unreachable for cmd_vel; retrying in 1s")
-        time.sleep(1.0)
-    if ros is None or not ros.is_connected:
-        log_fn("cmd_vel listener failed after repeated attempts")
-        return None
+            rclpy.shutdown()
+        except Exception:
+            pass
 
-    latest = {"linear": 0.0, "angular": 0.0, "timestamp": 0.0}
 
-    def _callback(message: Dict[str, Dict[str, float]]) -> None:
-        linear = message.get("linear", {}).get("x", 0.0)
-        angular = message.get("angular", {}).get("z", 0.0)
-        latest["linear"] = float(linear)
-        latest["angular"] = float(angular)
-        latest["timestamp"] = time.time()
+class ObstacleDetector:
+    """Obstacle detection using LiDAR."""
 
-    topic = roslibpy.Topic(
-        ros,
-        f"/{robot_id}/cmd_vel",
-        "geometry_msgs/msg/Twist",
-    )
-    topic.subscribe(_callback)
-    log_fn("subscribed to cmd_vel")
+    def __init__(self, robot: Robot, timestep: int, log_fn: Callable[[str], None]):
+        self.robot = robot
+        self.timestep = timestep
+        self.log = log_fn
+        self.lidar: Any = None
 
-    return ros, topic, latest
+        try:
+            lidar = robot.getDevice("LDS-01")
+            if lidar:
+                lidar.enable(timestep)
+                lidar.enablePointCloud()
+                self.lidar = lidar
+                self.log("Using LiDAR (LDS-01) for obstacle detection")
+
+                for motor_name in ["LDS-01_main_motor", "LDS-01_secondary_motor"]:
+                    try:
+                        motor = robot.getDevice(motor_name)
+                        if motor:
+                            motor.setPosition(float("inf"))
+                            motor.setVelocity(30.0)
+                    except Exception:
+                        pass
+        except Exception:
+            self.log("WARNING: No LiDAR found")
 
 
 def main() -> None:
@@ -188,88 +216,138 @@ def main() -> None:
     args = parse_controller_args(sys.argv[1:])
     if args:
         os.environ.update(args)
+
     robot_id = args.get("ROBOT_ID", robot.getName())
-    ros_host = os.getenv("ROS_BRIDGE_HOST", "localhost")
-    ros_port = int(os.getenv("ROS_BRIDGE_PORT", "9090"))
     log = build_logger(robot_id)
-    camera_streamer: CameraStreamer | None = None
-    while camera_streamer is None:
-        try:
-            camera_streamer = CameraStreamer(robot_id, ros_host, ros_port, log)
-        except RuntimeError as exc:
-            log(f"camera streamer init failed: {exc}; retrying in 2s")
-            time.sleep(2.0)
-    cmd_listener = create_cmd_velocity_listener(robot_id, ros_host, ros_port, log)
+
+    log(f"Starting controller for {robot_id}")
 
     timestep = int(robot.getBasicTimeStep())
+
+    # Initialize motors
     left_motor = robot.getDevice("left wheel motor")
     right_motor = robot.getDevice("right wheel motor")
     left_motor.setPosition(float("inf"))
     right_motor.setPosition(float("inf"))
 
-    sensors = []
-    for index in range(8):
-        sensor = robot.getDevice(f"ps{index}")
-        sensor.enable(timestep)
-        sensors.append(sensor)
+    # TEST: Start with constant velocity to verify motors work
+    left_motor.setVelocity(300.0)
+    right_motor.setVelocity(300.0)
+    log("Motors initialized - TEST: set to 300.0 rad/s")
 
-    camera: Optional[Camera] = None
-    try:
-        camera = robot.getDevice("camera")
-        if camera:
-            camera.enable(timestep)
-    except Exception:  # pylint: disable=broad-except
-        camera = None
+    # Initialize obstacle detection
+    obstacle_detector = ObstacleDetector(robot, timestep, log)
 
-    forward_speed = 4.0
-    turn_speed = 3.0
-    frame_interval = max(1, int(500 / timestep))
+    # Debug: list all devices
+    device_count = robot.getNumberOfDevices()
+    log(f"Robot has {device_count} devices:")
+    for i in range(device_count):
+        device = robot.getDeviceByIndex(i)
+        log(f"  Device {i}: {device.getName()}")
+
+    # Initialize camera
+    camera: Any = None
+    for camera_name in ["camera", "Camera"]:
+        try:
+            cam = robot.getDevice(camera_name)
+            if cam:
+                cam.enable(timestep)
+                camera = cam
+                log(f"Camera '{camera_name}' enabled")
+                break
+        except Exception as e:
+            log(f"Error getting camera '{camera_name}': {e}")
+
+    # Initialize ROS2 bridge
+    ros_bridge: ROS2Bridge | None = None
+    if rclpy is not None:
+        try:
+            ros_bridge = ROS2Bridge(robot_id, log)
+        except Exception as exc:
+            log(f"ROS2 bridge init failed: {exc}")
+    else:
+        log("ROS2 not available - running without ROS integration")
+
+    # Settings
+    command_timeout = 2.0  # Increased timeout
+    frame_interval = max(1, int(100 / timestep))  # ~10 fps
     frame_tick = 0
-    command_timeout = 0.5
+    motor_log_interval = 100  # Log motor state every N iterations
+    loop_count = 0
 
+    log("Entering main loop")
+    log(f"Timestep: {timestep}ms")
+
+    # Log motor max velocity to check limits
+    log(f"Left motor max velocity: {left_motor.getMaxVelocity()}")
+    log(f"Right motor max velocity: {right_motor.getMaxVelocity()}")
+
+    # Track current velocities (persist between loops)
+    # TEST: Start with velocity to verify motors work
+    current_left = 5.0
+    current_right = 5.0
+    last_cmd_time = 0.0
+    stop_timeout = 5.0  # Stop after 5 seconds of no commands
+
+    step_count = 0
     while robot.step(timestep) != -1:
-        front_left = sensors[7].getValue()
-        front_right = sensors[0].getValue()
+        step_count += 1
+        if step_count <= 5 or step_count % 500 == 0:
+            log(f"Step {step_count} - motors at L={left_motor.getVelocity():.2f} R={right_motor.getVelocity():.2f}")
+        loop_count += 1
 
-        left_speed = forward_speed
-        right_speed = forward_speed
+        # Move when commands received
+        if ros_bridge:
+            cmd = ros_bridge.get_cmd()
+            now = time.time()
+            time_since_cmd = now - cmd["timestamp"] if cmd["timestamp"] > 0 else 999
 
-        if front_left > 90 or front_right > 90:
-            if front_left > front_right:
-                left_speed = -turn_speed
-                right_speed = turn_speed
-            else:
-                left_speed = turn_speed
-                right_speed = -turn_speed
+            # Debug every 100 loops
+            if loop_count % 100 == 0:
+                log(f"DEBUG: timestamp={cmd['timestamp']:.2f} now={now:.2f} age={time_since_cmd:.2f}s linear={cmd['linear']:.3f}")
 
-        if cmd_listener:
-            _, _, latest = cmd_listener
-            if time.time() - latest["timestamp"] < command_timeout:
-                linear = latest["linear"]
-                angular = latest["angular"]
+            if cmd["timestamp"] > 0 and cmd["timestamp"] > last_cmd_time:
+                # New command received
+                last_cmd_time = cmd["timestamp"]
+                linear = cmd["linear"]
+                angular = cmd["angular"]
+                # Convert twist to differential drive
                 base_speed = linear * 20.0
                 turn = angular * 10.0
-                left_speed = base_speed - turn
-                right_speed = base_speed + turn
+                current_left = base_speed - turn
+                current_right = base_speed + turn
+                log(f"MOTOR: L={current_left:.2f} R={current_right:.2f} (age={time_since_cmd:.2f}s)")
+
+            # Stop if no commands for a while
+            if now - last_cmd_time > stop_timeout and last_cmd_time > 0:
+                current_left = 0.0
+                current_right = 0.0
+
+        # Use current velocities
+        left_speed = current_left
+        right_speed = current_right
+
+        # Clamp speeds
+        max_speed = 6.0
+        left_speed = max(-max_speed, min(max_speed, left_speed))
+        right_speed = max(-max_speed, min(max_speed, right_speed))
 
         left_motor.setVelocity(left_speed)
         right_motor.setVelocity(right_speed)
 
-        if camera and robot_id:
+        # Log actual motor state periodically
+        if loop_count % 200 == 0 and (left_speed != 0 or right_speed != 0):
+            log(f"VELOCITY SET: L={left_speed:.2f} R={right_speed:.2f}")
+
+        # Stream camera frames
+        if camera and ros_bridge:
             frame_tick += 1
             if frame_tick % frame_interval == 0:
-                camera_streamer.publish(camera, robot.getTime())
+                ros_bridge.publish_camera(camera, robot.getTime())
 
-        if robot_id and robot.getTime() % 10 < timestep / 1000:
-            robot.wwiSendText(f"{robot_id}: running")
-
-    camera_streamer.shutdown()
-    if cmd_listener:
-        ros, topic, _ = cmd_listener
-        with contextlib.suppress(Exception):
-            topic.unsubscribe()
-        with contextlib.suppress(Exception):
-            ros.terminate()
+    # Cleanup
+    if ros_bridge:
+        ros_bridge.shutdown()
 
 
 if __name__ == "__main__":

@@ -27,7 +27,17 @@ services:
       - API_BASE_URL=http://robot-gateway:8080/api
       - ROS_PUSH_KEY=${ROS_PUSH_KEY:-local-dev-key}
     ports:
-      - "9090:9090" # rosbridge websocket
+      - "9090:9090"      # rosbridge websocket
+      - "11811:11811/udp" # ROS2 Discovery Server
+      - "51820:51820/udp" # WireGuard VPN
+    cap_add:
+      - NET_ADMIN
+      - SYS_MODULE
+    sysctls:
+      - net.ipv4.ip_forward=1
+      - net.ipv4.conf.all.src_valid_mark=1
+    volumes:
+      - ./ros/wireguard:/etc/wireguard:ro
     networks:
       - robotnet
 
@@ -37,9 +47,9 @@ services:
     container_name: sim-runner
     environment:
       - ROS_DOMAIN_ID=0
-      - WEBOTS_WORLD=/workspace/worlds/battle_arena.wbt
-      - ROS_BRIDGE_HOST=ros-core
-      - ROS_BRIDGE_PORT=9090
+      - WEBOTS_WORLD=/workspace/worlds/turtlebot_apartment.wbt
+      - ROS_DISCOVERY_SERVER=ros-core:11811
+      - RMW_IMPLEMENTATION=rmw_fastrtps_cpp
       - BOT_LOG_DIR=/tmp/bot_logs
     volumes:
       - ./sim/worlds:/workspace/worlds:ro

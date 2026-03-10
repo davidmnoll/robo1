@@ -16,6 +16,7 @@ import websocket
 from geometry_msgs.msg import Twist
 from rclpy.node import Node
 from rclpy.publisher import Publisher
+from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 from sensor_msgs.msg import Image
 
 
@@ -40,6 +41,13 @@ class RobotBridgeNode(Node):
         self.ws_lock = threading.Lock()
         self.ws_app: websocket.WebSocketApp | None = None
 
+        # QoS for camera - BEST_EFFORT to match publisher (drop frames rather than queue)
+        camera_qos = QoSProfile(
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1
+        )
+
         self.command_publishers: Dict[str, Publisher] = {}
         for namespace in self.namespaces:
             topic = f"/{namespace}/camera/image_raw"
@@ -47,7 +55,7 @@ class RobotBridgeNode(Node):
                 Image,
                 topic,
                 lambda msg, ns=namespace: self._handle_frame(ns, msg),
-                10,
+                camera_qos,
             )
             cmd_topic = f"/{namespace}/cmd_vel"
             self.command_publishers[namespace] = self.create_publisher(Twist, cmd_topic, 10)

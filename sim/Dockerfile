@@ -1,7 +1,7 @@
 FROM cyberbotics/webots:R2025a-ubuntu22.04
 
 ENV DEBIAN_FRONTEND=noninteractive \
-    WEBOTS_WORLD=/workspace/worlds/battle_arena.wbt
+    WEBOTS_WORLD=/workspace/worlds/turtlebot_apartment.wbt
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     software-properties-common \
@@ -22,6 +22,9 @@ RUN curl -s https://raw.githubusercontent.com/ros/rosdistro/master/ros.key -o /t
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ros-humble-ros-base \
+    ros-humble-rmw-fastrtps-cpp \
+    ros-humble-sensor-msgs \
+    ros-humble-geometry-msgs \
     python3-pip \
     libxcb-cursor0 \
     libxkbcommon-x11-0 \
@@ -33,8 +36,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxi6 \
     libxtst6 \
     && rm -rf /var/lib/apt/lists/*
-
-RUN pip install --no-cache-dir roslibpy
 
 WORKDIR /workspace
 COPY entrypoint.sh /usr/local/bin/run-webots.sh

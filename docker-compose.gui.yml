@@ -1,0 +1,17 @@
+version: "3.9"
+
+# Override file for running Webots with GUI (software rendering)
+# Usage: docker compose -f docker-compose.yaml -f docker-compose.gui.yml up sim
+
+services:
+  sim:
+    environment:
+      - DISPLAY=${DISPLAY}
+      - QT_X11_NO_MITSHM=1
+      - WEBOTS_DISABLE_GRAPHICS=0
+      # Force software rendering
+      - LIBGL_ALWAYS_SOFTWARE=1
+    volumes:
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+      - ${XAUTHORITY:-$HOME/.Xauthority}:/root/.Xauthority:ro
+    command: ["/usr/local/bin/run-webots.sh", "--gui"]

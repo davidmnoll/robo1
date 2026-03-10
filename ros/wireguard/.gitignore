@@ -1,0 +1,4 @@
+# WireGuard keys and configs contain secrets - do not commit
+*.key
+*.conf
+clients/

@@ -1,6 +1,7 @@
 SHELL := /bin/bash
 -include .env
-ROS_SETUP := source /opt/ros/jazzy/setup.bash
+ROS_DISTRO ?= jazzy
+ROS_SETUP := source /opt/ros/$(ROS_DISTRO)/setup.bash
 PROJECT_ID ?= robo1-489405
 export TURTLEBOT3_MODEL := burger
 
@@ -16,6 +17,11 @@ help:
 	@echo "  make all        - Alias for make tmux-stack"
 	@echo "  make attach     - Attach to tmux session (arena)"
 	@echo "  make db-shell   - Open psql shell inside the db container"
+	@echo ""
+	@echo "Simulation commands:"
+	@echo "  make cloud-sim  - Headless container-based simulation"
+	@echo "  make sim-gui    - Container-based simulation with GUI (X11)"
+	@echo "  make sim-gui-stop - Stop container-based simulation"
 	@echo ""
 	@echo "Legacy TurtleBot3 helpers (not wired into the arena stack):"
 	@echo "  make sim / bridge / web / controller"
@@ -122,6 +128,57 @@ gcloud-app-logs:
 cloud-sim:
 	echo "Starting ROS bridge + Webots sim against $$CLOUD_RUN_API_URL"; \
 	docker compose -f docker-compose.yaml -f docker-compose.cloud.yml up --build ros-core sim
+
+sim-gui:
+	@echo "Starting container-based Webots simulation with GUI..."
+	@echo "Allowing Docker X11 access..."
+	@xhost +local:docker 2>/dev/null || true
+	@xhost +SI:localuser:root 2>/dev/null || true
+	docker compose -f docker-compose.yaml -f docker-compose.cloud.yml -f docker-compose.gui.yml up --build ros-core sim
+
+sim-gui-native:
+	@echo "Starting ros-core container (VPN + Discovery Server + camera_forwarder)..."
+	docker compose -f docker-compose.yaml -f docker-compose.cloud.yml up -d --build ros-core
+	@echo "Waiting for Discovery Server to be ready..."
+	@sleep 3
+	@echo "Launching Webots with native ROS2..."
+	@echo "Make sure ROS2 is sourced: source /opt/ros/humble/setup.bash"
+	ROS_DISCOVERY_SERVER=localhost:11811 \
+	webots sim/worlds/turtlebot_apartment.wbt
+	@echo "Webots closed. Stopping ros-core..."
+	docker compose -f docker-compose.yaml -f docker-compose.cloud.yml down ros-core
+
+# Native ROS2 simulation (runs everything locally)
+sim-ros2:
+	@echo "=== Native ROS2 Simulation ==="
+	@echo "This runs in 3 terminals. Starting tmux session..."
+	@tmux new-session -d -s ros2sim -n ros-core "docker compose up ros-core; read" || true
+	@sleep 3
+	@tmux new-window -t ros2sim -n webots "source /opt/ros/$(ROS_DISTRO)/setup.bash && \
+		export RMW_IMPLEMENTATION=rmw_fastrtps_cpp && \
+		export ROS_DISCOVERY_SERVER=127.0.0.1:11811 && \
+		webots sim/worlds/turtlebot_apartment.wbt; read"
+	@sleep 2
+	@tmux new-window -t ros2sim -n drivers "cd $(CURDIR) && source /opt/ros/$(ROS_DISTRO)/setup.bash && \
+		export RMW_IMPLEMENTATION=rmw_fastrtps_cpp && \
+		export ROS_DISCOVERY_SERVER=127.0.0.1:11811 && \
+		ros2 launch $(CURDIR)/ros/launch/turtlebot_drivers.launch.py; read"
+	@echo "Started tmux session 'ros2sim'. Attaching..."
+	@tmux attach -t ros2sim
+
+sim-ros2-stop:
+	@tmux kill-session -t ros2sim 2>/dev/null || true
+	@docker compose down ros-core 2>/dev/null || true
+
+sim-gui-stop:
+	docker compose -f docker-compose.yaml -f docker-compose.cloud.yml down
+
+# VPN setup for remote robot connections
+vpn-setup:
+	@./scripts/setup-vpn.sh
+
+vpn-setup-cloud:
+	@./scripts/setup-vpn.sh $(shell terraform -chdir=terraform output -raw api_vm_ip 2>/dev/null || echo "YOUR_SERVER_IP")
 
 # Cleanup
 clean:

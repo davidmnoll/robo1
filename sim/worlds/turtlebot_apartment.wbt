@@ -1,0 +1,194 @@
+#VRML_SIM R2025a utf8
+
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/objects/backgrounds/protos/TexturedBackground.proto"
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/objects/backgrounds/protos/TexturedBackgroundLight.proto"
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/appearances/protos/Parquetry.proto"
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/objects/apartment_structure/protos/Wall.proto"
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/objects/apartment_structure/protos/Door.proto"
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/objects/lights/protos/CeilingLight.proto"
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/objects/tables/protos/Table.proto"
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/objects/chairs/protos/Chair.proto"
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/objects/living_room_furniture/protos/Armchair.proto"
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/objects/living_room_furniture/protos/Sofa.proto"
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/objects/living_room_furniture/protos/Carpet.proto"
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/objects/plants/protos/PottedTree.proto"
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/robots/robotis/turtlebot/protos/TurtleBot3Burger.proto"
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/devices/robotis/protos/RobotisLds01.proto"
+
+WorldInfo {
+  basicTimeStep 32
+  title "TurtleBot Apartment"
+  contactProperties [
+    ContactProperties {
+      material1 "turtlebot_wheel"
+      coulombFriction [2]
+    }
+  ]
+}
+
+Viewpoint {
+  orientation -0.35 0.35 0.87 1.75
+  position -2 -8 6
+  near 0.1
+  far 100
+  follow "bot_alpha"
+  followType "Pan and Tilt Shot"
+}
+
+TexturedBackground {
+  texture "empty_office"
+}
+
+TexturedBackgroundLight {
+}
+
+# Floor
+DEF FLOOR Solid {
+  children [
+    Shape {
+      appearance Parquetry {
+        textureTransform TextureTransform {
+          scale 8 8
+        }
+      }
+      geometry Plane {
+        size 10 8
+      }
+    }
+  ]
+  name "floor"
+  boundingObject Plane { size 10 8 }
+  locked TRUE
+}
+
+# Walls
+Wall {
+  translation -5 0 0
+  rotation 0 0 1 1.5708
+  size 8 0.2 2.4
+}
+Wall {
+  translation 5 0 0
+  rotation 0 0 1 1.5708
+  name "wall(1)"
+  size 8 0.2 2.4
+}
+Wall {
+  translation 0 4 0
+  name "wall(2)"
+  size 10 0.2 2.4
+}
+Wall {
+  translation 0 -4 0
+  name "wall(3)"
+  size 10 0.2 2.4
+}
+
+# Living room area
+Sofa {
+  translation -3 2 0
+  rotation 0 0 1 -1.5708
+}
+Armchair {
+  translation -1 3 0
+  rotation 0 0 1 3.14159
+}
+Carpet {
+  translation -2 1 0.01
+  rotation 0 0 1 0
+  color 0.6 0.3 0.2
+}
+Table {
+  translation -2 1 0
+  size 1.2 0.8 0.4
+}
+PottedTree {
+  translation -4.3 3.3 0
+}
+
+# Dining area
+Table {
+  translation 2 2 0
+  name "dining table"
+  size 1.5 1 0.75
+}
+Chair {
+  translation 2 1.2 0
+  rotation 0 0 1 0
+}
+Chair {
+  translation 2 2.8 0
+  rotation 0 0 1 3.14159
+  name "chair(1)"
+}
+Chair {
+  translation 1.2 2 0
+  rotation 0 0 1 1.5708
+  name "chair(2)"
+}
+Chair {
+  translation 2.8 2 0
+  rotation 0 0 1 -1.5708
+  name "chair(3)"
+}
+
+# Some obstacles
+Door {
+  translation 0 -4 0
+  rotation 0 0 1 1.5708
+}
+
+CeilingLight {
+  translation -2 1 2.4
+  bulbColor 1 1 0.9
+  pointLightIntensity 3
+  pointLightCastShadows TRUE
+}
+CeilingLight {
+  translation 2 2 2.4
+  name "ceiling light(1)"
+  bulbColor 1 1 0.9
+  pointLightIntensity 3
+}
+
+# TurtleBot 1 - Alpha (facing toward bot_beta at ~30 deg angle)
+DEF BOT_ALPHA TurtleBot3Burger {
+  translation -2 -1 0
+  rotation 0 0 1 0.52
+  name "bot_alpha"
+  controller "bot"
+  controllerArgs ["ROBOT_ID=bot_alpha"]
+  extensionSlot [
+    RobotisLds01 { }
+    Camera {
+      translation 0.03 0 0.22
+      rotation 0 -1 0 1.5708
+      name "camera"
+      fieldOfView 2
+      width 320
+      height 240
+      near 0.02
+    }
+  ]
+}
+
+# TurtleBot 2 - Beta (facing toward bot_alpha at ~30 deg angle)
+DEF BOT_BETA TurtleBot3Burger {
+  translation 2 -1 0
+  rotation 0 0 1 2.62
+  name "bot_beta"
+  controller "bot"
+  controllerArgs ["ROBOT_ID=bot_beta"]
+  extensionSlot [
+    RobotisLds01 { }
+    Camera {
+      translation 0.03 0 0.22
+      rotation 0 -1 0 1.5708
+      name "camera"
+      fieldOfView 2
+      width 320
+      height 240
+      near 0.02
+    }
+  ]
+}
