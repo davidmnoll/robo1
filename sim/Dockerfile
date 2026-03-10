@@ -41,6 +41,7 @@ WORKDIR /workspace
 COPY entrypoint.sh /usr/local/bin/run-webots.sh
 RUN chmod +x /usr/local/bin/run-webots.sh
 COPY worlds ./worlds
+COPY protos ./protos
 COPY controllers ./controllers
 
 CMD ["/usr/local/bin/run-webots.sh"]

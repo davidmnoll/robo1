@@ -12,7 +12,7 @@ EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/project
 EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/objects/living_room_furniture/protos/Sofa.proto"
 EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/objects/living_room_furniture/protos/Carpet.proto"
 EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/objects/plants/protos/PottedTree.proto"
-EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/robots/robotis/turtlebot/protos/TurtleBot3Burger.proto"
+EXTERNPROTO "../protos/TurtleBot3Burger.proto"
 EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/devices/robotis/protos/RobotisLds01.proto"
 
 WorldInfo {
@@ -162,7 +162,7 @@ DEF BOT_ALPHA TurtleBot3Burger {
     RobotisLds01 { }
     Camera {
       translation 0.03 0 0.22
-      rotation 0 -1 0 1.5708
+      rotation 0.5 -1 0 1.5708
       name "camera"
       fieldOfView 2
       width 320
@@ -183,7 +183,7 @@ DEF BOT_BETA TurtleBot3Burger {
     RobotisLds01 { }
     Camera {
       translation 0.03 0 0.22
-      rotation 0 -1 0 1.5708
+      rotation 0.5 -1 0 1.5708
       name "camera"
       fieldOfView 2
       width 320

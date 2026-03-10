@@ -18,6 +18,7 @@ from rclpy.node import Node
 from rclpy.publisher import Publisher
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 from sensor_msgs.msg import Image
+from std_msgs.msg import String
 
 
 class RobotBridgeNode(Node):
@@ -49,6 +50,7 @@ class RobotBridgeNode(Node):
         )
 
         self.command_publishers: Dict[str, Publisher] = {}
+        self.telemetry_base = f"{api_base}/internal/telemetry"
         for namespace in self.namespaces:
             topic = f"/{namespace}/camera/image_raw"
             self.create_subscription(
@@ -59,8 +61,16 @@ class RobotBridgeNode(Node):
             )
             cmd_topic = f"/{namespace}/cmd_vel"
             self.command_publishers[namespace] = self.create_publisher(Twist, cmd_topic, 10)
+            # Subscribe to telemetry
+            telemetry_topic = f"/{namespace}/telemetry"
+            self.create_subscription(
+                String,
+                telemetry_topic,
+                lambda msg, ns=namespace: self._handle_telemetry(ns, msg),
+                10,
+            )
             self.get_logger().info(
-                f"Forwarding {topic} and pulling commands for {cmd_topic} -> {self.command_base}/{namespace}"
+                f"Forwarding {topic}, telemetry {telemetry_topic}, and pulling commands for {cmd_topic}"
             )
 
         self.create_timer(0.1, self.flush_command_queue)
@@ -90,6 +100,16 @@ class RobotBridgeNode(Node):
             )
         except requests.RequestException as exc:
             self.get_logger().warning(f"Failed to push frame for {robot_id}: {exc}")
+
+    def _handle_telemetry(self, robot_id: str, msg: String) -> None:
+        """Forward telemetry data to the API."""
+        url = f"{self.telemetry_base}/{robot_id}"
+        try:
+            payload = json.loads(msg.data)
+            resp = self.session.post(url, json=payload, headers=self.headers, timeout=2)
+            resp.raise_for_status()
+        except (json.JSONDecodeError, requests.RequestException) as exc:
+            self.get_logger().debug(f"Failed to push telemetry for {robot_id}: {exc}")
 
     def _build_command_ws_url(self) -> str:
         parsed = urllib.parse.urlparse(self.api_base)

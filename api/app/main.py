@@ -182,6 +182,11 @@ robot_heartbeats: Dict[str, datetime] = {}
 command_subscribers: Dict[str, set[WebSocket]] = defaultdict(set)
 websocket_robot_map: Dict[int, set[str]] = {}
 command_ws_lock = asyncio.Lock()
+# Telemetry subscribers - maps robot_id to set of websockets
+telemetry_subscribers: Dict[str, set[WebSocket]] = defaultdict(set)
+telemetry_ws_lock = asyncio.Lock()
+# Latest telemetry per robot for initial state on connect
+latest_telemetry: Dict[str, Dict[str, Any]] = {}
 
 app = FastAPI(title="Robot Gateway API", version="0.1.0")
 cors_allow_origins = settings.cors_allow_origins
@@ -221,6 +226,12 @@ class FramePayload(BaseModel):
     stamp_sec: int | None = None
     stamp_nanosec: int | None = None
     compressed: bool = False
+
+
+class TelemetryPayload(BaseModel):
+    linear_speed: float = 0.0
+    angular_speed: float = 0.0
+    timestamp: float | None = None
 
 
 class UserOut(BaseModel):
@@ -1066,6 +1077,40 @@ async def send_cmd_vel(
     return robot_command_to_out(command)
 
 
+@app.post("/api/internal/telemetry/{robot_id}")
+async def ingest_telemetry(
+    robot_id: str,
+    payload: TelemetryPayload,
+    x_api_key: str = Header(default=""),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    await require_internal_api_key(x_api_key, session)
+    update_robot_heartbeat(robot_id)
+    # Store latest telemetry
+    telemetry_data = {
+        "linear_speed": payload.linear_speed,
+        "angular_speed": payload.angular_speed,
+        "timestamp": payload.timestamp,
+    }
+    latest_telemetry[robot_id] = telemetry_data
+    # Broadcast to subscribers
+    await broadcast_telemetry(robot_id, telemetry_data)
+    return {"robot": robot_id, "status": "ok"}
+
+
+async def broadcast_telemetry(robot_id: str, data: Dict[str, Any]) -> None:
+    """Broadcast telemetry to all subscribed websockets."""
+    payload = {"type": "telemetry", "robot": robot_id, **data}
+    async with telemetry_ws_lock:
+        sockets = list(telemetry_subscribers.get(robot_id, set()))
+    for websocket in sockets:
+        try:
+            await websocket.send_json(payload)
+        except Exception:
+            async with telemetry_ws_lock:
+                telemetry_subscribers[robot_id].discard(websocket)
+
+
 @app.post("/api/internal/frames/{robot_id}")
 async def ingest_camera_frame(
     robot_id: str,
@@ -1118,7 +1163,7 @@ async def robot_command_bridge(websocket: WebSocket) -> None:
             elif msg_type == "heartbeat":
                 robots = [value.strip() for value in message.get("robots", []) if value.strip()]
                 if not robots:
-                    async with robot_ws_lock:
+                    async with command_ws_lock:
                         robots = list(websocket_robot_map.get(id(websocket), []))
                 for robot in robots:
                     update_robot_heartbeat(robot)
@@ -1156,18 +1201,36 @@ async def robot_command_bridge(websocket: WebSocket) -> None:
 @app.websocket("/api/ws/{robot_id}")
 async def websocket_proxy(websocket: WebSocket, robot_id: str) -> None:
     await websocket.accept()
-    await websocket.send_json(
-        {
+    # Subscribe to telemetry for this robot
+    async with telemetry_ws_lock:
+        telemetry_subscribers[robot_id].add(websocket)
+    # Send current telemetry state if available
+    current_telemetry = latest_telemetry.get(robot_id)
+    if current_telemetry:
+        await websocket.send_json({
+            "type": "telemetry",
             "robot": robot_id,
-            "message": "WebSocket channel established. Implement telemetry fan-out here.",
-        }
-    )
+            **current_telemetry
+        })
+    else:
+        await websocket.send_json({
+            "type": "telemetry",
+            "robot": robot_id,
+            "linear_speed": 0.0,
+            "angular_speed": 0.0,
+            "message": "Waiting for robot telemetry..."
+        })
     try:
         while True:
             data = await websocket.receive_text()
             logger.debug("Received WS payload for %s: %s", robot_id, data)
     except WebSocketDisconnect:
         logger.info("Client disconnected from %s WS", robot_id)
+    finally:
+        async with telemetry_ws_lock:
+            telemetry_subscribers[robot_id].discard(websocket)
+            if not telemetry_subscribers[robot_id]:
+                telemetry_subscribers.pop(robot_id, None)
 
 
 @app.post("/api/robots/{robot_id}/webrtc")

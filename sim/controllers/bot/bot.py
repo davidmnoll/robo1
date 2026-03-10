@@ -37,6 +37,7 @@ try:
     from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
     from geometry_msgs.msg import Twist
     from sensor_msgs.msg import Image
+    from std_msgs.msg import String
     debug("rclpy import OK")
 except ImportError as e:
     debug(f"rclpy import FAILED: {e}")
@@ -111,6 +112,11 @@ class ROS2Bridge:
         self.camera_pub = self.node.create_publisher(Image, camera_topic, camera_qos)
         self.log(f"Publishing camera to {camera_topic}")
 
+        # Create telemetry publisher for velocity feedback
+        telemetry_topic = f"/{robot_id}/telemetry"
+        self.telemetry_pub = self.node.create_publisher(String, telemetry_topic, 10)
+        self.log(f"Publishing telemetry to {telemetry_topic}")
+
         # Create cmd_vel subscriber (use default QoS for reliability)
         cmd_topic = f"/{robot_id}/cmd_vel"
         self.cmd_sub = self.node.create_subscription(
@@ -171,6 +177,20 @@ class ROS2Bridge:
         self._publish_count += 1
         if self._publish_count % 30 == 0:
             self.log(f"published {self._publish_count} camera frames")
+
+    def publish_telemetry(self, linear_speed: float, angular_speed: float):
+        """Publish velocity telemetry."""
+        if self.telemetry_pub is None:
+            return
+        import json
+        data = {
+            "linear_speed": linear_speed,
+            "angular_speed": angular_speed,
+            "timestamp": time.time()
+        }
+        msg = String()
+        msg.data = json.dumps(data)
+        self.telemetry_pub.publish(msg)
 
     def shutdown(self):
         """Cleanup ROS2 resources."""
@@ -283,9 +303,9 @@ def main() -> None:
     log(f"Right motor max velocity: {right_motor.getMaxVelocity()}")
 
     # Track current velocities (persist between loops)
-    # TEST: Start with velocity to verify motors work
-    current_left = 5.0
-    current_right = 5.0
+    # Start at high velocity to verify motors work
+    current_left = 60.0
+    current_right = 60.0
     last_cmd_time = 0.0
     stop_timeout = 5.0  # Stop after 5 seconds of no commands
 
@@ -327,8 +347,8 @@ def main() -> None:
         left_speed = current_left
         right_speed = current_right
 
-        # Clamp speeds
-        max_speed = 6.0
+        # Clamp speeds to motor max
+        max_speed = 100.0
         left_speed = max(-max_speed, min(max_speed, left_speed))
         right_speed = max(-max_speed, min(max_speed, right_speed))
 
@@ -339,11 +359,17 @@ def main() -> None:
         if loop_count % 200 == 0 and (left_speed != 0 or right_speed != 0):
             log(f"VELOCITY SET: L={left_speed:.2f} R={right_speed:.2f}")
 
-        # Stream camera frames
+        # Stream camera frames and telemetry
         if camera and ros_bridge:
             frame_tick += 1
             if frame_tick % frame_interval == 0:
                 ros_bridge.publish_camera(camera, robot.getTime())
+                # Convert wheel speeds back to linear/angular for telemetry
+                # Linear = (left + right) / 2, Angular = (right - left) / wheel_base
+                # Using simplified conversion (inverse of what we use to convert twist to wheel speeds)
+                linear_cmd = (left_speed + right_speed) / 2.0 / 20.0
+                angular_cmd = (right_speed - left_speed) / 2.0 / 10.0
+                ros_bridge.publish_telemetry(linear_cmd, angular_cmd)
 
     # Cleanup
     if ros_bridge:

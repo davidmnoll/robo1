@@ -1184,7 +1184,19 @@
           ws.onmessage = (event) => {
             try {
               const data = JSON.parse(event.data);
-              logTelemetry(JSON.stringify(data));
+              // Handle telemetry messages with velocity data
+              if (data.type === 'telemetry') {
+                if (typeof data.linear_speed === 'number') {
+                  state.linearSpeed = data.linear_speed;
+                }
+                if (typeof data.angular_speed === 'number') {
+                  state.angularSpeed = data.angular_speed;
+                }
+                updateSpeedIndicators();
+                logTelemetry(`vel: lin=${state.linearSpeed.toFixed(2)} ang=${state.angularSpeed.toFixed(2)}`);
+              } else {
+                logTelemetry(JSON.stringify(data));
+              }
               if (typeof data.front_distance === 'number') {
                 frontDistanceValue.textContent = `${data.front_distance.toFixed(2)} m`;
               }
