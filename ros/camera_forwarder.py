@@ -5,10 +5,11 @@ import gzip
 import json
 import os
 import queue
+import re
 import threading
 import time
 import urllib.parse
-from typing import Dict, List
+from typing import Dict, Set
 
 import requests
 import rclpy
@@ -16,49 +17,107 @@ import websocket
 from geometry_msgs.msg import Twist
 from rclpy.node import Node
 from rclpy.publisher import Publisher
+from rclpy.subscription import Subscription
 from sensor_msgs.msg import Image
+
+
+_CAMERA_TOPIC_RE = re.compile(r"^/([^/]+)/camera/image_raw$")
+_DISCOVERY_INTERVAL = 3.0
 
 
 class RobotBridgeNode(Node):
     def __init__(self) -> None:
         super().__init__("robot_bridge")
-        namespaces = os.getenv("CAMERA_NAMESPACES", "")
-        self.namespaces: List[str] = [value.strip() for value in namespaces.split(",") if value.strip()]
-        if not self.namespaces:
-            raise RuntimeError("CAMERA_NAMESPACES env var is empty; cannot forward streams")
 
         api_base = os.getenv("API_BASE_URL", "http://robot-gateway:8080/api").rstrip("/")
-        push_base = f"{api_base}/internal/frames"
         self.api_base = api_base
-        self.command_base = f"{api_base}/internal/robots".rstrip("/")
-        self.push_base_url = push_base
+        self.push_base_url = f"{api_base}/internal/frames"
         self.api_key = os.getenv("LOBBY_KEY") or os.getenv("ROS_PUSH_KEY", "")
         self.headers = {"x-api-key": self.api_key} if self.api_key else {}
-        self.session = requests.Session()
+        self.http_session = requests.Session()
         self.heartbeat_interval = float(os.getenv("COMMAND_HEARTBEAT_INTERVAL", "5"))
+
         self.command_queue: queue.Queue[Dict] = queue.Queue()
         self.ws_lock = threading.Lock()
         self.ws_app: websocket.WebSocketApp | None = None
 
+        # Discovered robots and their ROS resources
+        self.discovered_robots: Set[str] = set()
+        self.streaming_robots: Set[str] = set()
+        self.camera_subscriptions: Dict[str, Subscription] = {}
         self.command_publishers: Dict[str, Publisher] = {}
-        for namespace in self.namespaces:
-            topic = f"/{namespace}/camera/image_raw"
-            self.create_subscription(
-                Image,
-                topic,
-                lambda msg, ns=namespace: self._handle_frame(ns, msg),
-                10,
-            )
-            cmd_topic = f"/{namespace}/cmd_vel"
-            self.command_publishers[namespace] = self.create_publisher(Twist, cmd_topic, 10)
-            self.get_logger().info(
-                f"Forwarding {topic} and pulling commands for {cmd_topic} -> {self.command_base}/{namespace}"
-            )
 
+        # Timers
         self.create_timer(0.1, self.flush_command_queue)
         self.create_timer(self.heartbeat_interval, self.send_heartbeats)
+        self.create_timer(_DISCOVERY_INTERVAL, self._discover_robots)
+
+        # WebSocket thread for commands + stream control
         self.ws_thread = threading.Thread(target=self._run_command_socket, daemon=True)
         self.ws_thread.start()
+
+        self.get_logger().info("RobotBridge started — discovering robots dynamically")
+
+    # ── Topic discovery ──────────────────────────────────────────────
+
+    def _discover_robots(self) -> None:
+        topic_names_and_types = self.get_topic_names_and_types()
+        found: Set[str] = set()
+        for topic_name, _types in topic_names_and_types:
+            m = _CAMERA_TOPIC_RE.match(topic_name)
+            if m:
+                found.add(m.group(1))
+
+        new_robots = found - self.discovered_robots
+        gone_robots = self.discovered_robots - found
+
+        for robot in new_robots:
+            self.get_logger().info(f"Discovered robot: {robot}")
+            cmd_topic = f"/{robot}/cmd_vel"
+            self.command_publishers[robot] = self.create_publisher(Twist, cmd_topic, 10)
+
+        for robot in gone_robots:
+            self.get_logger().info(f"Robot disappeared: {robot}")
+            self._stop_streaming(robot)
+            pub = self.command_publishers.pop(robot, None)
+            if pub:
+                self.destroy_publisher(pub)
+
+        if new_robots or gone_robots:
+            self.discovered_robots = found
+            self._send_ws_message({
+                "type": "register_robots",
+                "robots": sorted(self.discovered_robots),
+            })
+
+    # ── Stream control ───────────────────────────────────────────────
+
+    def _start_streaming(self, robot: str) -> None:
+        if robot not in self.discovered_robots:
+            self.get_logger().warning(f"Cannot stream unknown robot: {robot}")
+            return
+        if robot in self.streaming_robots:
+            return
+        topic = f"/{robot}/camera/image_raw"
+        self.camera_subscriptions[robot] = self.create_subscription(
+            Image,
+            topic,
+            lambda msg, ns=robot: self._handle_frame(ns, msg),
+            10,
+        )
+        self.streaming_robots.add(robot)
+        self.get_logger().info(f"Started streaming {topic}")
+
+    def _stop_streaming(self, robot: str) -> None:
+        if robot not in self.streaming_robots:
+            return
+        sub = self.camera_subscriptions.pop(robot, None)
+        if sub:
+            self.destroy_subscription(sub)
+        self.streaming_robots.discard(robot)
+        self.get_logger().info(f"Stopped streaming /{robot}/camera/image_raw")
+
+    # ── Frame push ───────────────────────────────────────────────────
 
     def _handle_frame(self, robot_id: str, msg: Image) -> None:
         raw = bytes(msg.data)
@@ -75,13 +134,15 @@ class RobotBridgeNode(Node):
         }
         url = f"{self.push_base_url}/{robot_id}"
         try:
-            resp = self.session.post(url, json=payload, headers=self.headers, timeout=2)
+            resp = self.http_session.post(url, json=payload, headers=self.headers, timeout=2)
             resp.raise_for_status()
             self.get_logger().debug(
                 f"Pushed frame for {robot_id} ({msg.width}x{msg.height} encoded as {payload['encoding']})"
             )
         except requests.RequestException as exc:
             self.get_logger().warning(f"Failed to push frame for {robot_id}: {exc}")
+
+    # ── WebSocket ────────────────────────────────────────────────────
 
     def _build_command_ws_url(self) -> str:
         parsed = urllib.parse.urlparse(self.api_base)
@@ -117,7 +178,10 @@ class RobotBridgeNode(Node):
 
     def _ws_on_open(self, ws: websocket.WebSocketApp) -> None:
         self.get_logger().info("Command websocket connected")
-        self._send_ws_message({"type": "subscribe", "robots": self.namespaces})
+        robots = sorted(self.discovered_robots)
+        if robots:
+            self._send_ws_message({"type": "register_robots", "robots": robots})
+            self._send_ws_message({"type": "subscribe", "robots": robots})
 
     def _ws_on_message(self, ws: websocket.WebSocketApp, message: str) -> None:
         try:
@@ -125,7 +189,10 @@ class RobotBridgeNode(Node):
         except json.JSONDecodeError:
             self.get_logger().warning("Received invalid JSON on command websocket")
             return
-        if payload.get("type") == "command":
+
+        msg_type = payload.get("type")
+
+        if msg_type == "command":
             robot = payload.get("robot")
             cmd = payload.get("command") or {}
             linear_x = float(cmd.get("linear_x", 0.0))
@@ -134,6 +201,18 @@ class RobotBridgeNode(Node):
                 f"Queued command {cmd.get('id')} for {robot} (lin_x={linear_x:.3f} ang_z={angular_z:.3f})"
             )
             self.command_queue.put(payload)
+
+        elif msg_type == "start_stream":
+            robot = (payload.get("robot") or "").strip()
+            if robot:
+                self.get_logger().info(f"Server requested stream start for {robot}")
+                self._start_streaming(robot)
+
+        elif msg_type == "stop_stream":
+            robot = (payload.get("robot") or "").strip()
+            if robot:
+                self.get_logger().info(f"Server requested stream stop for {robot}")
+                self._stop_streaming(robot)
 
     def _ws_on_close(self, ws: websocket.WebSocketApp, close_status_code, close_msg) -> None:
         self.get_logger().warning(f"Command websocket closed: {close_status_code} {close_msg}")
@@ -151,6 +230,8 @@ class RobotBridgeNode(Node):
             ws.send(message)
         except Exception as exc:
             self.get_logger().debug(f"Failed to send command websocket message: {exc}")
+
+    # ── Command forwarding ───────────────────────────────────────────
 
     def flush_command_queue(self) -> None:
         while not self.command_queue.empty():
@@ -184,7 +265,9 @@ class RobotBridgeNode(Node):
             )
 
     def send_heartbeats(self) -> None:
-        self._send_ws_message({"type": "heartbeat", "robots": self.namespaces})
+        robots = sorted(self.discovered_robots)
+        if robots:
+            self._send_ws_message({"type": "heartbeat", "robots": robots})
 
 
 def main() -> None:

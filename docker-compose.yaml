@@ -23,7 +23,6 @@ services:
     container_name: ros-core
     environment:
       - ROS_DOMAIN_ID=0
-      - CAMERA_NAMESPACES=bot_alpha,bot_beta
       - API_BASE_URL=http://robot-gateway:8080/api
       - ROS_PUSH_KEY=${ROS_PUSH_KEY:-local-dev-key}
     ports:

@@ -67,5 +67,5 @@ if [[ ! -x "${PYTHON_BIN}" ]]; then
 fi
 
 echo "[ros-core] rosbridge running on port ${ROSBRIDGE_PORT}"
-echo "[ros-core] launching robot bridge with namespaces: ${CAMERA_NAMESPACES:-<none>}"
+echo "[ros-core] launching robot bridge (auto-discovers camera topics)"
 exec "${PYTHON_BIN}" "${ROOT_DIR}/ros/camera_forwarder.py"

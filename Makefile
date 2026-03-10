@@ -4,7 +4,7 @@ ROS_SETUP := source /opt/ros/jazzy/setup.bash
 PROJECT_ID ?= robo1-489405
 export TURTLEBOT3_MODEL := burger
 
-.PHONY: help sim bridge web controller all stop clean tmux-stack attach all
+.PHONY: help sim bridge web controller all stop clean tmux-stack attach all sim-gui-bare
 
 attach:
 	tmux attach -t arena
@@ -122,6 +122,11 @@ gcloud-app-logs:
 cloud-sim:
 	echo "Starting ROS bridge + Webots sim against $$CLOUD_RUN_API_URL"; \
 	docker compose -f docker-compose.yaml -f docker-compose.cloud.yml up --build ros-core sim
+
+sim-gui-bare:
+  LOBBY_KEY=LPy6XgmZ_RayuekaA6CPsA \
+	API_BASE_URL=https://34.42.43.54.sslip.io/api \
+	uv run scripts/run_sim_gui_bare.py
 
 # Cleanup
 clean:

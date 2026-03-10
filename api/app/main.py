@@ -181,6 +181,8 @@ active_robot_streams: Dict[str, set[str]] = defaultdict(set)
 robot_heartbeats: Dict[str, datetime] = {}
 command_subscribers: Dict[str, set[WebSocket]] = defaultdict(set)
 websocket_robot_map: Dict[int, set[str]] = {}
+# Internal bridge websockets (for sending start_stream/stop_stream)
+bridge_websockets: set[WebSocket] = set()
 command_ws_lock = asyncio.Lock()
 
 app = FastAPI(title="Robot Gateway API", version="0.1.0")
@@ -734,6 +736,20 @@ async def unregister_robot_ws(websocket: WebSocket) -> None:
             sockets.discard(websocket)
             if not sockets:
                 command_subscribers.pop(robot, None)
+        bridge_websockets.discard(websocket)
+
+
+async def notify_bridge_stream(robot_id: str, active: bool) -> None:
+    """Send start_stream/stop_stream to all connected bridge websockets."""
+    msg_type = "start_stream" if active else "stop_stream"
+    payload = {"type": msg_type, "robot": robot_id}
+    async with command_ws_lock:
+        sockets = list(bridge_websockets)
+    for ws in sockets:
+        try:
+            await ws.send_json(payload)
+        except Exception:
+            pass
 
 
 async def broadcast_robot_command(command: RobotCommand) -> None:
@@ -1107,7 +1123,19 @@ async def robot_command_bridge(websocket: WebSocket) -> None:
         while True:
             message = await websocket.receive_json()
             msg_type = message.get("type")
-            if msg_type == "subscribe":
+            if msg_type == "register_robots":
+                robots = [value.strip() for value in message.get("robots", []) if value.strip()]
+                async with command_ws_lock:
+                    bridge_websockets.add(websocket)
+                for robot in robots:
+                    update_robot_heartbeat(robot)
+                # Tell the bridge which robots currently have active viewers
+                for robot in robots:
+                    if active_robot_streams.get(robot):
+                        await websocket.send_json({"type": "start_stream", "robot": robot})
+                await websocket.send_json({"type": "registered", "robots": robots})
+                logger.info("Bridge %s:%s registered robots: %s", peer[0], peer[1], robots)
+            elif msg_type == "subscribe":
                 robots = [value.strip() for value in message.get("robots", []) if value.strip()]
                 await register_robot_ws(websocket, robots)
                 for robot in robots:
@@ -1196,8 +1224,11 @@ async def start_webrtc(
         nonlocal active_added
         if state:
             if not active_added:
+                was_empty = not active_robot_streams.get(robot_id)
                 active_robot_streams[robot_id].add(current_user.email)
                 active_added = True
+                if was_empty:
+                    asyncio.ensure_future(notify_bridge_stream(robot_id, True))
         else:
             if active_added:
                 viewers = active_robot_streams.get(robot_id)
@@ -1205,6 +1236,7 @@ async def start_webrtc(
                     viewers.discard(current_user.email)
                     if not viewers:
                         active_robot_streams.pop(robot_id, None)
+                        asyncio.ensure_future(notify_bridge_stream(robot_id, False))
                 active_added = False
 
     @pc.on("connectionstatechange")
