@@ -171,9 +171,18 @@ sim-ros2-stop:
 	@docker compose down ros-core 2>/dev/null || true
 
 sim-gui-bare:
+ifeq ($(OS),Windows_NT)
+	MSYS_NO_PATHCONV=1 wsl.exe -d Ubuntu-24.04 -e bash -c "\
+		export LOBBY_KEY=LPy6XgmZ_RayuekaA6CPsA; \
+		export API_BASE_URL=https://34.42.43.54.sslip.io/api; \
+		export ROS_VENV=/home/dmn/robo1-ros-venv; \
+		cd /mnt/c/Users/dmn32/main/code/project/robo1; \
+		python3 scripts/run_sim_gui_bare.py"
+else
 	LOBBY_KEY=LPy6XgmZ_RayuekaA6CPsA \
 	API_BASE_URL=https://34.42.43.54.sslip.io/api \
-	uv run scripts/run_sim_gui_bare.py
+	python3 scripts/run_sim_gui_bare.py
+endif
 
 sim-gui-stop:
 	docker compose -f docker-compose.yaml -f docker-compose.cloud.yml down

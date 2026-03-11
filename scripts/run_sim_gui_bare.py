@@ -68,6 +68,11 @@ def find_python() -> str:
         venv_py = venv / "bin" / "python"
     if venv_py.is_file():
         return str(venv_py)
+    # Check for Linux-native venv (useful when running in WSL)
+    home = Path.home()
+    wsl_venv_py = home / "robo1-ros-venv" / "bin" / "python"
+    if wsl_venv_py.is_file():
+        return str(wsl_venv_py)
     return sys.executable
 
 
@@ -98,7 +103,18 @@ def main():
     python_bin = find_python()
 
     # ── Environment for subprocesses ──
+    # Remove venv from environment so rosbridge uses system Python (with ROS packages).
+    # camera_forwarder runs via the venv python binary directly.
     env = os.environ.copy()
+    venv_path = str(Path(os.environ.get("ROS_VENV", ROOT_DIR / "ros" / ".venv")))
+    if "VIRTUAL_ENV" in env:
+        del env["VIRTUAL_ENV"]
+    # Strip venv bin dirs from PATH so ros2 subprocess uses system Python
+    if "PATH" in env:
+        env["PATH"] = os.pathsep.join(
+            p for p in env["PATH"].split(os.pathsep)
+            if not p.startswith(venv_path)
+        )
     env["BOT_LOG_DIR"] = str(bot_log_dir)
     env["WEBOTS_DISABLE_SAVE_WORLD"] = "1"
     env["WEBOTS_DISABLE_SAVE_SCREEN"] = "1"
@@ -122,29 +138,43 @@ def main():
     signal.signal(signal.SIGINT, cleanup)
     signal.signal(signal.SIGTERM, cleanup)
 
-    # On Linux, source ROS setup and inherit the env into subprocesses
-    # by running commands through a shell wrapper.
-    if IS_WINDOWS:
-        shell_prefix = []
-    else:
-        shell_prefix = []  # ros2 should be on PATH after user sources setup
-
     # ── 1. rosbridge ──
     print(f"[sim-gui-bare] Starting rosbridge on port {rosbridge_port}...")
-    rosbridge_cmd = [
-        "ros2", "run", "rosbridge_server", "rosbridge_websocket",
-        "--port", rosbridge_port,
-        "--ros-args", "--log-level", "warn",
-        "-p", "default_call_service_timeout:=5.0",
-        "-p", "call_services_in_new_thread:=true",
-        "-p", "send_action_goals_in_new_thread:=true",
-    ]
-    procs.append(subprocess.Popen(shell_prefix + rosbridge_cmd, env=env))
+    rosbridge_args = " ".join([
+        "ros2 run rosbridge_server rosbridge_websocket",
+        f"--port {rosbridge_port}",
+        "--ros-args --log-level warn",
+        "-p default_call_service_timeout:=5.0",
+        "-p call_services_in_new_thread:=true",
+        "-p send_action_goals_in_new_thread:=true",
+    ])
+    if IS_WINDOWS:
+        rosbridge_cmd = rosbridge_args.split()
+    else:
+        # Wrap in bash -c so we can source ROS setup first
+        rosbridge_cmd = ["bash", "-c", f"source {ros_setup} && {rosbridge_args}"]
+    procs.append(subprocess.Popen(rosbridge_cmd, env=env))
 
     # ── 2. camera_forwarder ──
-    print("[sim-gui-bare] Starting camera_forwarder...")
+    # The forwarder needs both venv packages (aiortc etc.) and ROS system packages (rclpy).
+    # On Linux, source ROS setup to get PYTHONPATH, then run with venv python.
+    cam_env = env.copy()
     cam_script = str(ROOT_DIR / "ros" / "camera_forwarder.py")
-    procs.append(subprocess.Popen([python_bin, cam_script], env=env))
+    print("[sim-gui-bare] Starting camera_forwarder...")
+    if IS_WINDOWS:
+        ros_python_paths = [
+            p for p in (os.environ.get("PYTHONPATH") or "").split(os.pathsep)
+            if p and ("ros" in p.lower() or "ament" in p.lower())
+        ]
+        if ros_python_paths:
+            existing = cam_env.get("PYTHONPATH", "")
+            cam_env["PYTHONPATH"] = os.pathsep.join(ros_python_paths + ([existing] if existing else []))
+        procs.append(subprocess.Popen([python_bin, cam_script], env=cam_env))
+    else:
+        # Source ROS setup to get PYTHONPATH for rclpy, then run venv python
+        cam_cmd = ["bash", "-c",
+            f"source {ros_setup} && {python_bin} {cam_script}"]
+        procs.append(subprocess.Popen(cam_cmd, env=cam_env))
 
     # ── 3. Webots with GUI ──
     print(f"[sim-gui-bare] Launching Webots GUI: {world_path}")

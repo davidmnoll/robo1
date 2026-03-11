@@ -85,37 +85,38 @@ def _convert_image_to_bgra(width: int, height: int, encoding: str, payload: byte
 
 
 class RosVideoTrack(VideoStreamTrack):
-    """Bridges ROS2 Image callbacks to aiortc VideoFrames."""
+    """Bridges ROS2 Image callbacks to aiortc VideoFrames.
+
+    One track per robot, feeding the single forwarder->server PC.
+    Uses threading-safe queue since frames arrive from the ROS thread.
+    """
 
     kind = "video"
 
-    def __init__(self, robot_id: str, loop: asyncio.AbstractEventLoop) -> None:
+    def __init__(self, robot_id: str) -> None:
         super().__init__()
         self.robot_id = robot_id
-        self._loop = loop
-        self._queue: asyncio.Queue[VideoFrame] = asyncio.Queue(maxsize=1)
+        self._queue: queue.Queue[VideoFrame] = queue.Queue(maxsize=1)
 
-    def push_frame(self, width: int, height: int, encoding: str, data: bytes) -> None:
-        """Called from the ROS callback thread. Converts and enqueues a frame."""
-        try:
-            array = _convert_image_to_bgra(width, height, encoding, data)
-        except ValueError:
-            return
-        frame = VideoFrame.from_ndarray(array, format="bgra")
-        # Drop old frame if queue is full (keep latest only)
+    def push_frame(self, frame: VideoFrame) -> None:
+        """Called from the ROS callback thread. Thread-safe."""
         try:
             self._queue.get_nowait()
-        except asyncio.QueueEmpty:
+        except queue.Empty:
             pass
         try:
             self._queue.put_nowait(frame)
-        except asyncio.QueueFull:
+        except queue.Full:
             pass
 
     async def recv(self) -> VideoFrame:
-        frame = await self._queue.get()
-        frame.pts, frame.time_base = await self.next_timestamp()
-        return frame
+        while True:
+            try:
+                frame = self._queue.get_nowait()
+                frame.pts, frame.time_base = await self.next_timestamp()
+                return frame
+            except queue.Empty:
+                await asyncio.sleep(0.01)
 
 
 class RobotBridgeNode(Node):
@@ -142,9 +143,9 @@ class RobotBridgeNode(Node):
         self.telemetry_subscriptions: Dict[str, Subscription] = {}
         self.command_publishers: Dict[str, Publisher] = {}
 
-        # WebRTC: track video tracks and peer connections per robot
+        # SFU: one track and one PC per robot (forwarder -> server)
         self._video_tracks: Dict[str, RosVideoTrack] = {}
-        self._peer_connections: Dict[str, list[RTCPeerConnection]] = {}
+        self._peer_connections: Dict[str, RTCPeerConnection] = {}
         self._ice_servers: list[RTCIceServer] = list(_DEFAULT_ICE_SERVERS)
         self._ice_servers_fetched = False
 
@@ -176,7 +177,6 @@ class RobotBridgeNode(Node):
             self.get_logger().info(f"Discovered robot: {robot}")
             cmd_topic = f"/{robot}/cmd_vel"
             self.command_publishers[robot] = self.create_publisher(Twist, cmd_topic, 10)
-            # Always subscribe to telemetry for discovered robots
             telemetry_topic = f"/{robot}/telemetry"
             self.telemetry_subscriptions[robot] = self.create_subscription(
                 String,
@@ -210,6 +210,8 @@ class RobotBridgeNode(Node):
             return
         if robot in self.streaming_robots:
             return
+
+        # Subscribe to camera topic
         topic = f"/{robot}/camera/image_raw"
         self.camera_subscriptions[robot] = self.create_subscription(
             Image,
@@ -218,6 +220,17 @@ class RobotBridgeNode(Node):
             _CAMERA_QOS,
         )
         self.streaming_robots.add(robot)
+
+        # Create video track and initiate WebRTC offer to server
+        track = RosVideoTrack(robot)
+        self._video_tracks[robot] = track
+
+        if not self._ice_servers_fetched:
+            self._fetch_ice_servers()
+
+        asyncio.run_coroutine_threadsafe(
+            self._create_forwarder_offer(robot, track), self._aio_loop
+        )
         self.get_logger().info(f"Started streaming {topic}")
 
     def _stop_streaming(self, robot: str) -> None:
@@ -227,27 +240,31 @@ class RobotBridgeNode(Node):
         if sub:
             self.destroy_subscription(sub)
         self.streaming_robots.discard(robot)
-        # Close all peer connections for this robot
-        pcs = self._peer_connections.pop(robot, [])
-        for pc in pcs:
+        pc = self._peer_connections.pop(robot, None)
+        if pc:
             asyncio.run_coroutine_threadsafe(pc.close(), self._aio_loop)
         self._video_tracks.pop(robot, None)
         self.get_logger().info(f"Stopped streaming /{robot}/camera/image_raw")
 
-    # ── Frame handling (feed into WebRTC tracks) ─────────────────────
+    # ── Frame handling ───────────────────────────────────────────────
 
     def _handle_frame(self, robot_id: str, msg: Image) -> None:
         track = self._video_tracks.get(robot_id)
-        if track is None:
+        if not track:
             return
         raw = bytes(msg.data)
         encoding = msg.encoding or "bgra8"
-        track.push_frame(msg.width, msg.height, encoding, raw)
+        try:
+            array = _convert_image_to_bgra(msg.width, msg.height, encoding, raw)
+        except ValueError:
+            return
+        frame = VideoFrame.from_ndarray(array, format="bgra")
+        track.push_frame(frame)
 
-    # ── ICE server config ───────────────────────────────────────────
+    # ── ICE server config ────────────────────────────────────────────
 
     def _fetch_ice_servers(self) -> list[RTCIceServer]:
-        """Fetch ICE server config from the API (with TURN credentials)."""
+        """Fetch ICE server config from the API."""
         url = f"{self.api_base}/internal/ice-servers"
         try:
             resp = self.http_session.get(url, headers=self.headers, timeout=5)
@@ -273,107 +290,56 @@ class RobotBridgeNode(Node):
             self.get_logger().warning(f"Failed to fetch ICE servers: {exc}")
             return list(_DEFAULT_ICE_SERVERS)
 
-    # ── WebRTC signaling ─────────────────────────────────────────────
+    # ── WebRTC: forwarder -> server (Hop 1) ──────────────────────────
 
-    def _handle_webrtc_offer(self, payload: dict) -> None:
-        """Handle a WebRTC offer relayed from the API."""
-        robot = (payload.get("robot") or "").strip()
-        signaling_id = payload.get("signaling_id", "")
-        sdp = payload.get("sdp", "")
-        offer_type = payload.get("offer_type", "offer")
-
-        if not robot or not sdp:
-            self.get_logger().warning("Invalid webrtc_offer: missing robot or sdp")
-            return
-
-        if robot not in self.discovered_robots:
-            self.get_logger().warning(f"WebRTC offer for unknown robot: {robot}")
-            self._send_ws_message({
-                "type": "webrtc_answer",
-                "signaling_id": signaling_id,
-                "error": f"robot {robot} not found",
-            })
-            return
-
-        # Ensure we're streaming this robot's camera
-        self._start_streaming(robot)
-
-        # Fetch fresh TURN credentials if we haven't yet or periodically
-        if not self._ice_servers_fetched:
-            self._fetch_ice_servers()
-
-        # Ensure we have a video track for this robot
-        if robot not in self._video_tracks:
-            self._video_tracks[robot] = RosVideoTrack(robot, self._aio_loop)
-
-        track = self._video_tracks[robot]
-
-        # Create peer connection and answer on the asyncio loop
-        future = asyncio.run_coroutine_threadsafe(
-            self._create_peer_connection(robot, signaling_id, sdp, offer_type, track),
-            self._aio_loop,
-        )
-        # Don't block — the coroutine sends the answer via WS when ready
-
-    async def _create_peer_connection(
-        self,
-        robot: str,
-        signaling_id: str,
-        sdp: str,
-        offer_type: str,
-        track: RosVideoTrack,
-    ) -> None:
+    async def _create_forwarder_offer(self, robot: str, track: RosVideoTrack) -> None:
+        """Create a PC, add video track, send offer to the server."""
         ice_config = RTCConfiguration(iceServers=list(self._ice_servers))
         pc = RTCPeerConnection(configuration=ice_config)
-
-        if robot not in self._peer_connections:
-            self._peer_connections[robot] = []
-        self._peer_connections[robot].append(pc)
+        self._peer_connections[robot] = pc
 
         @pc.on("connectionstatechange")
         async def _on_state_change() -> None:
             state = pc.connectionState
-            self.get_logger().info(f"WebRTC state for {robot}: {state}")
+            self.get_logger().info(f"SFU Hop1 state for {robot}: {state}")
             if state in {"failed", "closed", "disconnected"}:
-                pcs = self._peer_connections.get(robot, [])
-                if pc in pcs:
-                    pcs.remove(pc)
+                self._peer_connections.pop(robot, None)
+                self._video_tracks.pop(robot, None)
                 await pc.close()
-                # Notify API that a viewer disconnected
-                self._send_ws_message({
-                    "type": "webrtc_disconnected",
-                    "robot": robot,
-                })
-                # If no more peer connections, stop streaming
-                if not self._peer_connections.get(robot):
-                    self._video_tracks.pop(robot, None)
 
-        try:
-            pc.addTrack(track)
-            offer = RTCSessionDescription(sdp=sdp, type=offer_type)
-            await pc.setRemoteDescription(offer)
-            answer = await pc.createAnswer()
-            await pc.setLocalDescription(answer)
+        pc.addTrack(track)
+        offer = await pc.createOffer()
+        await pc.setLocalDescription(offer)
 
-            self._send_ws_message({
-                "type": "webrtc_answer",
-                "signaling_id": signaling_id,
-                "robot": robot,
-                "sdp": pc.localDescription.sdp,
-                "answer_type": pc.localDescription.type,
-            })
-            self.get_logger().info(f"Sent WebRTC answer for {robot} (signaling_id={signaling_id})")
-        except Exception as exc:
-            self.get_logger().error(f"Failed to create WebRTC answer for {robot}: {exc}")
-            self._send_ws_message({
-                "type": "webrtc_answer",
-                "signaling_id": signaling_id,
-                "error": str(exc),
-            })
-            pcs = self._peer_connections.get(robot, [])
-            if pc in pcs:
-                pcs.remove(pc)
-            await pc.close()
+        self._send_ws_message({
+            "type": "webrtc_offer",
+            "robot": robot,
+            "sdp": pc.localDescription.sdp,
+            "offer_type": pc.localDescription.type,
+        })
+        self.get_logger().info(f"Sent SFU offer to server for {robot}")
+
+    def _handle_webrtc_answer(self, payload: dict) -> None:
+        """Handle the server's answer to our offer."""
+        robot = (payload.get("robot") or "").strip()
+        sdp = payload.get("sdp", "")
+        answer_type = payload.get("answer_type", "answer")
+
+        if not robot or not sdp:
+            error = payload.get("error", "unknown")
+            self.get_logger().warning(f"WebRTC answer error for {robot}: {error}")
+            return
+
+        pc = self._peer_connections.get(robot)
+        if not pc:
+            self.get_logger().warning(f"No PC found for WebRTC answer for {robot}")
+            return
+
+        self.get_logger().info(f"Received SFU answer for {robot}, setting remote description")
+        asyncio.run_coroutine_threadsafe(
+            pc.setRemoteDescription(RTCSessionDescription(sdp=sdp, type=answer_type)),
+            self._aio_loop,
+        )
 
     # ── Telemetry push ───────────────────────────────────────────────
 
@@ -459,9 +425,9 @@ class RobotBridgeNode(Node):
                 self.get_logger().info(f"Server requested stream stop for {robot}")
                 self._stop_streaming(robot)
 
-        elif msg_type == "webrtc_offer":
-            self.get_logger().info(f"Received WebRTC offer for {payload.get('robot')}")
-            self._handle_webrtc_offer(payload)
+        elif msg_type == "webrtc_answer":
+            self.get_logger().info(f"Received WebRTC answer for {payload.get('robot')}")
+            self._handle_webrtc_answer(payload)
 
     def _ws_on_close(self, ws: websocket.WebSocketApp, close_status_code, close_msg) -> None:
         self.get_logger().warning(f"Command websocket closed: {close_status_code} {close_msg}")

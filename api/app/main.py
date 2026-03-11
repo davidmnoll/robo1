@@ -4,15 +4,15 @@ import json
 import logging
 import os
 import secrets
-import uuid
+import struct
+import time as _time
 from collections import defaultdict
 from datetime import datetime, timedelta
 from enum import Enum
 from typing import Any, Dict, Optional, TypeVar
 
-import struct
-import time as _time
-
+from aiortc import MediaStreamTrack, RTCPeerConnection, RTCSessionDescription
+from aiortc.contrib.media import MediaRelay
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from jose import JWTError, jwt
@@ -173,9 +173,18 @@ async def get_session() -> AsyncSession:
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("gateway")
 active_robot_streams: Dict[str, set[str]] = defaultdict(set)
-# WebRTC signaling: maps signaling_id -> Future that resolves to the answer from the bridge
-webrtc_signaling: Dict[str, asyncio.Future] = {}
 robot_heartbeats: Dict[str, datetime] = {}
+
+# SFU state
+media_relay = MediaRelay()
+# Incoming video track from forwarder per robot (Hop 1)
+robot_incoming_tracks: Dict[str, MediaStreamTrack] = {}
+# Hop 1 PeerConnection from forwarder per robot
+robot_forwarder_pcs: Dict[str, RTCPeerConnection] = {}
+# Hop 2 PeerConnections (one per browser viewer) per robot
+robot_browser_pcs: Dict[str, list[RTCPeerConnection]] = defaultdict(list)
+# Event set when forwarder track arrives (for browser waiters)
+robot_track_ready: Dict[str, asyncio.Event] = {}
 command_subscribers: Dict[str, set[WebSocket]] = defaultdict(set)
 websocket_robot_map: Dict[int, set[str]] = {}
 # Internal bridge websockets (for sending start_stream/stop_stream)
@@ -201,7 +210,22 @@ _STUN_HEADER_SIZE = 20
 
 def allow_stun_ip(ip: str) -> None:
     """Add an IP to the STUN whitelist with TTL."""
-    stun_whitelist[ip] = _time.time() + STUN_WHITELIST_TTL
+    if ip and ip not in ("unknown", "127.0.0.1", "::1"):
+        stun_whitelist[ip] = _time.time() + STUN_WHITELIST_TTL
+
+
+def _get_client_ip(request: Request) -> str:
+    """Extract real client IP, respecting X-Forwarded-For from reverse proxy."""
+    forwarded = request.headers.get("x-forwarded-for")
+    if forwarded:
+        # First IP in the chain is the original client
+        return forwarded.split(",")[0].strip()
+    real_ip = request.headers.get("x-real-ip")
+    if real_ip:
+        return real_ip.strip()
+    if request.client:
+        return request.client.host
+    return ""
 
 
 def _cleanup_stun_whitelist() -> None:
@@ -425,8 +449,7 @@ async def register_user(
     session.add(user)
     await session.commit()
     await session.refresh(user)
-    if request.client:
-        allow_stun_ip(request.client.host)
+    allow_stun_ip(_get_client_ip(request))
     return create_token_response(user)
 
 
@@ -441,8 +464,7 @@ async def login_user(
     user = result.scalar_one_or_none()
     if not user or not verify_password(payload.password, user.password_hash):
         raise HTTPException(status_code=401, detail="Invalid credentials")
-    if request.client:
-        allow_stun_ip(request.client.host)
+    allow_stun_ip(_get_client_ip(request))
     return create_token_response(user)
 
 
@@ -887,12 +909,11 @@ def parse_seed_entries(raw: Optional[str], model: type[SeedModelT], label: str) 
     return entries
 
 
-async def require_internal_api_key(provided: str, session: Optional[AsyncSession] = None) -> None:
+async def require_internal_api_key(provided: str, session: Optional[AsyncSession] = None) -> int:
+    """Validate lobby access key. Returns lobby_id."""
     provided_key = (provided or "").strip()
     if not provided_key:
         raise HTTPException(status_code=403, detail="missing lobby key")
-    if settings.lobby_key and secrets.compare_digest(provided_key, settings.lobby_key):
-        return
     owns_session = False
     if session is None:
         session = AsyncSessionLocal()
@@ -903,6 +924,7 @@ async def require_internal_api_key(provided: str, session: Optional[AsyncSession
         lobby_id = result.scalar_one_or_none()
         if lobby_id is None:
             raise HTTPException(status_code=403, detail="invalid lobby key")
+        return lobby_id
     finally:
         if owns_session and session is not None:
             await session.close()
@@ -1134,11 +1156,15 @@ async def shutdown_event() -> None:
         app.state.stun_transport.close()
     if hasattr(app.state, "stun_cleanup_task"):
         app.state.stun_cleanup_task.cancel()
-    # Cancel any pending signaling futures
-    for fut in webrtc_signaling.values():
-        if not fut.done():
-            fut.cancel()
-    webrtc_signaling.clear()
+    # Close all SFU peer connections
+    for pc in robot_forwarder_pcs.values():
+        await pc.close()
+    robot_forwarder_pcs.clear()
+    for pcs in robot_browser_pcs.values():
+        for pc in pcs:
+            await pc.close()
+    robot_browser_pcs.clear()
+    robot_incoming_tracks.clear()
 
 
 @app.get("/api/health")
@@ -1167,8 +1193,7 @@ async def get_ice_servers(
     current_user: User = Depends(get_current_user),
 ) -> dict[str, Any]:
     """Return ICE server config; also whitelists the caller for STUN."""
-    if request.client:
-        allow_stun_ip(request.client.host)
+    allow_stun_ip(_get_client_ip(request))
     return _get_ice_servers()
 
 
@@ -1180,8 +1205,7 @@ async def get_internal_ice_servers(
 ) -> dict[str, Any]:
     """Return ICE server config for internal bridge clients; whitelists the caller."""
     await require_internal_api_key(x_api_key, session)
-    if request.client:
-        allow_stun_ip(request.client.host)
+    allow_stun_ip(_get_client_ip(request))
     return _get_ice_servers()
 
 
@@ -1251,11 +1275,14 @@ async def broadcast_telemetry(robot_id: str, data: Dict[str, Any]) -> None:
 async def robot_command_bridge(websocket: WebSocket) -> None:
     api_key = websocket.query_params.get("api_key") or websocket.headers.get("x-api-key", "")
     async with AsyncSessionLocal() as session:
-        await require_internal_api_key(api_key or "", session)
+        lobby_id = await require_internal_api_key(api_key or "", session)
     await websocket.accept()
     peer = websocket.client or ("unknown", 0)
-    allow_stun_ip(peer[0])
-    logger.info("Command websocket connected from %s:%s", peer[0], peer[1])
+    # Use forwarded header if behind reverse proxy, else direct peer IP
+    ws_forwarded = websocket.headers.get("x-forwarded-for")
+    ws_client_ip = ws_forwarded.split(",")[0].strip() if ws_forwarded else peer[0]
+    allow_stun_ip(ws_client_ip)
+    logger.info("Command websocket connected from %s:%s (lobby_id=%s)", ws_client_ip, peer[1], lobby_id)
     try:
         while True:
             message = await websocket.receive_json()
@@ -1266,6 +1293,29 @@ async def robot_command_bridge(websocket: WebSocket) -> None:
                     bridge_websockets.add(websocket)
                 for robot in robots:
                     update_robot_heartbeat(robot)
+                # Auto-create Bot entries for new robot namespaces
+                if robots:
+                    async with AsyncSessionLocal() as session:
+                        for ns in robots:
+                            existing = await session.execute(
+                                select(Bot.id).where(Bot.ros_namespace == ns)
+                            )
+                            if existing.scalar_one_or_none() is None:
+                                bot = Bot(
+                                    name=ns.strip("/").replace("/", "_"),
+                                    ros_namespace=ns,
+                                    lobby_id=lobby_id,
+                                )
+                                session.add(bot)
+                                logger.info("Auto-created bot '%s' in lobby %s", ns, lobby_id)
+                            else:
+                                # Un-delete if previously soft-deleted
+                                await session.execute(
+                                    Bot.__table__.update()
+                                    .where(Bot.ros_namespace == ns)
+                                    .values(is_deleted=False)
+                                )
+                        await session.commit()
                 # Tell the bridge which robots currently have active viewers
                 for robot in robots:
                     if active_robot_streams.get(robot):
@@ -1310,21 +1360,9 @@ async def robot_command_bridge(websocket: WebSocket) -> None:
                     await cleanup_completed_commands(session, robot)
                 ack_payload["recorded"] = True
                 await websocket.send_json(ack_payload)
-            elif msg_type == "webrtc_answer":
-                signaling_id = message.get("signaling_id", "")
-                fut = webrtc_signaling.pop(signaling_id, None)
-                if fut and not fut.done():
-                    fut.set_result(message)
-            elif msg_type == "webrtc_disconnected":
-                robot = (message.get("robot") or "").strip()
-                if robot:
-                    viewers = active_robot_streams.get(robot)
-                    if viewers is not None:
-                        # Remove one viewer (the one whose PC just closed)
-                        viewers.pop() if viewers else None
-                        if not viewers:
-                            active_robot_streams.pop(robot, None)
-                            await notify_bridge_stream(robot, False)
+            elif msg_type == "webrtc_offer":
+                # Forwarder is sending us its Hop 1 offer
+                await handle_forwarder_offer(websocket, message)
             else:
                 await websocket.send_json({"type": "error", "error": "unknown message", "payload": message})
     except WebSocketDisconnect:
@@ -1368,56 +1406,113 @@ async def websocket_proxy(websocket: WebSocket, robot_id: str) -> None:
                 telemetry_subscribers.pop(robot_id, None)
 
 
+async def handle_forwarder_offer(ws: WebSocket, message: dict) -> None:
+    """Hop 1: accept the forwarder's WebRTC offer, store the incoming track."""
+    robot = (message.get("robot") or "").strip()
+    sdp = message.get("sdp", "")
+    offer_type = message.get("offer_type", "offer")
+
+    if not robot or not sdp:
+        await ws.send_json({"type": "webrtc_answer", "robot": robot, "error": "missing robot or sdp"})
+        return
+
+    # Tear down any existing Hop 1 PC for this robot (reconnect case)
+    old_pc = robot_forwarder_pcs.pop(robot, None)
+    if old_pc:
+        await old_pc.close()
+    robot_incoming_tracks.pop(robot, None)
+
+    pc = RTCPeerConnection()
+    robot_forwarder_pcs[robot] = pc
+
+    @pc.on("track")
+    def on_track(track: MediaStreamTrack) -> None:
+        logger.info("SFU: received %s track from forwarder for %s", track.kind, robot)
+        if track.kind == "video":
+            robot_incoming_tracks[robot] = track
+            evt = robot_track_ready.get(robot)
+            if evt:
+                evt.set()
+
+    @pc.on("connectionstatechange")
+    async def on_state() -> None:
+        state = pc.connectionState
+        logger.info("SFU Hop1 state for %s: %s", robot, state)
+        if state in ("failed", "closed", "disconnected"):
+            robot_incoming_tracks.pop(robot, None)
+            robot_forwarder_pcs.pop(robot, None)
+            # Close all Hop 2 PCs for this robot
+            browser_pcs = robot_browser_pcs.pop(robot, [])
+            for bpc in browser_pcs:
+                await bpc.close()
+            await pc.close()
+
+    offer = RTCSessionDescription(sdp=sdp, type=offer_type)
+    await pc.setRemoteDescription(offer)
+    answer = await pc.createAnswer()
+    await pc.setLocalDescription(answer)
+
+    await ws.send_json({
+        "type": "webrtc_answer",
+        "robot": robot,
+        "sdp": pc.localDescription.sdp,
+        "answer_type": pc.localDescription.type,
+    })
+    logger.info("SFU: sent Hop1 answer for %s", robot)
+
+
 @app.post("/api/robots/{robot_id}/webrtc")
 async def start_webrtc(
     robot_id: str,
     offer: WebRTCOffer,
     current_user: User = Depends(get_current_user),
 ) -> dict[str, str]:
-    """Relay a WebRTC offer to the bridge and return the answer."""
-    # Track active viewers for start/stop stream signaling
+    """Hop 2: relay the forwarder's track to this browser viewer."""
+    # Track active viewers and trigger stream start if first viewer
     was_empty = not active_robot_streams.get(robot_id)
     active_robot_streams[robot_id].add(current_user.email)
     if was_empty:
         await notify_bridge_stream(robot_id, True)
 
-    # Create a future for the bridge's answer
-    signaling_id = str(uuid.uuid4())
-    fut: asyncio.Future = asyncio.get_event_loop().create_future()
-    webrtc_signaling[signaling_id] = fut
-
-    # Send the offer to the bridge via WebSocket
-    relay_payload = {
-        "type": "webrtc_offer",
-        "robot": robot_id,
-        "signaling_id": signaling_id,
-        "sdp": offer.sdp,
-        "offer_type": offer.type,
-    }
-    async with command_ws_lock:
-        sockets = list(bridge_websockets)
-    if not sockets:
-        webrtc_signaling.pop(signaling_id, None)
-        raise HTTPException(status_code=503, detail="No bridge connected")
-
-    for ws in sockets:
+    # Wait for forwarder track if not yet available
+    incoming_track = robot_incoming_tracks.get(robot_id)
+    if not incoming_track:
+        evt = robot_track_ready.setdefault(robot_id, asyncio.Event())
+        evt.clear()
         try:
-            await ws.send_json(relay_payload)
-            break
-        except Exception:
-            continue
-    else:
-        webrtc_signaling.pop(signaling_id, None)
-        raise HTTPException(status_code=503, detail="Failed to reach bridge")
+            await asyncio.wait_for(evt.wait(), timeout=10.0)
+        except asyncio.TimeoutError:
+            raise HTTPException(status_code=503, detail="Video stream not available yet")
+        incoming_track = robot_incoming_tracks.get(robot_id)
+        if not incoming_track:
+            raise HTTPException(status_code=503, detail="Video stream not available")
 
-    # Wait for the bridge to respond with the answer
-    try:
-        answer = await asyncio.wait_for(fut, timeout=15.0)
-    except asyncio.TimeoutError:
-        webrtc_signaling.pop(signaling_id, None)
-        raise HTTPException(status_code=504, detail="Bridge did not respond in time")
+    # Create a relayed copy of the track for this browser (no re-encoding)
+    relayed_track = media_relay.subscribe(incoming_track)
 
-    if "error" in answer:
-        raise HTTPException(status_code=502, detail=answer["error"])
+    pc = RTCPeerConnection()
+    robot_browser_pcs[robot_id].append(pc)
 
-    return {"sdp": answer["sdp"], "type": answer.get("answer_type", "answer")}
+    @pc.on("connectionstatechange")
+    async def on_state() -> None:
+        state = pc.connectionState
+        logger.info("SFU Hop2 state for %s: %s", robot_id, state)
+        if state in ("failed", "closed", "disconnected"):
+            pcs = robot_browser_pcs.get(robot_id, [])
+            if pc in pcs:
+                pcs.remove(pc)
+            await pc.close()
+            # If no more viewers, stop the stream
+            if not robot_browser_pcs.get(robot_id):
+                viewers = active_robot_streams.pop(robot_id, None)
+                if viewers:
+                    await notify_bridge_stream(robot_id, False)
+
+    pc.addTrack(relayed_track)
+
+    browser_offer = RTCSessionDescription(sdp=offer.sdp, type=offer.type)
+    await pc.setRemoteDescription(browser_offer)
+    answer = await pc.createAnswer()
+    await pc.setLocalDescription(answer)
+
+    return {"sdp": pc.localDescription.sdp, "type": pc.localDescription.type}

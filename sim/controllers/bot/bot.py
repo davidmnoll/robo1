@@ -250,10 +250,10 @@ def main() -> None:
     left_motor.setPosition(float("inf"))
     right_motor.setPosition(float("inf"))
 
-    # TEST: Start with constant velocity to verify motors work
-    left_motor.setVelocity(300.0)
-    right_motor.setVelocity(300.0)
-    log("Motors initialized - TEST: set to 300.0 rad/s")
+    # Start idle — wait for commands
+    left_motor.setVelocity(0.0)
+    right_motor.setVelocity(0.0)
+    log("Motors initialized - idle")
 
     # Initialize obstacle detection
     obstacle_detector = ObstacleDetector(robot, timestep, log)
@@ -303,9 +303,8 @@ def main() -> None:
     log(f"Right motor max velocity: {right_motor.getMaxVelocity()}")
 
     # Track current velocities (persist between loops)
-    # Start at high velocity to verify motors work
-    current_left = 60.0
-    current_right = 60.0
+    current_left = 0.0
+    current_right = 0.0
     last_cmd_time = 0.0
     stop_timeout = 5.0  # Stop after 5 seconds of no commands
 
@@ -332,8 +331,9 @@ def main() -> None:
                 linear = cmd["linear"]
                 angular = cmd["angular"]
                 # Convert twist to differential drive
-                base_speed = linear * 20.0
-                turn = angular * 10.0
+                # TurtleBot3 Burger: max ~6.67 rad/s, wheel_separation ~0.16m
+                base_speed = linear * 6.67
+                turn = angular * 3.0
                 current_left = base_speed - turn
                 current_right = base_speed + turn
                 log(f"MOTOR: L={current_left:.2f} R={current_right:.2f} (age={time_since_cmd:.2f}s)")
@@ -347,8 +347,8 @@ def main() -> None:
         left_speed = current_left
         right_speed = current_right
 
-        # Clamp speeds to motor max
-        max_speed = 100.0
+        # Clamp speeds to motor max (TurtleBot3 Burger max ~6.67 rad/s)
+        max_speed = 6.67
         left_speed = max(-max_speed, min(max_speed, left_speed))
         right_speed = max(-max_speed, min(max_speed, right_speed))
 

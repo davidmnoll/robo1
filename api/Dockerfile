@@ -15,6 +15,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libffi-dev \
     libssl-dev \
     build-essential \
+    pkg-config \
+    libavformat-dev \
+    libavcodec-dev \
+    libavutil-dev \
+    libswscale-dev \
+    libswresample-dev \
+    libopus-dev \
+    libvpx-dev \
     && rm -rf /var/lib/apt/lists/*
 
 COPY pyproject.toml .
