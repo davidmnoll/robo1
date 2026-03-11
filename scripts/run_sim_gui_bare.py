@@ -177,9 +177,16 @@ def main():
         procs.append(subprocess.Popen(cam_cmd, env=cam_env))
 
     # ── 3. Webots with GUI ──
+    # Webots spawns bot controllers as child processes — they need rclpy,
+    # so launch Webots with ROS sourced so controllers inherit PYTHONPATH/LD_LIBRARY_PATH.
     print(f"[sim-gui-bare] Launching Webots GUI: {world_path}")
-    webots_cmd = [webots_bin, "--stdout", "--stderr", "--batch", str(world_path)]
-    procs.append(subprocess.Popen(webots_cmd, env=env))
+    if IS_WINDOWS:
+        webots_cmd = [webots_bin, "--stdout", "--stderr", "--batch", str(world_path)]
+        procs.append(subprocess.Popen(webots_cmd, env=env))
+    else:
+        webots_args = f"{webots_bin} --stdout --stderr --batch {world_path}"
+        webots_cmd = ["bash", "-c", f"source {ros_setup} && {webots_args}"]
+        procs.append(subprocess.Popen(webots_cmd, env=env))
 
     print("[sim-gui-bare] All processes running. Press Ctrl+C to stop.")
 

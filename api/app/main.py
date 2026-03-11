@@ -137,7 +137,7 @@ class Bot(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String(255), nullable=False)
-    ros_namespace = Column(String(255), nullable=False, unique=True)
+    ros_namespace = Column(String(255), nullable=False, index=True)
     description = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     lobby_id = Column(Integer, ForeignKey("lobbies.id"), nullable=False)
@@ -614,10 +614,12 @@ async def create_bot(
     if lobby.owner_id != current_user.id:
         raise HTTPException(status_code=403, detail="Only the lobby owner can register bots")
     normalized_namespace = payload.ros_namespace.strip()
-    existing = await session.execute(select(Bot).where(Bot.ros_namespace == normalized_namespace))
+    existing = await session.execute(
+        select(Bot).where(Bot.ros_namespace == normalized_namespace, Bot.lobby_id == lobby.id)
+    )
     bot = existing.scalar_one_or_none()
     if bot and not bot.is_deleted:
-        raise HTTPException(status_code=400, detail="ROS namespace already registered")
+        raise HTTPException(status_code=400, detail="ROS namespace already registered in this lobby")
     if bot and bot.is_deleted:
         bot.name = payload.name.strip()
         bot.description = payload.description
@@ -657,10 +659,12 @@ async def update_bot(
     if payload.ros_namespace is not None:
         new_ns = payload.ros_namespace.strip()
         if new_ns != bot.ros_namespace:
-            existing = await session.execute(select(Bot).where(Bot.ros_namespace == new_ns))
+            existing = await session.execute(
+                select(Bot).where(Bot.ros_namespace == new_ns, Bot.lobby_id == bot.lobby_id)
+            )
             ns_bot = existing.scalar_one_or_none()
             if ns_bot and ns_bot.id != bot.id:
-                raise HTTPException(status_code=400, detail="ROS namespace already registered")
+                raise HTTPException(status_code=400, detail="ROS namespace already registered in this lobby")
             bot.ros_namespace = new_ns
     await session.commit()
     await session.refresh(bot)
@@ -1092,7 +1096,9 @@ async def apply_seed_data() -> None:
                 lobby.owner_id = owner.id
                 logger.info("Assigned lobby %s to owner %s for bot seeding", lobby.name, owner.email)
             namespace = entry.ros_namespace.strip()
-            result = await session.execute(select(Bot).where(Bot.ros_namespace == namespace))
+            result = await session.execute(
+                select(Bot).where(Bot.ros_namespace == namespace, Bot.lobby_id == lobby.id)
+            )
             bot = result.scalar_one_or_none()
             if not bot:
                 bot = Bot(
@@ -1293,12 +1299,15 @@ async def robot_command_bridge(websocket: WebSocket) -> None:
                     bridge_websockets.add(websocket)
                 for robot in robots:
                     update_robot_heartbeat(robot)
-                # Auto-create Bot entries for new robot namespaces
+                # Auto-create Bot entries for new robot namespaces (scoped to this lobby)
                 if robots:
                     async with AsyncSessionLocal() as session:
                         for ns in robots:
                             existing = await session.execute(
-                                select(Bot.id).where(Bot.ros_namespace == ns)
+                                select(Bot.id).where(
+                                    Bot.ros_namespace == ns,
+                                    Bot.lobby_id == lobby_id,
+                                )
                             )
                             if existing.scalar_one_or_none() is None:
                                 bot = Bot(
@@ -1313,6 +1322,7 @@ async def robot_command_bridge(websocket: WebSocket) -> None:
                                 await session.execute(
                                     Bot.__table__.update()
                                     .where(Bot.ros_namespace == ns)
+                                    .where(Bot.lobby_id == lobby_id)
                                     .values(is_deleted=False)
                                 )
                         await session.commit()
