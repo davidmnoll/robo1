@@ -1,2 +1,5 @@
 requests
 websocket-client
+aiortc
+numpy
+av

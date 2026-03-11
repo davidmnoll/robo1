@@ -9,6 +9,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     wireguard-tools \
     iptables \
     iproute2 \
+    libavcodec-dev \
+    libavformat-dev \
+    libavutil-dev \
+    libopus-dev \
+    libvpx-dev \
+    pkg-config \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /workspace

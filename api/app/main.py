@@ -1,20 +1,15 @@
 import asyncio
 import contextlib
-import base64
-import binascii
-import gzip
 import json
 import logging
 import os
 import secrets
+import uuid
 from collections import defaultdict
 from datetime import datetime, timedelta
 from enum import Enum
-from typing import Any, Dict, Optional, Tuple, TypeVar
+from typing import Any, Dict, Optional, TypeVar
 
-import numpy as np
-from aiortc import RTCConfiguration, RTCPeerConnection, RTCSessionDescription, RTCIceServer, VideoStreamTrack
-from av import VideoFrame
 from fastapi import Depends, FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from jose import JWTError, jwt
@@ -173,14 +168,14 @@ async def get_session() -> AsyncSession:
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("gateway")
-logging.getLogger("aioice").setLevel(logging.DEBUG)
-logging.getLogger("aiortc").setLevel(logging.DEBUG)
-frame_queues: Dict[str, asyncio.Queue[Tuple[int, int, str, bytes]]] = {}
-peer_connections: set[RTCPeerConnection] = set()
 active_robot_streams: Dict[str, set[str]] = defaultdict(set)
+# WebRTC signaling: maps signaling_id -> Future that resolves to the answer from the bridge
+webrtc_signaling: Dict[str, asyncio.Future] = {}
 robot_heartbeats: Dict[str, datetime] = {}
 command_subscribers: Dict[str, set[WebSocket]] = defaultdict(set)
 websocket_robot_map: Dict[int, set[str]] = {}
+# Internal bridge websockets (for sending start_stream/stop_stream)
+bridge_websockets: set[WebSocket] = set()
 command_ws_lock = asyncio.Lock()
 # Telemetry subscribers - maps robot_id to set of websockets
 telemetry_subscribers: Dict[str, set[WebSocket]] = defaultdict(set)
@@ -216,16 +211,6 @@ class TwistCommand(BaseModel):
 class WebRTCOffer(BaseModel):
     sdp: str
     type: str
-
-
-class FramePayload(BaseModel):
-    width: int
-    height: int
-    encoding: str
-    data: str
-    stamp_sec: int | None = None
-    stamp_nanosec: int | None = None
-    compressed: bool = False
 
 
 class TelemetryPayload(BaseModel):
@@ -745,6 +730,20 @@ async def unregister_robot_ws(websocket: WebSocket) -> None:
             sockets.discard(websocket)
             if not sockets:
                 command_subscribers.pop(robot, None)
+        bridge_websockets.discard(websocket)
+
+
+async def notify_bridge_stream(robot_id: str, active: bool) -> None:
+    """Send start_stream/stop_stream to all connected bridge websockets."""
+    msg_type = "start_stream" if active else "stop_stream"
+    payload = {"type": msg_type, "robot": robot_id}
+    async with command_ws_lock:
+        sockets = list(bridge_websockets)
+    for ws in sockets:
+        try:
+            await ws.send_json(payload)
+        except Exception:
+            pass
 
 
 async def broadcast_robot_command(command: RobotCommand) -> None:
@@ -1032,9 +1031,11 @@ async def startup_event() -> None:
 
 @app.on_event("shutdown")
 async def shutdown_event() -> None:
-    for pc in list(peer_connections):
-        await pc.close()
-    peer_connections.clear()
+    # Cancel any pending signaling futures
+    for fut in webrtc_signaling.values():
+        if not fut.done():
+            fut.cancel()
+    webrtc_signaling.clear()
 
 
 @app.get("/api/health")
@@ -1111,35 +1112,6 @@ async def broadcast_telemetry(robot_id: str, data: Dict[str, Any]) -> None:
                 telemetry_subscribers[robot_id].discard(websocket)
 
 
-@app.post("/api/internal/frames/{robot_id}")
-async def ingest_camera_frame(
-    robot_id: str,
-    payload: FramePayload,
-    x_api_key: str = Header(default=""),
-    session: AsyncSession = Depends(get_session),
-) -> dict[str, Any]:
-    await require_internal_api_key(x_api_key, session)
-    update_robot_heartbeat(robot_id)
-    try:
-        decoded = base64.b64decode(payload.data)
-    except binascii.Error as exc:
-        raise HTTPException(status_code=400, detail=f"invalid frame payload: {exc}") from exc
-    if payload.compressed:
-        try:
-            image_bytes = gzip.decompress(decoded)
-        except (OSError, ValueError) as exc:
-            raise HTTPException(status_code=400, detail=f"invalid compressed frame payload: {exc}") from exc
-    else:
-        image_bytes = decoded
-    queue = get_frame_queue(robot_id)
-    if queue.full():
-        with contextlib.suppress(asyncio.QueueEmpty):
-            queue.get_nowait()
-    encoding = (payload.encoding or "bgra8").strip() or "bgra8"
-    queue.put_nowait((payload.width, payload.height, encoding, image_bytes))
-    return {"robot": robot_id, "status": "queued"}
-
-
 @app.websocket("/api/internal/ws/lobbies")
 async def robot_command_bridge(websocket: WebSocket) -> None:
     api_key = websocket.query_params.get("api_key") or websocket.headers.get("x-api-key", "")
@@ -1152,7 +1124,19 @@ async def robot_command_bridge(websocket: WebSocket) -> None:
         while True:
             message = await websocket.receive_json()
             msg_type = message.get("type")
-            if msg_type == "subscribe":
+            if msg_type == "register_robots":
+                robots = [value.strip() for value in message.get("robots", []) if value.strip()]
+                async with command_ws_lock:
+                    bridge_websockets.add(websocket)
+                for robot in robots:
+                    update_robot_heartbeat(robot)
+                # Tell the bridge which robots currently have active viewers
+                for robot in robots:
+                    if active_robot_streams.get(robot):
+                        await websocket.send_json({"type": "start_stream", "robot": robot})
+                await websocket.send_json({"type": "registered", "robots": robots})
+                logger.info("Bridge %s:%s registered robots: %s", peer[0], peer[1], robots)
+            elif msg_type == "subscribe":
                 robots = [value.strip() for value in message.get("robots", []) if value.strip()]
                 await register_robot_ws(websocket, robots)
                 for robot in robots:
@@ -1190,6 +1174,21 @@ async def robot_command_bridge(websocket: WebSocket) -> None:
                     await cleanup_completed_commands(session, robot)
                 ack_payload["recorded"] = True
                 await websocket.send_json(ack_payload)
+            elif msg_type == "webrtc_answer":
+                signaling_id = message.get("signaling_id", "")
+                fut = webrtc_signaling.pop(signaling_id, None)
+                if fut and not fut.done():
+                    fut.set_result(message)
+            elif msg_type == "webrtc_disconnected":
+                robot = (message.get("robot") or "").strip()
+                if robot:
+                    viewers = active_robot_streams.get(robot)
+                    if viewers is not None:
+                        # Remove one viewer (the one whose PC just closed)
+                        viewers.pop() if viewers else None
+                        if not viewers:
+                            active_robot_streams.pop(robot, None)
+                            await notify_bridge_stream(robot, False)
             else:
                 await websocket.send_json({"type": "error", "error": "unknown message", "payload": message})
     except WebSocketDisconnect:
@@ -1239,166 +1238,50 @@ async def start_webrtc(
     offer: WebRTCOffer,
     current_user: User = Depends(get_current_user),
 ) -> dict[str, str]:
-    queue = get_frame_queue(robot_id)
-    if queue.empty():
-        logger.warning("No frames received yet for %s; WebRTC stream may be blank", robot_id)
-    ice_config = RTCConfiguration(
-        iceServers=[
-            RTCIceServer(urls="stun:stun.l.google.com:19302"),
-            RTCIceServer(urls="stun:stun1.l.google.com:19302"),
-            RTCIceServer(urls="stun:stun2.l.google.com:19302"),
-            RTCIceServer(urls="stun:stun3.l.google.com:19302"),
-            RTCIceServer(urls="stun:stun4.l.google.com:19302"),
-        ]
-    )
-    pc = RTCPeerConnection(configuration=ice_config)
-    peer_connections.add(pc)
-    active_added = False
+    """Relay a WebRTC offer to the bridge and return the answer."""
+    # Track active viewers for start/stop stream signaling
+    was_empty = not active_robot_streams.get(robot_id)
+    active_robot_streams[robot_id].add(current_user.email)
+    if was_empty:
+        await notify_bridge_stream(robot_id, True)
 
-    def _set_active(state: bool) -> None:
-        nonlocal active_added
-        if state:
-            if not active_added:
-                active_robot_streams[robot_id].add(current_user.email)
-                active_added = True
-        else:
-            if active_added:
-                viewers = active_robot_streams.get(robot_id)
-                if viewers is not None:
-                    viewers.discard(current_user.email)
-                    if not viewers:
-                        active_robot_streams.pop(robot_id, None)
-                active_added = False
+    # Create a future for the bridge's answer
+    signaling_id = str(uuid.uuid4())
+    fut: asyncio.Future = asyncio.get_event_loop().create_future()
+    webrtc_signaling[signaling_id] = fut
 
-    @pc.on("connectionstatechange")
-    async def _on_state_change() -> None:
-        state = pc.connectionState
-        logger.info("WebRTC connection state for %s: %s", robot_id, state)
-        if state == "connected":
-            stats = await pc.getStats()
-            for report in stats.values():
-                if report.type == "candidate-pair" and report.state == "succeeded":
-                    logger.info(
-                        "Selected ICE candidate pair for %s: local=%s remote=%s",
-                        robot_id,
-                        report.localCandidateId,
-                        report.remoteCandidateId,
-                    )
-            _set_active(True)
-        elif state in {"failed", "closed", "disconnected"}:
-            _set_active(False)
-            peer_connections.discard(pc)
-            await pc.close()
+    # Send the offer to the bridge via WebSocket
+    relay_payload = {
+        "type": "webrtc_offer",
+        "robot": robot_id,
+        "signaling_id": signaling_id,
+        "sdp": offer.sdp,
+        "offer_type": offer.type,
+    }
+    async with command_ws_lock:
+        sockets = list(bridge_websockets)
+    if not sockets:
+        webrtc_signaling.pop(signaling_id, None)
+        raise HTTPException(status_code=503, detail="No bridge connected")
 
-    @pc.on("iceconnectionstatechange")
-    async def _on_ice_state_change() -> None:
-        logger.info("ICE connection state for %s: %s", robot_id, pc.iceConnectionState)
-
-    @pc.on("icecandidate")
-    async def _on_ice_candidate(event) -> None:
-        candidate = event
-        if candidate is None:
-            logger.info("ICE gathering complete for %s", robot_id)
-        else:
-            logger.info("ICE candidate for %s: %s", robot_id, candidate)
-
-    try:
-        pc.addTrack(RobotVideoTrack(robot_id))
-        rtc_offer = RTCSessionDescription(sdp=offer.sdp, type=offer.type)
-        await pc.setRemoteDescription(rtc_offer)
-        answer = await pc.createAnswer()
-        await pc.setLocalDescription(answer)
-        return {"sdp": pc.localDescription.sdp, "type": pc.localDescription.type}
-    finally:
-        if pc.connectionState in {"closed", "failed"}:
-            _set_active(False)
-
-
-def get_frame_queue(robot_id: str) -> asyncio.Queue[Tuple[int, int, str, bytes]]:
-    if robot_id not in frame_queues:
-        frame_queues[robot_id] = asyncio.Queue(maxsize=1)
-    return frame_queues[robot_id]
-
-
-class RobotVideoTrack(VideoStreamTrack):
-    def __init__(self, robot_id: str):
-        super().__init__()
-        self.robot_id = robot_id
-
-    async def recv(self) -> VideoFrame:
-        queue = get_frame_queue(self.robot_id)
-        width, height, encoding, payload = await queue.get()
-        logger.info(
-            "RobotVideoTrack sending frame for %s: %sx%s (%s)",
-            self.robot_id,
-            width,
-            height,
-            encoding,
-        )
-        payload_size = len(payload)
-        payload_channels = payload_size // max(width * height, 1)
-        logger.info(
-            "Frame payload size=%s channels=%s for %s",
-            payload_size,
-            payload_channels,
-            self.robot_id,
-        )
+    for ws in sockets:
         try:
-            array = convert_image_to_bgra(width, height, encoding, payload)
-        except ValueError as exc:
-            logger.warning(
-                "Dropping invalid frame for %s (%s): %s", self.robot_id, encoding, exc
-            )
-            array = np.zeros((max(height, 1), max(width, 1), 4), dtype=np.uint8)
-        else:
-            logger.info(
-                "Frame decoded for %s into array shape %s dtype %s",
-                self.robot_id,
-                array.shape,
-                array.dtype,
-            )
-        frame = VideoFrame.from_ndarray(array, format="bgra")
-        frame.pts, frame.time_base = await self.next_timestamp()
-        return frame
+            await ws.send_json(relay_payload)
+            break
+        except Exception:
+            continue
+    else:
+        webrtc_signaling.pop(signaling_id, None)
+        raise HTTPException(status_code=503, detail="Failed to reach bridge")
 
+    # Wait for the bridge to respond with the answer
+    try:
+        answer = await asyncio.wait_for(fut, timeout=15.0)
+    except asyncio.TimeoutError:
+        webrtc_signaling.pop(signaling_id, None)
+        raise HTTPException(status_code=504, detail="Bridge did not respond in time")
 
-def convert_image_to_bgra(width: int, height: int, encoding: str, payload: bytes) -> np.ndarray:
-    if width <= 0 or height <= 0:
-        raise ValueError("frame dimensions must be positive")
-    encoding_normalized = (encoding or "bgra8").strip().lower()
-    pixel_count = width * height
-    buffer = np.frombuffer(payload, dtype=np.uint8)
-    if buffer.size % pixel_count != 0:
-        raise ValueError("payload size does not align with frame dimensions")
+    if "error" in answer:
+        raise HTTPException(status_code=502, detail=answer["error"])
 
-    def _with_alpha(channels: np.ndarray) -> np.ndarray:
-        alpha = np.full((height, width, 1), 255, dtype=np.uint8)
-        return np.concatenate((channels, alpha), axis=2)
-
-    if encoding_normalized == "bgra8":
-        return buffer.reshape((height, width, 4))
-    if encoding_normalized == "rgba8":
-        rgba = buffer.reshape((height, width, 4))
-        return rgba[..., [2, 1, 0, 3]]
-    if encoding_normalized in {"bgr8", "rgb8"}:
-        channels = buffer.reshape((height, width, 3))
-        if encoding_normalized == "rgb8":
-            channels = channels[..., ::-1]
-        return _with_alpha(channels)
-    if encoding_normalized in {"mono8", "8uc1"}:
-        gray = buffer.reshape((height, width, 1))
-        mono = np.repeat(gray, 3, axis=2)
-        return _with_alpha(mono)
-
-    channel_count = buffer.size // pixel_count
-    if channel_count == 4:
-        return buffer.reshape((height, width, 4))
-    if channel_count == 3:
-        channels = buffer.reshape((height, width, 3))
-        return _with_alpha(channels)
-    if channel_count == 1:
-        gray = buffer.reshape((height, width, 1))
-        mono = np.repeat(gray, 3, axis=2)
-        return _with_alpha(mono)
-
-    raise ValueError(f"unsupported encoding '{encoding_normalized}' with {channel_count} channels")
+    return {"sdp": answer["sdp"], "type": answer.get("answer_type", "answer")}

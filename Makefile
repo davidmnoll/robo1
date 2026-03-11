@@ -5,7 +5,7 @@ ROS_SETUP := source /opt/ros/$(ROS_DISTRO)/setup.bash
 PROJECT_ID ?= robo1-489405
 export TURTLEBOT3_MODEL := burger
 
-.PHONY: help sim bridge web controller all stop clean tmux-stack attach all
+.PHONY: help sim bridge web controller all stop clean tmux-stack attach all sim-gui-bare
 
 attach:
 	tmux attach -t arena
@@ -170,6 +170,11 @@ sim-ros2-stop:
 	@tmux kill-session -t ros2sim 2>/dev/null || true
 	@docker compose down ros-core 2>/dev/null || true
 
+sim-gui-bare:
+	LOBBY_KEY=LPy6XgmZ_RayuekaA6CPsA \
+	API_BASE_URL=https://34.42.43.54.sslip.io/api \
+	uv run scripts/run_sim_gui_bare.py
+
 sim-gui-stop:
 	docker compose -f docker-compose.yaml -f docker-compose.cloud.yml down
 
@@ -179,7 +184,6 @@ vpn-setup:
 
 vpn-setup-cloud:
 	@./scripts/setup-vpn.sh $(shell terraform -chdir=terraform output -raw api_vm_ip 2>/dev/null || echo "YOUR_SERVER_IP")
-
 # Cleanup
 clean:
 	rm -rf logs .pid_*
