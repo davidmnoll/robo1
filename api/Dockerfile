@@ -15,15 +15,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libffi-dev \
     libssl-dev \
     build-essential \
-    pkg-config \
-    libavformat-dev \
-    libavcodec-dev \
-    libavdevice-dev \
-    libavutil-dev \
-    libswscale-dev \
-    libswresample-dev \
-    libavfilter-dev \
-    libpostproc-dev \
     && rm -rf /var/lib/apt/lists/*
 
 COPY pyproject.toml .
@@ -31,5 +22,6 @@ RUN uv pip install --no-cache-dir .
 COPY app ./app
 
 EXPOSE 8080
+EXPOSE 3478/udp
 
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8080"]

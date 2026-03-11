@@ -708,13 +708,35 @@
         const MAX_LINEAR_SPEED = 1.0;
         const MAX_ANGULAR_SPEED = 1.0;
         const LOBBY_CACHE_KEY = 'arenaLobbyCache';
-        const ICE_SERVERS = [
+        const DEFAULT_ICE_SERVERS = [
           { urls: 'stun:stun.l.google.com:19302' },
-          { urls: 'stun:stun1.l.google.com:19302' },
-          { urls: 'stun:stun2.l.google.com:19302' },
-          { urls: 'stun:stun3.l.google.com:19302' },
-          { urls: 'stun:stun4.l.google.com:19302' },
         ];
+        let cachedIceServers = null;
+        let iceServersFetchedAt = 0;
+
+        async function fetchIceServers() {
+          // Cache for 5 minutes
+          if (cachedIceServers && Date.now() - iceServersFetchedAt < 300000) {
+            return cachedIceServers;
+          }
+          try {
+            const resp = await fetch(`${apiBase()}/ice-servers`, {
+              headers: authHeaders(),
+            });
+            if (resp.ok) {
+              const data = await resp.json();
+              if (data.iceServers && data.iceServers.length) {
+                cachedIceServers = data.iceServers;
+                iceServersFetchedAt = Date.now();
+                console.info('[ice] fetched ICE servers:', cachedIceServers.length, 'entries');
+                return cachedIceServers;
+              }
+            }
+          } catch (e) {
+            console.warn('[ice] failed to fetch ICE servers, using defaults:', e);
+          }
+          return DEFAULT_ICE_SERVERS;
+        }
 
         function readLobbyCache() {
           try {
@@ -1249,13 +1271,14 @@
           telemetryLog.textContent = `[${ts}] ${message}\\n` + telemetryLog.textContent;
         }
 
-        function startVideo(namespace) {
+        async function startVideo(namespace) {
           if (state.pc) {
             state.pc.close();
             state.pc = null;
           }
           console.info('[video] starting WebRTC for', namespace);
-          const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+          const iceServers = await fetchIceServers();
+          const pc = new RTCPeerConnection({ iceServers });
           state.pc = pc;
           const inboundStream = new MediaStream();
           pc.addEventListener('track', (event) => {

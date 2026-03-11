@@ -10,7 +10,10 @@ from datetime import datetime, timedelta
 from enum import Enum
 from typing import Any, Dict, Optional, TypeVar
 
-from fastapi import Depends, FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
+import struct
+import time as _time
+
+from fastapi import Depends, FastAPI, Header, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from jose import JWTError, jwt
 with contextlib.suppress(ImportError):
@@ -81,6 +84,7 @@ class Settings(BaseSettings):
     seed_bots_json: Optional[str] = Field(None, alias="SEED_BOTS_JSON")
     heartbeat_timeout_seconds: int = Field(30, alias="HEARTBEAT_TIMEOUT_SECONDS")
     command_retention_seconds: int = Field(120, alias="COMMAND_RETENTION_SECONDS")
+    stun_server: str = Field("", alias="STUN_SERVER")
 
 
 settings = Settings()
@@ -182,6 +186,68 @@ telemetry_subscribers: Dict[str, set[WebSocket]] = defaultdict(set)
 telemetry_ws_lock = asyncio.Lock()
 # Latest telemetry per robot for initial state on connect
 latest_telemetry: Dict[str, Dict[str, Any]] = {}
+
+# STUN whitelist: maps IP -> expiry timestamp
+stun_whitelist: Dict[str, float] = {}
+STUN_WHITELIST_TTL = 3600  # 1 hour
+
+# STUN protocol constants
+_STUN_MAGIC_COOKIE = 0x2112A442
+_STUN_BINDING_REQUEST = 0x0001
+_STUN_BINDING_RESPONSE = 0x0101
+_STUN_ATTR_XOR_MAPPED_ADDRESS = 0x0020
+_STUN_HEADER_SIZE = 20
+
+
+def allow_stun_ip(ip: str) -> None:
+    """Add an IP to the STUN whitelist with TTL."""
+    stun_whitelist[ip] = _time.time() + STUN_WHITELIST_TTL
+
+
+def _cleanup_stun_whitelist() -> None:
+    now = _time.time()
+    expired = [ip for ip, exp in stun_whitelist.items() if exp < now]
+    for ip in expired:
+        stun_whitelist.pop(ip, None)
+
+
+class StunProtocol(asyncio.DatagramProtocol):
+    """Minimal STUN server that only responds to whitelisted IPs."""
+
+    def __init__(self) -> None:
+        self.transport: asyncio.DatagramTransport | None = None
+
+    def connection_made(self, transport: asyncio.DatagramTransport) -> None:
+        self.transport = transport
+
+    def datagram_received(self, data: bytes, addr: tuple[str, int]) -> None:
+        client_ip, client_port = addr[0], addr[1]
+
+        # Check whitelist
+        if client_ip not in stun_whitelist or stun_whitelist[client_ip] < _time.time():
+            return  # silently drop
+
+        # Validate STUN binding request
+        if len(data) < _STUN_HEADER_SIZE:
+            return
+        msg_type, msg_len, magic = struct.unpack_from("!HHI", data, 0)
+        if msg_type != _STUN_BINDING_REQUEST or magic != _STUN_MAGIC_COOKIE:
+            return
+        transaction_id = data[8:20]
+
+        # Build XOR-MAPPED-ADDRESS attribute (IPv4)
+        xor_port = client_port ^ (_STUN_MAGIC_COOKIE >> 16)
+        ip_parts = [int(p) for p in client_ip.split(".")]
+        ip_int = (ip_parts[0] << 24) | (ip_parts[1] << 16) | (ip_parts[2] << 8) | ip_parts[3]
+        xor_ip = ip_int ^ _STUN_MAGIC_COOKIE
+        attr_value = struct.pack("!xBHI", 0x01, xor_port, xor_ip)  # family=IPv4
+        attr = struct.pack("!HH", _STUN_ATTR_XOR_MAPPED_ADDRESS, len(attr_value)) + attr_value
+
+        # Build response
+        resp_header = struct.pack("!HHI", _STUN_BINDING_RESPONSE, len(attr), _STUN_MAGIC_COOKIE)
+        resp = resp_header + transaction_id + attr
+        self.transport.sendto(resp, addr)
+
 
 app = FastAPI(title="Robot Gateway API", version="0.1.0")
 cors_allow_origins = settings.cors_allow_origins
@@ -346,7 +412,11 @@ async def get_current_user(
 
 
 @app.post("/api/auth/register", response_model=TokenResponse)
-async def register_user(payload: RegisterRequest, session: AsyncSession = Depends(get_session)) -> TokenResponse:
+async def register_user(
+    payload: RegisterRequest,
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+) -> TokenResponse:
     email = payload.email.lower()
     existing = await session.execute(select(User).where(User.email == email))
     if existing.scalar_one_or_none():
@@ -355,16 +425,24 @@ async def register_user(payload: RegisterRequest, session: AsyncSession = Depend
     session.add(user)
     await session.commit()
     await session.refresh(user)
+    if request.client:
+        allow_stun_ip(request.client.host)
     return create_token_response(user)
 
 
 @app.post("/api/auth/login", response_model=TokenResponse)
-async def login_user(payload: LoginRequest, session: AsyncSession = Depends(get_session)) -> TokenResponse:
+async def login_user(
+    payload: LoginRequest,
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+) -> TokenResponse:
     email = payload.email.lower()
     result = await session.execute(select(User).where(User.email == email))
     user = result.scalar_one_or_none()
     if not user or not verify_password(payload.password, user.password_hash):
         raise HTTPException(status_code=401, detail="Invalid credentials")
+    if request.client:
+        allow_stun_ip(request.client.host)
     return create_token_response(user)
 
 
@@ -1028,9 +1106,34 @@ async def startup_event() -> None:
     await prepare_database()
     await apply_seed_data()
 
+    # Start STUN server on UDP 3478
+    loop = asyncio.get_event_loop()
+    try:
+        transport, _protocol = await loop.create_datagram_endpoint(
+            StunProtocol, local_addr=("0.0.0.0", 3478)
+        )
+        app.state.stun_transport = transport
+        logger.info("STUN server listening on UDP 3478")
+    except OSError as exc:
+        logger.warning("Failed to start STUN server: %s", exc)
+        app.state.stun_transport = None
+
+    # Periodic whitelist cleanup
+    async def _cleanup_loop() -> None:
+        while True:
+            await asyncio.sleep(300)
+            _cleanup_stun_whitelist()
+
+    app.state.stun_cleanup_task = asyncio.create_task(_cleanup_loop())
+
 
 @app.on_event("shutdown")
 async def shutdown_event() -> None:
+    # Stop STUN server
+    if hasattr(app.state, "stun_transport") and app.state.stun_transport:
+        app.state.stun_transport.close()
+    if hasattr(app.state, "stun_cleanup_task"):
+        app.state.stun_cleanup_task.cancel()
     # Cancel any pending signaling futures
     for fut in webrtc_signaling.values():
         if not fut.done():
@@ -1049,6 +1152,38 @@ async def health() -> dict[str, Any]:
         "gateway": settings.gateway_name,
         "active_robots": active,
     }
+
+def _get_ice_servers() -> dict[str, Any]:
+    """Return ICE server config pointing to our own STUN server."""
+    stun_host = settings.stun_server
+    if stun_host:
+        return {"iceServers": [{"urls": f"stun:{stun_host}"}]}
+    return {"iceServers": [{"urls": "stun:stun.l.google.com:19302"}]}
+
+
+@app.get("/api/ice-servers")
+async def get_ice_servers(
+    request: Request,
+    current_user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    """Return ICE server config; also whitelists the caller for STUN."""
+    if request.client:
+        allow_stun_ip(request.client.host)
+    return _get_ice_servers()
+
+
+@app.get("/api/internal/ice-servers")
+async def get_internal_ice_servers(
+    request: Request,
+    x_api_key: str = Header(default=""),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    """Return ICE server config for internal bridge clients; whitelists the caller."""
+    await require_internal_api_key(x_api_key, session)
+    if request.client:
+        allow_stun_ip(request.client.host)
+    return _get_ice_servers()
+
 
 @app.post("/api/robots/{robot_id}/cmd_vel", response_model=RobotCommandOut)
 async def send_cmd_vel(
@@ -1119,6 +1254,7 @@ async def robot_command_bridge(websocket: WebSocket) -> None:
         await require_internal_api_key(api_key or "", session)
     await websocket.accept()
     peer = websocket.client or ("unknown", 0)
+    allow_stun_ip(peer[0])
     logger.info("Command websocket connected from %s:%s", peer[0], peer[1])
     try:
         while True:

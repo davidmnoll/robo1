@@ -36,9 +36,8 @@ _CAMERA_QOS = QoSProfile(
     depth=1,
 )
 
-_ICE_SERVERS = [
+_DEFAULT_ICE_SERVERS = [
     RTCIceServer(urls="stun:stun.l.google.com:19302"),
-    RTCIceServer(urls="stun:stun1.l.google.com:19302"),
 ]
 
 
@@ -146,6 +145,8 @@ class RobotBridgeNode(Node):
         # WebRTC: track video tracks and peer connections per robot
         self._video_tracks: Dict[str, RosVideoTrack] = {}
         self._peer_connections: Dict[str, list[RTCPeerConnection]] = {}
+        self._ice_servers: list[RTCIceServer] = list(_DEFAULT_ICE_SERVERS)
+        self._ice_servers_fetched = False
 
         # Timers
         self.create_timer(0.1, self.flush_command_queue)
@@ -243,6 +244,35 @@ class RobotBridgeNode(Node):
         encoding = msg.encoding or "bgra8"
         track.push_frame(msg.width, msg.height, encoding, raw)
 
+    # ── ICE server config ───────────────────────────────────────────
+
+    def _fetch_ice_servers(self) -> list[RTCIceServer]:
+        """Fetch ICE server config from the API (with TURN credentials)."""
+        url = f"{self.api_base}/internal/ice-servers"
+        try:
+            resp = self.http_session.get(url, headers=self.headers, timeout=5)
+            resp.raise_for_status()
+            data = resp.json()
+            servers = []
+            for entry in data.get("iceServers", []):
+                urls = entry.get("urls")
+                if isinstance(urls, str):
+                    urls = [urls]
+                kwargs: dict = {"urls": urls}
+                if entry.get("username"):
+                    kwargs["username"] = entry["username"]
+                if entry.get("credential"):
+                    kwargs["credential"] = entry["credential"]
+                servers.append(RTCIceServer(**kwargs))
+            if servers:
+                self._ice_servers = servers
+                self._ice_servers_fetched = True
+                self.get_logger().info(f"Fetched ICE servers: {len(servers)} entries")
+            return servers
+        except Exception as exc:
+            self.get_logger().warning(f"Failed to fetch ICE servers: {exc}")
+            return list(_DEFAULT_ICE_SERVERS)
+
     # ── WebRTC signaling ─────────────────────────────────────────────
 
     def _handle_webrtc_offer(self, payload: dict) -> None:
@@ -268,6 +298,10 @@ class RobotBridgeNode(Node):
         # Ensure we're streaming this robot's camera
         self._start_streaming(robot)
 
+        # Fetch fresh TURN credentials if we haven't yet or periodically
+        if not self._ice_servers_fetched:
+            self._fetch_ice_servers()
+
         # Ensure we have a video track for this robot
         if robot not in self._video_tracks:
             self._video_tracks[robot] = RosVideoTrack(robot, self._aio_loop)
@@ -289,7 +323,7 @@ class RobotBridgeNode(Node):
         offer_type: str,
         track: RosVideoTrack,
     ) -> None:
-        ice_config = RTCConfiguration(iceServers=list(_ICE_SERVERS))
+        ice_config = RTCConfiguration(iceServers=list(self._ice_servers))
         pc = RTCPeerConnection(configuration=ice_config)
 
         if robot not in self._peer_connections:

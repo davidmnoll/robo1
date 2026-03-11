@@ -49,6 +49,7 @@ locals {
     ROS_PUSH_KEY                = var.ros_push_key
     GATEWAY_NAME                = var.gateway_name
     CORS_ALLOW_ORIGINS          = local.cors_allow_origins_json
+    STUN_SERVER                 = "${google_compute_address.api_ip.address}:3478"
   }, local.env_seed_overrides)
   api_env_content = join("\n", [for k, v in local.api_env : "${k}=${v}"])
 }
