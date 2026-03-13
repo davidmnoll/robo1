@@ -158,6 +158,14 @@ resource "google_project_iam_member" "ci_iap_tunnel" {
   member  = "serviceAccount:${var.ci_service_account_email}"
 }
 
+# Grant CI service account ability to look up instances (required for IAP SSH)
+resource "google_project_iam_member" "ci_compute_viewer" {
+  count   = var.ci_service_account_email != null ? 1 : 0
+  project = var.project_id
+  role    = "roles/compute.viewer"
+  member  = "serviceAccount:${var.ci_service_account_email}"
+}
+
 # Allow SSH from IAP (Google's IAP IP range only, not public internet)
 resource "google_compute_firewall" "iap_ssh" {
   name    = "${var.api_vm_name}-iap-ssh"
