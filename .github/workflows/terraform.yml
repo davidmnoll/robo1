@@ -187,11 +187,11 @@ jobs:
                 --project="${PROJECT_ID}" \
                 --zone="${API_VM_ZONE}" \
                 --tunnel-through-iap \
-                --command="sudo /usr/local/bin/deploy_api.sh ${IMAGE}"; then
+                --command="sudo docker pull ${IMAGE} && sudo docker rm -f robot-gateway 2>/dev/null || true && sudo docker run -d --name robot-gateway --network host --restart=always --env-file /etc/robot-gateway/env ${IMAGE}"; then
               echo "Deploy succeeded on attempt ${i}"
               exit 0
             fi
-            echo "Attempt ${i}/5 failed, waiting 30s for IAM propagation..."
+            echo "Attempt ${i}/5 failed, waiting 30s..."
             sleep 30
           done
           echo "Deploy failed after 5 attempts" >&2
