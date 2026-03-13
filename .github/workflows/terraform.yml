@@ -181,9 +181,21 @@ jobs:
         run: |
           set -euo pipefail
           echo "Deploying ${IMAGE} to ${API_VM_NAME} in ${API_VM_ZONE}..."
-          gcloud compute ssh "${API_VM_NAME}" --zone "${API_VM_ZONE}" \
-            --tunnel-through-iap \
-            --command="sudo /usr/local/bin/deploy_api.sh ${IMAGE}"
+          # Retry loop to handle IAM propagation delays
+          for i in $(seq 1 5); do
+            if gcloud compute ssh "${API_VM_NAME}" \
+                --project="${PROJECT_ID}" \
+                --zone="${API_VM_ZONE}" \
+                --tunnel-through-iap \
+                --command="sudo /usr/local/bin/deploy_api.sh ${IMAGE}"; then
+              echo "Deploy succeeded on attempt ${i}"
+              exit 0
+            fi
+            echo "Attempt ${i}/5 failed, waiting 30s for IAM propagation..."
+            sleep 30
+          done
+          echo "Deploy failed after 5 attempts" >&2
+          exit 1
 
       - name: Verify API health
         if: github.ref == 'refs/heads/main'
