@@ -29,7 +29,8 @@ locals {
     "compute.googleapis.com",
     "iam.googleapis.com",
     "artifactregistry.googleapis.com",
-    "containerregistry.googleapis.com"
+    "containerregistry.googleapis.com",
+    "iap.googleapis.com"
   ]
 
   cloud_sql_instance_name   = coalesce(var.cloud_sql_instance_name, "${var.project_id}-api-db")
@@ -147,6 +148,26 @@ resource "google_project_iam_member" "ci_os_admin_login" {
   project = var.project_id
   role    = "roles/compute.osAdminLogin"
   member  = "serviceAccount:${var.ci_service_account_email}"
+}
+
+# Grant CI service account IAP tunnel access
+resource "google_project_iam_member" "ci_iap_tunnel" {
+  count   = var.ci_service_account_email != null ? 1 : 0
+  project = var.project_id
+  role    = "roles/iap.tunnelResourceAccessor"
+  member  = "serviceAccount:${var.ci_service_account_email}"
+}
+
+# Allow SSH from IAP (Google's IAP IP range only, not public internet)
+resource "google_compute_firewall" "iap_ssh" {
+  name    = "${var.api_vm_name}-iap-ssh"
+  network = "default"
+  allow {
+    protocol = "tcp"
+    ports    = ["22"]
+  }
+  target_tags   = var.api_vm_network_tags
+  source_ranges = ["35.235.240.0/20"]  # Google IAP range
 }
 
 resource "google_compute_firewall" "api_http" {

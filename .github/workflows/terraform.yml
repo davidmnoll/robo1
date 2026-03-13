@@ -182,6 +182,7 @@ jobs:
           set -euo pipefail
           echo "Deploying ${IMAGE} to ${API_VM_NAME} in ${API_VM_ZONE}..."
           gcloud compute ssh "${API_VM_NAME}" --zone "${API_VM_ZONE}" \
+            --tunnel-through-iap \
             --command="sudo /usr/local/bin/deploy_api.sh ${IMAGE}"
 
       - name: Verify API health
