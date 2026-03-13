@@ -175,8 +175,8 @@ jobs:
           gcloud compute instances stop "${API_VM_NAME}" --zone "${API_VM_ZONE}"
           echo "Starting ${API_VM_NAME}..."
           gcloud compute instances start "${API_VM_NAME}" --zone "${API_VM_ZONE}"
-          echo "Waiting for VM to be ready..."
-          sleep 30
+          echo "Waiting 90s for startup script to complete..."
+          sleep 90
 
       - name: Deploy API container via SSH
         if: github.ref == 'refs/heads/main'
