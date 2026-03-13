@@ -121,7 +121,7 @@ resource "google_compute_address" "api_ip" {
 # Bump the value below to force VM recreation
 resource "null_resource" "vm_recreate_trigger" {
   triggers = {
-    version = "1"
+    version = "2"
   }
 }
 
