@@ -164,6 +164,20 @@ jobs:
           echo "api_vm_name=${VM_NAME}" >> "${GITHUB_OUTPUT}"
           echo "api_vm_zone=${VM_ZONE}" >> "${GITHUB_OUTPUT}"
 
+      - name: Restart VM to apply startup script changes
+        if: github.ref == 'refs/heads/main'
+        env:
+          API_VM_NAME: ${{ steps.tf_outputs.outputs.api_vm_name }}
+          API_VM_ZONE: ${{ steps.tf_outputs.outputs.api_vm_zone }}
+        run: |
+          set -euo pipefail
+          echo "Stopping ${API_VM_NAME}..."
+          gcloud compute instances stop "${API_VM_NAME}" --zone "${API_VM_ZONE}"
+          echo "Starting ${API_VM_NAME}..."
+          gcloud compute instances start "${API_VM_NAME}" --zone "${API_VM_ZONE}"
+          echo "Waiting for VM to be ready..."
+          sleep 30
+
       - name: Deploy API container via SSH
         if: github.ref == 'refs/heads/main'
         env:
