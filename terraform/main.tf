@@ -118,6 +118,14 @@ resource "google_compute_address" "api_ip" {
   project = var.project_id
 }
 
+# Bump the value below to force VM recreation
+resource "null_resource" "vm_recreate_trigger" {
+  triggers = {
+    version = "1"
+  }
+}
+
+
 resource "google_service_account" "api_vm" {
   account_id   = "robot-gateway-vm"
   display_name = "Robot gateway VM"
@@ -222,6 +230,12 @@ resource "google_compute_instance" "api_vm" {
 
   metadata = {
     enable-oslogin = "TRUE"
+    # Bump this to force VM recreation
+    force-recreate = "1"
+  }
+
+  lifecycle {
+    replace_triggered_by = [null_resource.vm_recreate_trigger]
   }
 
   metadata_startup_script = templatefile("${path.module}/templates/startup.sh.tmpl", {
