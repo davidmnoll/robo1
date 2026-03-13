@@ -141,6 +141,14 @@ resource "google_project_iam_member" "api_vm_storage_viewer" {
   member  = "serviceAccount:${google_service_account.api_vm.email}"
 }
 
+# Grant CI service account SSH + sudo access via OS Login
+resource "google_project_iam_member" "ci_os_admin_login" {
+  count   = var.ci_service_account_email != null ? 1 : 0
+  project = var.project_id
+  role    = "roles/compute.osAdminLogin"
+  member  = "serviceAccount:${var.ci_service_account_email}"
+}
+
 resource "google_compute_firewall" "api_http" {
   name    = "${var.api_vm_name}-http"
   network = "default"
@@ -181,6 +189,10 @@ resource "google_compute_instance" "api_vm" {
     access_config {
       nat_ip = google_compute_address.api_ip.address
     }
+  }
+
+  metadata = {
+    enable-oslogin = "TRUE"
   }
 
   metadata_startup_script = templatefile("${path.module}/templates/startup.sh.tmpl", {

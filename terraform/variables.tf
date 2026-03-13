@@ -135,3 +135,9 @@ variable "db_user" {
   type        = string
   default     = null
 }
+
+variable "ci_service_account_email" {
+  description = "Service account email used by CI/CD for deployments (needs osAdminLogin for SSH)"
+  type        = string
+  default     = null
+}
