@@ -196,3 +196,12 @@ vpn-setup-cloud:
 # Cleanup
 clean:
 	rm -rf logs .pid_*
+
+
+mic-to-bot:
+# 	/usr/bin/python3 -m venv --system-site-packages .venv
+	source /opt/ros/jazzy/setup.bash && export ROS_DOMAIN_ID=62 && /usr/bin/python3 scripts/mic_to_robot.py
+
+bot-to-speaker:
+# 	/usr/bin/python3 -m venv --system-site-packages .venv
+	source /opt/ros/jazzy/setup.bash && export ROS_DOMAIN_ID=62 && /usr/bin/python3 scripts/robot_to_speaker.py
