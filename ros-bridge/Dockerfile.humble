@@ -1,0 +1,22 @@
+FROM ros:humble
+
+# Install ROS packages and system dependencies for aiortc/av
+RUN apt-get update && apt-get install -y \
+    python3-pip \
+    libavdevice-dev \
+    libavfilter-dev \
+    libopus-dev \
+    libvpx-dev \
+    pkg-config \
+    ros-humble-rosbridge-server \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Python dependencies
+RUN pip3 install aiortc av numpy requests websocket-client
+
+# Set up entrypoint
+WORKDIR /ros-bridge
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+ENTRYPOINT ["/entrypoint.sh"]

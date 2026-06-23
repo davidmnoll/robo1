@@ -17,7 +17,6 @@ env_variables:
   DATABASE_URL: "postgresql+asyncpg://robot:robot@/robotarena?host=/cloudsql/PROJECT:REGION:INSTANCE"
   SECRET_KEY: "change-me"
   ACCESS_TOKEN_EXPIRE_MINUTES: "60"
-  ROS_PUSH_KEY: "local-dev-key"
   GATEWAY_NAME: "gateway-flex"
   CORS_ALLOW_ORIGINS: '["*"]'
   # Optional JSON seeds (keep empty unless seeding data)

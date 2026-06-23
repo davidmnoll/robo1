@@ -6,7 +6,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
-WG_DIR="$PROJECT_DIR/ros/wireguard"
+WG_DIR="$PROJECT_DIR/ros-bridge/wireguard"
 CLIENTS_DIR="$WG_DIR/clients"
 
 SERVER_IP="${1:-$(curl -s ifconfig.me || echo "YOUR_SERVER_IP")}"

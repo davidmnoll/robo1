@@ -18,7 +18,7 @@ if [[ ${HAS_SESSION} -eq 0 ]]; then
   exit 1
 fi
 
-tmux new-session -d -s "${SESSION_NAME}" -n ros-core "cd ${ROOT_DIR} && ./ros/run.sh; echo; echo '[ros-core] exited. Press Enter to close this pane.'; read"
+tmux new-session -d -s "${SESSION_NAME}" -n ros-core "cd ${ROOT_DIR} && ./ros-bridge/run.sh; echo; echo '[ros-core] exited. Press Enter to close this pane.'; read"
 tmux new-window -t "${SESSION_NAME}" -n sim "cd ${ROOT_DIR} && ./sim/run.sh; echo; echo '[sim] exited. Press Enter to close this pane.'; read"
 tmux new-window -t "${SESSION_NAME}" -n api "cd ${ROOT_DIR} && ./api/run.sh; echo; echo '[api] exited. Press Enter to close this pane.'; read"
 tmux new-window -t "${SESSION_NAME}" -n web "cd ${ROOT_DIR} && ./web/run.sh; echo; echo '[web] exited. Press Enter to close this pane.'; read"

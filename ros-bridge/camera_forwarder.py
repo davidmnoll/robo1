@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import fractions
 import json
 import os
 import queue
@@ -14,31 +15,41 @@ import numpy as np
 import requests
 import rclpy
 import websocket
-from aiortc import RTCConfiguration, RTCIceServer, RTCPeerConnection, RTCSessionDescription, VideoStreamTrack
-from av import VideoFrame
+from aiortc import RTCConfiguration, RTCIceServer, RTCPeerConnection, RTCSessionDescription, VideoStreamTrack, AudioStreamTrack
+from av import VideoFrame, AudioFrame
 from geometry_msgs.msg import Twist
 from rclpy.node import Node
 from rclpy.publisher import Publisher
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 from rclpy.subscription import Subscription
 from sensor_msgs.msg import Image
-from std_msgs.msg import String
+from std_msgs.msg import String, UInt8MultiArray
 
 
 _CAMERA_TOPIC_RE = re.compile(r"^/([^/]+)/camera/image_raw$")
 _TELEMETRY_TOPIC_RE = re.compile(r"^/([^/]+)/telemetry$")
-_DISCOVERY_INTERVAL = 3.0
+_AUDIO_RAW_TOPIC_RE = re.compile(r"^/([^/]+)/audio_raw$")
 
-# QoS for camera - BEST_EFFORT to match publisher (drop frames rather than queue)
-_CAMERA_QOS = QoSProfile(
+# QoS for audio - BEST_EFFORT for low latency
+_AUDIO_QOS = QoSProfile(
     reliability=ReliabilityPolicy.BEST_EFFORT,
     history=HistoryPolicy.KEEP_LAST,
     depth=1,
 )
+_DISCOVERY_INTERVAL = 3.0
 
+# QoS for camera - RELIABLE to match usb_cam publisher
+_CAMERA_QOS = QoSProfile(
+    reliability=ReliabilityPolicy.RELIABLE,
+    history=HistoryPolicy.KEEP_LAST,
+    depth=1,
+)
+
+# For local dev, empty ICE servers forces host-only candidates (no STUN)
+# Set USE_STUN=1 environment variable to enable STUN for production
 _DEFAULT_ICE_SERVERS = [
     RTCIceServer(urls="stun:stun.l.google.com:19302"),
-]
+] if os.getenv("USE_STUN") else []
 
 
 def _convert_image_to_bgra(width: int, height: int, encoding: str, payload: bytes) -> np.ndarray:
@@ -119,6 +130,71 @@ class RosVideoTrack(VideoStreamTrack):
                 await asyncio.sleep(0.01)
 
 
+class RosAudioTrack(AudioStreamTrack):
+    """Bridges ROS2 audio callbacks to aiortc AudioFrames.
+
+    Receives raw PCM audio (48kHz mono S16_LE) from ROS and converts to WebRTC audio.
+    Splits into 20ms chunks (960 samples) for Opus compatibility.
+    """
+
+    kind = "audio"
+    SAMPLES_PER_FRAME = 960  # 20ms at 48kHz
+
+    def __init__(self, robot_id: str, sample_rate: int = 48000, channels: int = 1) -> None:
+        super().__init__()
+        self.robot_id = robot_id
+        self.sample_rate = sample_rate
+        self.channels = channels
+        self._queue: queue.Queue[np.ndarray] = queue.Queue(maxsize=50)
+        self._buffer = np.array([], dtype=np.int16)
+        self._pts = 0
+        self._frames_sent = 0
+
+    def push_audio(self, data: bytes) -> None:
+        """Called from the ROS callback thread with raw PCM bytes. Thread-safe."""
+        try:
+            samples = np.frombuffer(data, dtype=np.int16)
+            # Append to buffer
+            self._buffer = np.concatenate([self._buffer, samples])
+            # Extract 20ms chunks
+            while len(self._buffer) >= self.SAMPLES_PER_FRAME:
+                chunk = self._buffer[:self.SAMPLES_PER_FRAME]
+                self._buffer = self._buffer[self.SAMPLES_PER_FRAME:]
+                # Drop old if queue full
+                if self._queue.qsize() >= 45:
+                    try:
+                        self._queue.get_nowait()
+                    except queue.Empty:
+                        pass
+                self._queue.put_nowait(chunk)
+        except Exception as e:
+            print(f"[RosAudioTrack] push_audio error: {e}", flush=True)
+
+    async def recv(self) -> AudioFrame:
+        if self._frames_sent == 0:
+            print(f"[RosAudioTrack] recv() started for {self.robot_id}", flush=True)
+        while True:
+            try:
+                samples = self._queue.get_nowait()
+                # Reshape for mono (1 channel)
+                samples = samples.reshape(1, -1)
+                # Create AudioFrame
+                frame = AudioFrame.from_ndarray(samples, format="s16", layout="mono")
+                frame.sample_rate = self.sample_rate
+                frame.pts = self._pts
+                self._pts += self.SAMPLES_PER_FRAME
+                self._frames_sent += 1
+                if self._frames_sent <= 3 or self._frames_sent % 500 == 0:
+                    rms = np.sqrt(np.mean(samples.astype(np.float32)**2))
+                    print(f"[RosAudioTrack] frame {self._frames_sent} for {self.robot_id}, rms={rms:.1f}", flush=True)
+                return frame
+            except queue.Empty:
+                await asyncio.sleep(0.02)
+            except Exception as e:
+                print(f"[RosAudioTrack] recv error: {e}", flush=True)
+                await asyncio.sleep(0.1)
+
+
 class RobotBridgeNode(Node):
     def __init__(self, aio_loop: asyncio.AbstractEventLoop) -> None:
         super().__init__("robot_bridge")
@@ -127,7 +203,7 @@ class RobotBridgeNode(Node):
         api_base = os.getenv("API_BASE_URL", "http://robot-gateway:8080/api").rstrip("/")
         self.api_base = api_base
         self.telemetry_base = f"{api_base}/internal/telemetry"
-        self.api_key = os.getenv("LOBBY_KEY") or os.getenv("ROS_PUSH_KEY", "")
+        self.api_key = os.getenv("LOBBY_KEY", "")
         self.headers = {"x-api-key": self.api_key} if self.api_key else {}
         self.http_session = requests.Session()
         self.heartbeat_interval = float(os.getenv("COMMAND_HEARTBEAT_INTERVAL", "5"))
@@ -143,8 +219,14 @@ class RobotBridgeNode(Node):
         self.telemetry_subscriptions: Dict[str, Subscription] = {}
         self.command_publishers: Dict[str, Publisher] = {}
 
+        # Audio handling
+        self.audio_subscriptions: Dict[str, Subscription] = {}
+        self.audio_publishers: Dict[str, Publisher] = {}
+        self.audio_streaming_robots: Set[str] = set()
+
         # SFU: one track and one PC per robot (forwarder -> server)
         self._video_tracks: Dict[str, RosVideoTrack] = {}
+        self._audio_tracks: Dict[str, RosAudioTrack] = {}
         self._peer_connections: Dict[str, RTCPeerConnection] = {}
         self._ice_servers: list[RTCIceServer] = list(_DEFAULT_ICE_SERVERS)
         self._ice_servers_fetched = False
@@ -184,16 +266,25 @@ class RobotBridgeNode(Node):
                 lambda msg, ns=robot: self._handle_telemetry(ns, msg),
                 10,
             )
+            # Create audio_play publisher for this robot
+            audio_play_topic = f"/{robot}/audio_play"
+            self.audio_publishers[robot] = self.create_publisher(
+                UInt8MultiArray, audio_play_topic, 10
+            )
 
         for robot in gone_robots:
             self.get_logger().info(f"Robot disappeared: {robot}")
             self._stop_streaming(robot)
+            # Audio is now stopped via _stop_streaming
             pub = self.command_publishers.pop(robot, None)
             if pub:
                 self.destroy_publisher(pub)
             tel_sub = self.telemetry_subscriptions.pop(robot, None)
             if tel_sub:
                 self.destroy_subscription(tel_sub)
+            audio_pub = self.audio_publishers.pop(robot, None)
+            if audio_pub:
+                self.destroy_publisher(audio_pub)
 
         if new_robots or gone_robots:
             self.discovered_robots = found
@@ -221,17 +312,28 @@ class RobotBridgeNode(Node):
         )
         self.streaming_robots.add(robot)
 
-        # Create video track and initiate WebRTC offer to server
-        track = RosVideoTrack(robot)
-        self._video_tracks[robot] = track
+        # Create video track
+        video_track = RosVideoTrack(robot)
+        self._video_tracks[robot] = video_track
+
+        # Create audio track and subscribe to audio topic
+        audio_track = RosAudioTrack(robot, sample_rate=48000, channels=1)
+        self._audio_tracks[robot] = audio_track
+        audio_topic = f"/{robot}/audio_raw"
+        self.audio_subscriptions[robot] = self.create_subscription(
+            UInt8MultiArray,
+            audio_topic,
+            lambda msg, ns=robot: self._handle_audio_webrtc(ns, msg),
+            _AUDIO_QOS,
+        )
 
         if not self._ice_servers_fetched:
             self._fetch_ice_servers()
 
         asyncio.run_coroutine_threadsafe(
-            self._create_forwarder_offer(robot, track), self._aio_loop
+            self._create_forwarder_offer(robot, video_track, audio_track), self._aio_loop
         )
-        self.get_logger().info(f"Started streaming {topic}")
+        self.get_logger().info(f"Started streaming {topic} + {audio_topic}")
 
     def _stop_streaming(self, robot: str) -> None:
         if robot not in self.streaming_robots:
@@ -239,12 +341,30 @@ class RobotBridgeNode(Node):
         sub = self.camera_subscriptions.pop(robot, None)
         if sub:
             self.destroy_subscription(sub)
+        audio_sub = self.audio_subscriptions.pop(robot, None)
+        if audio_sub:
+            self.destroy_subscription(audio_sub)
         self.streaming_robots.discard(robot)
         pc = self._peer_connections.pop(robot, None)
         if pc:
             asyncio.run_coroutine_threadsafe(pc.close(), self._aio_loop)
         self._video_tracks.pop(robot, None)
-        self.get_logger().info(f"Stopped streaming /{robot}/camera/image_raw")
+        self._audio_tracks.pop(robot, None)
+        self.get_logger().info(f"Stopped streaming /{robot}/camera/image_raw + audio")
+
+    def _handle_audio_webrtc(self, robot_id: str, msg: UInt8MultiArray) -> None:
+        """Push incoming robot audio to the WebRTC audio track."""
+        track = self._audio_tracks.get(robot_id)
+        if track:
+            # Debug: log audio reception every ~100 messages (~10 seconds at 10Hz)
+            if not hasattr(self, '_audio_count'):
+                self._audio_count = {}
+            self._audio_count[robot_id] = self._audio_count.get(robot_id, 0) + 1
+            if self._audio_count[robot_id] % 100 == 1:
+                self.get_logger().info(
+                    f"Audio {self._audio_count[robot_id]} for {robot_id}: {len(msg.data)} bytes"
+                )
+            track.push_audio(bytes(msg.data))
 
     # ── Frame handling ───────────────────────────────────────────────
 
@@ -254,9 +374,21 @@ class RobotBridgeNode(Node):
             return
         raw = bytes(msg.data)
         encoding = msg.encoding or "bgra8"
+
+        # Debug: log frame info every 30 frames
+        if not hasattr(self, '_frame_count'):
+            self._frame_count = {}
+        self._frame_count[robot_id] = self._frame_count.get(robot_id, 0) + 1
+        if self._frame_count[robot_id] % 30 == 1:
+            self.get_logger().info(
+                f"Frame {self._frame_count[robot_id]} for {robot_id}: "
+                f"{msg.width}x{msg.height} {encoding}, {len(raw)} bytes"
+            )
+
         try:
             array = _convert_image_to_bgra(msg.width, msg.height, encoding, raw)
-        except ValueError:
+        except ValueError as e:
+            self.get_logger().warning(f"Frame conversion error for {robot_id}: {e}")
             return
         frame = VideoFrame.from_ndarray(array, format="bgra")
         track.push_frame(frame)
@@ -265,6 +397,12 @@ class RobotBridgeNode(Node):
 
     def _fetch_ice_servers(self) -> list[RTCIceServer]:
         """Fetch ICE server config from the API."""
+        # Skip fetching if USE_STUN is not set (local dev mode)
+        if not os.getenv("USE_STUN"):
+            self.get_logger().info("Local dev mode: using host-only ICE (no STUN)")
+            self._ice_servers_fetched = True
+            return []
+
         url = f"{self.api_base}/internal/ice-servers"
         try:
             resp = self.http_session.get(url, headers=self.headers, timeout=5)
@@ -290,10 +428,15 @@ class RobotBridgeNode(Node):
             self.get_logger().warning(f"Failed to fetch ICE servers: {exc}")
             return list(_DEFAULT_ICE_SERVERS)
 
-    # ── WebRTC: forwarder -> server (Hop 1) ──────────────────────────
+    # ── WebRTC: forwarder <-> server (Hop 1, bidirectional) ──────────
 
-    async def _create_forwarder_offer(self, robot: str, track: RosVideoTrack) -> None:
-        """Create a PC, add video track, send offer to the server."""
+    async def _create_forwarder_offer(
+        self, robot: str, video_track: RosVideoTrack, audio_track: RosAudioTrack | None = None
+    ) -> None:
+        """Create a PC, add video and audio tracks, send offer to the server.
+
+        Bidirectional: sends video + robot audio, receives browser audio.
+        """
         ice_config = RTCConfiguration(iceServers=list(self._ice_servers))
         pc = RTCPeerConnection(configuration=ice_config)
         self._peer_connections[robot] = pc
@@ -305,9 +448,27 @@ class RobotBridgeNode(Node):
             if state in {"failed", "closed", "disconnected"}:
                 self._peer_connections.pop(robot, None)
                 self._video_tracks.pop(robot, None)
+                self._audio_tracks.pop(robot, None)
+                # Critical: remove from streaming_robots so we can restart streaming
+                self.streaming_robots.discard(robot)
+                self.get_logger().info(f"Cleaned up streaming state for {robot}")
                 await pc.close()
 
-        pc.addTrack(track)
+        @pc.on("track")
+        def _on_track(track) -> None:
+            """Handle incoming audio track from browser (via API relay)."""
+            if track.kind == "audio":
+                self.get_logger().info(f"Received browser audio track for {robot}")
+                # Start a task to consume audio and publish to ROS
+                asyncio.ensure_future(self._consume_browser_audio(robot, track))
+
+        # Send video and robot audio
+        pc.addTrack(video_track)
+        if audio_track:
+            # Add audio track with sendrecv direction (send robot audio, receive browser audio)
+            transceiver = pc.addTransceiver(audio_track, direction="sendrecv")
+            self.get_logger().info(f"Added audio transceiver for {robot}: direction={transceiver.direction}")
+
         offer = await pc.createOffer()
         await pc.setLocalDescription(offer)
 
@@ -340,6 +501,52 @@ class RobotBridgeNode(Node):
             pc.setRemoteDescription(RTCSessionDescription(sdp=sdp, type=answer_type)),
             self._aio_loop,
         )
+
+    async def _consume_browser_audio(self, robot: str, track) -> None:
+        """Consume audio frames from browser and publish to ROS audio_play topic."""
+        publisher = self.audio_publishers.get(robot)
+        if not publisher:
+            self.get_logger().warning(f"No audio publisher for {robot}")
+            return
+
+        self.get_logger().info(f"Starting browser audio consumer for {robot}")
+        frame_count = 0
+        try:
+            while True:
+                frame = await track.recv()
+                frame_count += 1
+
+                # Convert AudioFrame to raw PCM bytes (S16_LE)
+                samples = frame.to_ndarray()
+
+                # Debug: log format on first few frames
+                if frame_count <= 3:
+                    self.get_logger().info(
+                        f"Browser audio format for {robot}: dtype={samples.dtype}, shape={samples.shape}, "
+                        f"min={samples.min():.2f}, max={samples.max():.2f}"
+                    )
+
+                # Convert float to int16 if needed
+                if samples.dtype != np.int16:
+                    samples = (samples * 32767).astype(np.int16)
+
+                # Flatten to mono if stereo
+                if samples.ndim > 1:
+                    samples = samples[0]
+
+                # Convert to bytes and publish
+                audio_bytes = samples.tobytes()
+                msg = UInt8MultiArray()
+                msg.data = list(audio_bytes)
+                publisher.publish(msg)
+
+                # Log every 100 frames (~2 seconds at 50fps)
+                if frame_count % 100 == 1:
+                    self.get_logger().info(
+                        f"Browser audio frame {frame_count} for {robot}: {len(audio_bytes)} bytes"
+                    )
+        except Exception as e:
+            self.get_logger().info(f"Browser audio consumer ended for {robot}: {e}")
 
     # ── Telemetry push ───────────────────────────────────────────────
 
@@ -418,12 +625,14 @@ class RobotBridgeNode(Node):
             if robot:
                 self.get_logger().info(f"Server requested stream start for {robot}")
                 self._start_streaming(robot)
+                # Audio is now integrated into _start_streaming via WebRTC
 
         elif msg_type == "stop_stream":
             robot = (payload.get("robot") or "").strip()
             if robot:
                 self.get_logger().info(f"Server requested stream stop for {robot}")
                 self._stop_streaming(robot)
+                # Audio is now stopped via _stop_streaming
 
         elif msg_type == "webrtc_answer":
             self.get_logger().info(f"Received WebRTC answer for {payload.get('robot')}")

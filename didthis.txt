@@ -1,0 +1,70 @@
+# Summary of Actions Taken (Last ~20 minutes)
+
+## Context
+Continuing from a compacted session working on Rosmaster A1 robot integration.
+Goal: Get video streaming from robot camera to web browser via ROS2.
+
+## Actions Taken
+
+### 1. Checked Topic Relay Status
+- Found `topic_tools` package not installed in Docker container
+- Created a Python topic relay script (`/tmp/topic_relay.py`) to republish `/image_raw` to `/rosmaster1/camera/image_raw`
+- Successfully started the relay - topic `/rosmaster1/camera/image_raw` appeared
+
+### 2. Verified Local Discovery
+- Confirmed local machine (camera_forwarder) could see all rosmaster1 topics
+- camera_forwarder discovered robot "rosmaster1"
+- API server auto-created bot in lobby 1
+
+### 3. Restarted Robot Services on Pi
+- Found rosmaster_controller.py and ascamera weren't running (files lost)
+- Copied rosmaster_controller.py back to container
+- Attempted to use `usb_cam` - failed because Pi has CSI camera devices (pispbe), not USB V4L2
+
+### 4. Searched for Correct Camera Driver
+- Found Yahboom workspaces at:
+  - `/root/yahboomcar_ros2_ws/yahboomcar_ws/`
+  - `/root/yahboomcar_ros2_ws/software/library_ws/` (contains ascamera)
+- Tried various ascamera launches (nuwa.launch.py, hp60c.launch.py)
+- ascamera kept crashing with "config file path error" or memory issues
+
+### 5. Investigated Memory Issue
+- dmesg showed: `ascamera_node, bytes: 77210517504 not enough memory` (77GB allocation!)
+- This is a bug in ascamera - possibly unbounded queue when frames aren't consumed
+- User clarified they have a 2-axis USB camera, NOT a depth camera
+- ascamera is for Angstrong depth cameras - WRONG driver for this hardware
+
+### 6. Checked Battery Status
+- Robot was beeping - checked telemetry
+- Battery voltage: 9.5V (low for 3S LiPo, should be ~12.6V when full)
+- Beeping confirmed as low battery warning
+
+### 7. Investigated USB Camera
+- User confirmed camera is USB, not CSI/depth
+- lsusb showed no camera initially
+- dmesg revealed camera was connecting then immediately disconnecting:
+  ```
+  usb 3-2: Found UVC 1.00 device USB 2.0 Camera (0c45:6368)
+  usb 3-2: USB disconnect, device number 5
+  ```
+- This happened repeatedly - hardware/power issue
+
+### 8. Rebooted Pi
+- `sudo reboot` via SSH
+- After reboot, camera now detected and stable:
+  ```
+  Bus 003 Device 002: ID 0c45:6368 Microdia USB 2.0 Camera
+  ```
+
+## Current Status
+- Pi is up
+- USB camera (Microdia 0c45:6368) is detected
+- rosmaster_controller needs to be restarted
+- Need to use `usb_cam` ROS2 package (not ascamera) for this camera
+- Topic relay needs to be restarted
+
+## Next Steps
+1. Start rosmaster_controller on Pi
+2. Start usb_cam with correct device (/dev/video* for the Microdia camera)
+3. Start topic relay to remap to /rosmaster1/camera/image_raw
+4. Verify video flows through camera_forwarder to web UI

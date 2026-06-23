@@ -19,12 +19,12 @@ services:
 
   ros-core:
     build:
-      context: ./ros
+      context: ./ros-bridge
     container_name: ros-core
     environment:
       - ROS_DOMAIN_ID=0
       - API_BASE_URL=http://robot-gateway:8080/api
-      - ROS_PUSH_KEY=${ROS_PUSH_KEY:-local-dev-key}
+      - LOBBY_KEY=local-dev-key
     ports:
       - "9090:9090"      # rosbridge websocket
       - "11811:11811/udp" # ROS2 Discovery Server
@@ -36,7 +36,7 @@ services:
       - net.ipv4.ip_forward=1
       - net.ipv4.conf.all.src_valid_mark=1
     volumes:
-      - ./ros/wireguard:/etc/wireguard:ro
+      - ./ros-bridge/wireguard:/etc/wireguard:ro
     networks:
       - robotnet
 
@@ -62,9 +62,8 @@ services:
       context: ./api
     container_name: robot-gateway
     environment:
-      - ROS_PUSH_KEY=${ROS_PUSH_KEY:-local-dev-key}
       - 'SEED_USERS_JSON=[{"email":"dmn322","password":"TEST123!"}]'
-      - "SEED_LOBBIES_JSON=[{\"name\":\"ros-core\",\"description\":\"Default ROS core lobby\",\"access_key\":\"${ROS_PUSH_KEY:-local-dev-key}\",\"owner_email\":\"dmn322\",\"is_public\":true}]"
+      - "SEED_LOBBIES_JSON=[{\"name\":\"ros-core\",\"description\":\"Default ROS core lobby\",\"access_key\":\"local-dev-key\",\"owner_email\":\"dmn322\",\"is_public\":true}]"
       - "SEED_BOTS_JSON=[{\"name\":\"Arena Bot Alpha\",\"ros_namespace\":\"bot_alpha\",\"lobby_name\":\"ros-core\",\"owner_email\":\"dmn322\"},{\"name\":\"Arena Bot Beta\",\"ros_namespace\":\"bot_beta\",\"lobby_name\":\"ros-core\",\"owner_email\":\"dmn322\"}]"
       - GATEWAY_NAME=gateway-1
       - DATABASE_URL=postgresql+asyncpg://robot:robot@db:5432/robotarena

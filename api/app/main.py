@@ -11,8 +11,10 @@ from datetime import datetime, timedelta
 from enum import Enum
 from typing import Any, Dict, Optional, TypeVar
 
-from aiortc import MediaStreamTrack, RTCPeerConnection, RTCSessionDescription
+import numpy as np
+from aiortc import AudioStreamTrack, MediaStreamTrack, RTCPeerConnection, RTCSessionDescription
 from aiortc.contrib.media import MediaRelay
+from av import AudioFrame
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from jose import JWTError, jwt
@@ -73,7 +75,6 @@ class SeedBotConfig(BaseModel):
 
 
 class Settings(BaseSettings):
-    lobby_key: str = Field("local-dev-key", alias="ROS_PUSH_KEY")
     gateway_name: str = Field("gateway-1", alias="GATEWAY_NAME")
     cors_allow_origins: list[str] = Field(default_factory=lambda: ["*"], alias="CORS_ALLOW_ORIGINS")
     database_url: str = Field("postgresql+asyncpg://robot:robot@localhost:5432/robotarena", alias="DATABASE_URL")
@@ -88,9 +89,6 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
-lobby_key_override = os.getenv("LOBBY_KEY")
-if lobby_key_override:
-    settings.lobby_key = lobby_key_override
 SeedModelT = TypeVar("SeedModelT", bound=BaseModel)
 
 
@@ -179,12 +177,15 @@ robot_heartbeats: Dict[str, datetime] = {}
 media_relay = MediaRelay()
 # Incoming video track from forwarder per robot (Hop 1)
 robot_incoming_tracks: Dict[str, MediaStreamTrack] = {}
+# Incoming audio track from forwarder per robot (Hop 1)
+robot_incoming_audio_tracks: Dict[str, MediaStreamTrack] = {}
 # Hop 1 PeerConnection from forwarder per robot
 robot_forwarder_pcs: Dict[str, RTCPeerConnection] = {}
 # Hop 2 PeerConnections (one per browser viewer) per robot
 robot_browser_pcs: Dict[str, list[RTCPeerConnection]] = defaultdict(list)
 # Event set when forwarder track arrives (for browser waiters)
 robot_track_ready: Dict[str, asyncio.Event] = {}
+robot_audio_track_ready: Dict[str, asyncio.Event] = {}
 command_subscribers: Dict[str, set[WebSocket]] = defaultdict(set)
 websocket_robot_map: Dict[int, set[str]] = {}
 # Internal bridge websockets (for sending start_stream/stop_stream)
@@ -195,6 +196,281 @@ telemetry_subscribers: Dict[str, set[WebSocket]] = defaultdict(set)
 telemetry_ws_lock = asyncio.Lock()
 # Latest telemetry per robot for initial state on connect
 latest_telemetry: Dict[str, Dict[str, Any]] = {}
+
+
+# Browser audio relay tracks - for forwarding browser mic audio to ros-bridge (Hop 1)
+browser_audio_relay_tracks: Dict[str, "BrowserAudioRelayTrack"] = {}
+# Robot audio broadcasters - consumes Hop1 audio and broadcasts to Hop2 subscribers
+robot_audio_broadcasters: Dict[str, "RobotAudioBroadcaster"] = {}
+
+
+class RobotAudioBroadcaster:
+    """Consumes audio from Hop1 source track and broadcasts to multiple Hop2 relay tracks.
+
+    This bypasses MediaRelay which has known issues with audio tracks.
+    """
+
+    def __init__(self, source_track: MediaStreamTrack, robot_id: str) -> None:
+        self.source_track = source_track
+        self.robot_id = robot_id
+        self._subscribers: list[asyncio.Queue] = []
+        self._running = False
+        self._task: asyncio.Task | None = None
+        self._frame_count = 0
+        logger.info("RobotAudioBroadcaster created for %s", robot_id)
+
+    def start(self) -> None:
+        """Start the consumer task."""
+        if not self._running:
+            self._running = True
+            self._task = asyncio.create_task(self._consume_loop())
+            logger.info("RobotAudioBroadcaster started for %s", self.robot_id)
+
+    def stop(self) -> None:
+        """Stop the consumer task."""
+        self._running = False
+        if self._task:
+            self._task.cancel()
+            self._task = None
+        # Signal all subscribers to stop
+        for q in self._subscribers:
+            try:
+                q.put_nowait(None)
+            except asyncio.QueueFull:
+                pass
+        logger.info("RobotAudioBroadcaster stopped for %s", self.robot_id)
+
+    def subscribe(self) -> asyncio.Queue:
+        """Create a new subscriber queue."""
+        q: asyncio.Queue = asyncio.Queue(maxsize=50)
+        self._subscribers.append(q)
+        logger.info("RobotAudioBroadcaster: new subscriber for %s (total=%d)",
+                    self.robot_id, len(self._subscribers))
+        return q
+
+    def unsubscribe(self, q: asyncio.Queue) -> None:
+        """Remove a subscriber queue."""
+        if q in self._subscribers:
+            self._subscribers.remove(q)
+            logger.info("RobotAudioBroadcaster: removed subscriber for %s (total=%d)",
+                        self.robot_id, len(self._subscribers))
+
+    async def _consume_loop(self) -> None:
+        """Continuously read from source track and broadcast to subscribers."""
+        logger.info("RobotAudioBroadcaster: starting consume loop for %s, track state=%s",
+                    self.robot_id, getattr(self.source_track, 'readyState', 'unknown'))
+        try:
+            while self._running:
+                # Check track state
+                state = getattr(self.source_track, 'readyState', 'unknown')
+                if state != 'live':
+                    logger.warning("RobotAudioBroadcaster: track not live for %s (state=%s), waiting...",
+                                   self.robot_id, state)
+                    await asyncio.sleep(0.1)
+                    continue
+                try:
+                    # Use timeout to detect if recv() is blocking forever
+                    try:
+                        frame = await asyncio.wait_for(self.source_track.recv(), timeout=5.0)
+                    except asyncio.TimeoutError:
+                        logger.warning("RobotAudioBroadcaster: recv() timed out for %s (no frames in 5s), track state=%s",
+                                       self.robot_id, getattr(self.source_track, 'readyState', 'unknown'))
+                        continue
+                    self._frame_count += 1
+
+                    if self._frame_count <= 3 or self._frame_count % 100 == 0:
+                        logger.info("RobotAudioBroadcaster: frame %d for %s, subscribers=%d",
+                                    self._frame_count, self.robot_id, len(self._subscribers))
+
+                    # Broadcast to all subscribers
+                    for q in self._subscribers:
+                        try:
+                            q.put_nowait(frame)
+                        except asyncio.QueueFull:
+                            # Drop oldest frame and add new one
+                            try:
+                                q.get_nowait()
+                                q.put_nowait(frame)
+                            except (asyncio.QueueEmpty, asyncio.QueueFull):
+                                pass
+                except Exception as e:
+                    if self._running:
+                        import traceback
+                        logger.error("RobotAudioBroadcaster: error for %s: %s (type=%s)",
+                                     self.robot_id, e, type(e).__name__)
+                        logger.error("RobotAudioBroadcaster traceback: %s", traceback.format_exc())
+                    break
+        finally:
+            logger.info("RobotAudioBroadcaster: consume loop ended for %s", self.robot_id)
+
+
+class RobotAudioRelayTrack(AudioStreamTrack):
+    """Relay track that receives audio from a broadcaster queue and sends to browser."""
+
+    kind = "audio"
+
+    def __init__(self, queue: asyncio.Queue, robot_id: str) -> None:
+        super().__init__()
+        self._queue = queue
+        self.robot_id = robot_id
+        self._frame_count = 0
+        self._pts = 0
+        logger.info("RobotAudioRelayTrack created for %s", robot_id)
+
+    async def recv(self) -> AudioFrame:
+        """Get next frame from the queue."""
+        frame = await self._queue.get()
+
+        if frame is None:
+            raise Exception("Audio stream ended")
+
+        self._frame_count += 1
+
+        # Update pts for this consumer's timeline
+        frame.pts = self._pts
+        self._pts += frame.samples
+
+        if self._frame_count <= 3 or self._frame_count % 100 == 0:
+            logger.info("RobotAudioRelayTrack: frame %d for %s", self._frame_count, self.robot_id)
+
+        return frame
+
+
+class Hop1AudioTrack(AudioStreamTrack):
+    """Wraps the incoming audio track from Hop1 to log RMS and forward frames.
+
+    This sits between the raw WebRTC track and consumers (MediaRelay or direct).
+    Used to verify audio is actually arriving at the API server from ros-bridge.
+    """
+
+    kind = "audio"
+
+    def __init__(self, source_track: MediaStreamTrack, robot_id: str) -> None:
+        super().__init__()
+        self.source_track = source_track
+        self.robot_id = robot_id
+        self._frame_count = 0
+        logger.info("Hop1AudioTrack created for %s (wrapping incoming Hop1 audio)", robot_id)
+
+    async def recv(self) -> AudioFrame:
+        """Get frame from source and log RMS to verify audio is arriving."""
+        frame = await self.source_track.recv()
+        self._frame_count += 1
+
+        # Log RMS for first few frames and periodically
+        if self._frame_count <= 5 or self._frame_count % 100 == 0:
+            try:
+                arr = frame.to_ndarray()
+                rms = np.sqrt(np.mean(arr.astype(np.float32)**2))
+                logger.info("Hop1AudioTrack: frame %d for %s - rms=%.1f, samples=%d, rate=%d",
+                            self._frame_count, self.robot_id, rms, frame.samples, frame.sample_rate)
+            except Exception as e:
+                logger.warning("Hop1AudioTrack: couldn't compute RMS for %s: %s", self.robot_id, e)
+
+        return frame
+
+
+class AudioLoggingTrack(AudioStreamTrack):
+    """Wrapper that logs RMS of audio frames from MediaRelay for debugging."""
+
+    kind = "audio"
+
+    def __init__(self, source_track: MediaStreamTrack, robot_id: str) -> None:
+        super().__init__()
+        self.source_track = source_track
+        self.robot_id = robot_id
+        self._frame_count = 0
+        logger.info("AudioLoggingTrack created for %s (wrapping MediaRelay output)", robot_id)
+
+    async def recv(self) -> AudioFrame:
+        """Forward frame from source and log RMS."""
+        if self._frame_count == 0:
+            logger.info("AudioLoggingTrack: recv() called first time for %s", self.robot_id)
+        frame = await self.source_track.recv()
+        if self._frame_count == 0:
+            logger.info("AudioLoggingTrack: got first frame for %s", self.robot_id)
+        self._frame_count += 1
+
+        # Log RMS for first few frames and every 100th
+        if self._frame_count <= 5 or self._frame_count % 100 == 0:
+            try:
+                arr = frame.to_ndarray()
+                rms = np.sqrt(np.mean(arr.astype(np.float32)**2))
+                logger.info("AudioLoggingTrack: frame %d for %s - rms=%.1f, samples=%d, rate=%d",
+                            self._frame_count, self.robot_id, rms, frame.samples, frame.sample_rate)
+            except Exception as e:
+                logger.warning("AudioLoggingTrack: couldn't compute RMS for %s: %s", self.robot_id, e)
+
+        return frame
+
+
+class BrowserAudioRelayTrack(AudioStreamTrack):
+    """Relay track that receives audio from browser and sends to ros-bridge.
+
+    This track is added to Hop 1 (API -> ros-bridge) to send browser audio.
+    Audio frames are pushed from Hop 2 when browser sends mic data.
+    """
+
+    kind = "audio"
+
+    def __init__(self, robot_id: str, sample_rate: int = 48000, channels: int = 1) -> None:
+        super().__init__()
+        self.robot_id = robot_id
+        self.sample_rate = sample_rate
+        self.channels = channels
+        self._queue: asyncio.Queue = asyncio.Queue(maxsize=50)
+        self._pts = 0
+        self._running = True
+
+    def push_frame(self, frame: AudioFrame) -> None:
+        """Push an audio frame to the relay queue (called from Hop 2 track handler).
+
+        Normalizes frame to mono 48kHz s16 format to avoid resampler mismatches.
+        """
+        try:
+            # Convert frame to numpy, mix to mono if stereo, then recreate frame
+            arr = frame.to_ndarray()  # shape: (channels, samples)
+            if arr.shape[0] > 1:
+                # Mix stereo to mono by averaging channels
+                arr = arr.mean(axis=0, keepdims=True).astype(np.int16)
+
+            normalized = AudioFrame.from_ndarray(arr, format="s16", layout="mono")
+            normalized.sample_rate = self.sample_rate
+            normalized.pts = frame.pts
+
+            self._queue.put_nowait(normalized)
+        except asyncio.QueueFull:
+            # Drop oldest frame if queue is full
+            try:
+                self._queue.get_nowait()
+                self._queue.put_nowait(normalized)
+            except (asyncio.QueueEmpty, asyncio.QueueFull):
+                pass
+        except Exception:
+            pass  # Skip malformed frames
+
+    async def recv(self) -> AudioFrame:
+        """Receive the next audio frame to send to ros-bridge."""
+        while self._running:
+            try:
+                frame = await asyncio.wait_for(self._queue.get(), timeout=0.1)
+                # Update pts for proper timing
+                frame.pts = self._pts
+                self._pts += frame.samples
+                return frame
+            except asyncio.TimeoutError:
+                # Generate silence if no audio available
+                samples = np.zeros((1, 960), dtype=np.int16)  # 20ms of silence at 48kHz
+                frame = AudioFrame.from_ndarray(samples, format="s16", layout="mono")
+                frame.sample_rate = self.sample_rate
+                frame.pts = self._pts
+                self._pts += frame.samples
+                return frame
+
+    def stop(self) -> None:
+        """Stop the relay track."""
+        self._running = False
+        super().stop()
 
 # STUN whitelist: maps IP -> expiry timestamp
 stun_whitelist: Dict[str, float] = {}
@@ -1026,7 +1302,7 @@ async def apply_seed_data() -> None:
                     owner_email,
                 )
                 continue
-            desired_key = entry.access_key or settings.lobby_key or secrets.token_urlsafe(16)
+            desired_key = entry.access_key or secrets.token_urlsafe(16)
             result = await session.execute(select(Lobby).where(Lobby.name == entry.name))
             lobby = result.scalar_one_or_none()
             if not lobby:
@@ -1129,10 +1405,49 @@ async def apply_seed_data() -> None:
         await session.commit()
 
 
+async def ensure_default_lobby() -> None:
+    """Create a default lobby if none exist, with a generated access key."""
+    async with AsyncSessionLocal() as session:
+        # Check if any non-deleted lobbies exist
+        result = await session.execute(
+            select(Lobby).where(Lobby.is_deleted.is_(False)).limit(1)
+        )
+        if result.scalar_one_or_none() is not None:
+            return  # Lobbies exist, nothing to do
+
+        # Need a user to own the default lobby
+        user_result = await session.execute(select(User).limit(1))
+        owner = user_result.scalar_one_or_none()
+        if owner is None:
+            logger.warning(
+                "No users exist, cannot create default lobby. "
+                "Create a user first or provide SEED_USERS_JSON."
+            )
+            return
+
+        access_key = secrets.token_urlsafe(16)
+        lobby = Lobby(
+            name="default",
+            description="Auto-created default lobby",
+            access_key=access_key,
+            owner_id=owner.id,
+            ros_host="internal",
+            ros_port=0,
+            is_public=True,
+        )
+        session.add(lobby)
+        await session.commit()
+        logger.info("=" * 60)
+        logger.info("Created default lobby with access key: %s", access_key)
+        logger.info("Set LOBBY_KEY=%s on your robot/bridge to connect", access_key)
+        logger.info("=" * 60)
+
+
 @app.on_event("startup")
 async def startup_event() -> None:
     await prepare_database()
     await apply_seed_data()
+    await ensure_default_lobby()
 
     # Start STUN server on UDP 3478
     loop = asyncio.get_event_loop()
@@ -1171,6 +1486,7 @@ async def shutdown_event() -> None:
             await pc.close()
     robot_browser_pcs.clear()
     robot_incoming_tracks.clear()
+    robot_incoming_audio_tracks.clear()
 
 
 @app.get("/api/health")
@@ -1275,6 +1591,8 @@ async def broadcast_telemetry(robot_id: str, data: Dict[str, Any]) -> None:
         except Exception:
             async with telemetry_ws_lock:
                 telemetry_subscribers[robot_id].discard(websocket)
+
+
 
 
 @app.websocket("/api/internal/ws/lobbies")
@@ -1417,7 +1735,10 @@ async def websocket_proxy(websocket: WebSocket, robot_id: str) -> None:
 
 
 async def handle_forwarder_offer(ws: WebSocket, message: dict) -> None:
-    """Hop 1: accept the forwarder's WebRTC offer, store the incoming track."""
+    """Hop 1: accept the forwarder's WebRTC offer, store the incoming track.
+
+    Bidirectional: receives video + robot audio, sends browser audio.
+    """
     robot = (message.get("robot") or "").strip()
     sdp = message.get("sdp", "")
     offer_type = message.get("offer_type", "offer")
@@ -1431,6 +1752,12 @@ async def handle_forwarder_offer(ws: WebSocket, message: dict) -> None:
     if old_pc:
         await old_pc.close()
     robot_incoming_tracks.pop(robot, None)
+    robot_incoming_audio_tracks.pop(robot, None)
+
+    # Clean up old browser audio relay track
+    old_relay = browser_audio_relay_tracks.pop(robot, None)
+    if old_relay:
+        old_relay.stop()
 
     pc = RTCPeerConnection()
     robot_forwarder_pcs[robot] = pc
@@ -1440,9 +1767,19 @@ async def handle_forwarder_offer(ws: WebSocket, message: dict) -> None:
         logger.info("SFU: received %s track from forwarder for %s", track.kind, robot)
         if track.kind == "video":
             robot_incoming_tracks[robot] = track
+            logger.info("SFU: stored video track for %s (id=%s, type=%s, readyState=%s)",
+                        robot, track.id, type(track).__name__, getattr(track, 'readyState', 'unknown'))
             evt = robot_track_ready.get(robot)
             if evt:
                 evt.set()
+        elif track.kind == "audio":
+            robot_incoming_audio_tracks[robot] = track
+            logger.info("SFU: stored audio track for %s", robot)
+
+            # Set audio track ready event
+            audio_evt = robot_audio_track_ready.get(robot)
+            if audio_evt:
+                audio_evt.set()
 
     @pc.on("connectionstatechange")
     async def on_state() -> None:
@@ -1450,15 +1787,29 @@ async def handle_forwarder_offer(ws: WebSocket, message: dict) -> None:
         logger.info("SFU Hop1 state for %s: %s", robot, state)
         if state in ("failed", "closed", "disconnected"):
             robot_incoming_tracks.pop(robot, None)
+            robot_incoming_audio_tracks.pop(robot, None)
             robot_forwarder_pcs.pop(robot, None)
+            # Clean up browser audio relay (browser->robot direction)
+            relay = browser_audio_relay_tracks.pop(robot, None)
+            if relay:
+                relay.stop()
             # Close all Hop 2 PCs for this robot
             browser_pcs = robot_browser_pcs.pop(robot, [])
             for bpc in browser_pcs:
                 await bpc.close()
             await pc.close()
 
+    # First set remote description to know what transceivers are available
     offer = RTCSessionDescription(sdp=sdp, type=offer_type)
+
     await pc.setRemoteDescription(offer)
+
+    # Create browser audio relay track to send browser mic audio to ros-bridge
+    browser_relay = BrowserAudioRelayTrack(robot)
+    browser_audio_relay_tracks[robot] = browser_relay
+    pc.addTrack(browser_relay)
+    logger.info("SFU Hop1: added browser audio relay for %s", robot)
+
     answer = await pc.createAnswer()
     await pc.setLocalDescription(answer)
 
@@ -1477,7 +1828,10 @@ async def start_webrtc(
     offer: WebRTCOffer,
     current_user: User = Depends(get_current_user),
 ) -> dict[str, str]:
-    """Hop 2: relay the forwarder's track to this browser viewer."""
+    """Hop 2: relay the forwarder's track to this browser viewer.
+
+    Bidirectional: sends video + robot audio, receives browser audio.
+    """
     # Track active viewers and trigger stream start if first viewer
     was_empty = not active_robot_streams.get(robot_id)
     active_robot_streams[robot_id].add(current_user.email)
@@ -1497,28 +1851,51 @@ async def start_webrtc(
         if not incoming_track:
             raise HTTPException(status_code=503, detail="Video stream not available")
 
-    # Create a relayed copy of the track for this browser (no re-encoding)
-    relayed_track = media_relay.subscribe(incoming_track)
+    # Create a relayed copy of the video track for this browser (no re-encoding)
+    relayed_video_track = media_relay.subscribe(incoming_track)
+
+    # Use MediaRelay for audio (same as video)
+    incoming_audio_track = robot_incoming_audio_tracks.get(robot_id)
+    relayed_audio_track = None
+    if incoming_audio_track:
+        relayed_audio_track = media_relay.subscribe(incoming_audio_track)
+        logger.info("SFU Hop2: subscribed audio via MediaRelay for %s", robot_id)
+    else:
+        logger.warning("SFU Hop2: no audio track for %s", robot_id)
 
     pc = RTCPeerConnection()
     robot_browser_pcs[robot_id].append(pc)
 
+    @pc.on("track")
+    def on_browser_track(track: MediaStreamTrack) -> None:
+        """Handle incoming audio track from browser mic."""
+        if track.kind == "audio":
+            logger.info("SFU Hop2: received browser audio track for %s", robot_id)
+            # Forward browser audio to the relay track (which sends to ros-bridge)
+            asyncio.ensure_future(_forward_browser_audio(robot_id, track))
+
     @pc.on("connectionstatechange")
     async def on_state() -> None:
         state = pc.connectionState
-        logger.info("SFU Hop2 state for %s: %s", robot_id, state)
+        logger.info("SFU Hop2 state for %s: %s (pcs=%d, viewers=%s)",
+                    robot_id, state, len(robot_browser_pcs.get(robot_id, [])),
+                    active_robot_streams.get(robot_id))
         if state in ("failed", "closed", "disconnected"):
             pcs = robot_browser_pcs.get(robot_id, [])
             if pc in pcs:
                 pcs.remove(pc)
+                logger.info("SFU Hop2: removed pc, remaining=%d", len(pcs))
             await pc.close()
-            # If no more viewers, stop the stream
-            if not robot_browser_pcs.get(robot_id):
-                viewers = active_robot_streams.pop(robot_id, None)
-                if viewers:
-                    await notify_bridge_stream(robot_id, False)
+            # Don't auto-stop stream - let it keep running to avoid race conditions
+            # The ros-bridge will handle idle streams
+            remaining = robot_browser_pcs.get(robot_id)
+            if not remaining:
+                logger.info("SFU Hop2: no viewers for %s, but keeping stream active", robot_id)
 
-    pc.addTrack(relayed_track)
+    pc.addTrack(relayed_video_track)
+    if relayed_audio_track:
+        pc.addTrack(relayed_audio_track)
+        logger.info("SFU Hop2: added robot audio track for %s", robot_id)
 
     browser_offer = RTCSessionDescription(sdp=offer.sdp, type=offer.type)
     await pc.setRemoteDescription(browser_offer)
@@ -1526,3 +1903,25 @@ async def start_webrtc(
     await pc.setLocalDescription(answer)
 
     return {"sdp": pc.localDescription.sdp, "type": pc.localDescription.type}
+
+
+async def _forward_browser_audio(robot_id: str, track: MediaStreamTrack) -> None:
+    """Forward audio frames from browser to the browser audio relay track."""
+    relay = browser_audio_relay_tracks.get(robot_id)
+    if not relay:
+        logger.warning("No browser audio relay track for %s", robot_id)
+        return
+
+    logger.info("Starting browser audio forwarding for %s", robot_id)
+    frame_count = 0
+    try:
+        while True:
+            frame = await track.recv()
+            frame_count += 1
+            relay.push_frame(frame)
+
+            # Log every 500 frames (~10 seconds at 50fps)
+            if frame_count % 500 == 1:
+                logger.info("Browser audio frame %d forwarded for %s", frame_count, robot_id)
+    except Exception as e:
+        logger.info("Browser audio forwarding ended for %s: %s", robot_id, e)

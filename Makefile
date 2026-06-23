@@ -1,6 +1,7 @@
 SHELL := /bin/bash
 -include .env
 ROS_DISTRO ?= jazzy
+ROS_DOMAIN_ID ?= 61
 ROS_SETUP := source /opt/ros/$(ROS_DISTRO)/setup.bash
 PROJECT_ID ?= robo1-489405
 export TURTLEBOT3_MODEL := burger
@@ -14,6 +15,7 @@ help:
 	@echo "Arena stack commands"
 	@echo ""
 	@echo "  make tmux-stack - Launch ros-core, sim, api, web in tmux (preferred)"
+	@echo "  make dev        - Launch api, ros-bridge, web (no simulator)"
 	@echo "  make all        - Alias for make tmux-stack"
 	@echo "  make attach     - Attach to tmux session (arena)"
 	@echo "  make db-shell   - Open psql shell inside the db container"
@@ -40,7 +42,7 @@ web:
 	cd web && ./run.sh
 
 controller:
-	$(ROS_SETUP) && python3 src/simple_controller.py
+	$(ROS_SETUP) && python3 bots/turtlebot3/simple_controller.py
 
 # Start arena stack in tmux
 all: tmux-stack
@@ -78,6 +80,36 @@ teleop:
 # Launch new tmux-based dev stack (ros-core, sim, api, web)
 tmux-stack:
 	./scripts/run_stack_tmux.sh
+
+# Run api + ros-bridge + web (no simulator)
+dev:
+	@if ! command -v tmux >/dev/null 2>&1; then \
+		echo "tmux required. Install with: sudo apt install tmux"; exit 1; \
+	fi
+	@tmux kill-session -t dev 2>/dev/null || true
+	@tmux new-session -d -s dev -n api "cd $(CURDIR) && ./api/run.sh; read"
+	@tmux new-window -t dev -n ros-bridge "cd $(CURDIR) && $(MAKE) dev-ros; read"
+	@tmux new-window -t dev -n web "cd $(CURDIR) && ./web/run.sh; read"
+	@echo "Started tmux session 'dev' with [api] [ros-bridge (Humble)] [web]"
+	@tmux attach -t dev
+
+# Build ros-bridge Humble container
+dev-ros-build:
+	docker build -t ros-bridge-humble -f $(CURDIR)/ros-bridge/Dockerfile.humble $(CURDIR)/ros-bridge
+
+# Run ros-bridge in Humble container (for connecting to Humble robots)
+dev-ros:
+	@if ! docker image inspect ros-bridge-humble >/dev/null 2>&1; then \
+		echo "Building ros-bridge-humble image..."; \
+		$(MAKE) dev-ros-build; \
+	fi
+	@echo "Starting ros-bridge in Humble container on port 9090..."
+	docker run --rm --net=host \
+		-v $(CURDIR)/ros-bridge:/ros-bridge \
+		-e ROS_DOMAIN_ID=$(ROS_DOMAIN_ID) \
+		-e API_BASE_URL=http://localhost:8081/api \
+		-e LOBBY_KEY=local-dev-key \
+		ros-bridge-humble
 
 db-shell:
 	docker compose exec db psql -U robot -d robotarena
@@ -162,7 +194,7 @@ sim-ros2:
 	@tmux new-window -t ros2sim -n drivers "cd $(CURDIR) && source /opt/ros/$(ROS_DISTRO)/setup.bash && \
 		export RMW_IMPLEMENTATION=rmw_fastrtps_cpp && \
 		export ROS_DISCOVERY_SERVER=127.0.0.1:11811 && \
-		ros2 launch $(CURDIR)/ros/launch/turtlebot_drivers.launch.py; read"
+		ros2 launch $(CURDIR)/ros-bridge/launch/turtlebot_drivers.launch.py; read"
 	@echo "Started tmux session 'ros2sim'. Attaching..."
 	@tmux attach -t ros2sim
 
@@ -199,9 +231,7 @@ clean:
 
 
 mic-to-bot:
-# 	/usr/bin/python3 -m venv --system-site-packages .venv
-	source /opt/ros/jazzy/setup.bash && export ROS_DOMAIN_ID=62 && /usr/bin/python3 scripts/mic_to_robot.py
+	source /opt/ros/$(ROS_DISTRO)/setup.bash && export ROS_DOMAIN_ID=$(ROS_DOMAIN_ID) && python3 scripts/mic_to_robot.py
 
 bot-to-speaker:
-# 	/usr/bin/python3 -m venv --system-site-packages .venv
-	source /opt/ros/jazzy/setup.bash && export ROS_DOMAIN_ID=62 && /usr/bin/python3 scripts/robot_to_speaker.py
+	source /opt/ros/$(ROS_DISTRO)/setup.bash && export ROS_DOMAIN_ID=$(ROS_DOMAIN_ID) && python3 scripts/robot_to_speaker.py

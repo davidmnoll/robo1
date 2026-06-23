@@ -47,7 +47,6 @@ locals {
     DATABASE_URL                = "postgresql+asyncpg://${local.db_user}:${random_password.db_password.result}@${google_sql_database_instance.postgres.ip_address[0].ip_address}/${local.db_name}"
     SECRET_KEY                  = random_password.api_secret_key.result
     ACCESS_TOKEN_EXPIRE_MINUTES = tostring(var.access_token_expire_minutes)
-    ROS_PUSH_KEY                = var.ros_push_key
     GATEWAY_NAME                = var.gateway_name
     CORS_ALLOW_ORIGINS          = local.cors_allow_origins_json
     STUN_SERVER                 = "${google_compute_address.api_ip.address}:3478"

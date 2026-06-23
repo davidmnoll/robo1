@@ -1,0 +1,15 @@
+# Rosmaster A1 Robot Dependencies
+# Run: pip install -r requirements.txt
+
+# ROS2 packages (installed via apt, not pip)
+# - ros-humble-rclpy
+# - ros-humble-geometry-msgs
+# - ros-humble-std-msgs
+# - ros-humble-sensor-msgs
+# - ros-humble-usb-cam or ros-humble-v4l2-camera
+
+# The Rosmaster_Lib is provided by Yahboom in their Docker image
+# or from: https://github.com/YahboomTechnology/Rosmaster
+
+# No pip dependencies beyond the standard library
+# (rclpy is installed via ROS2)

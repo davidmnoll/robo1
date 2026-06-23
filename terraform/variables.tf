@@ -58,11 +58,6 @@ variable "access_token_expire_minutes" {
   default     = 60
 }
 
-variable "ros_push_key" {
-  description = "Shared lobby key the ROS camera forwarder uses when POSTing frames"
-  type        = string
-  default     = "local-dev-key"
-}
 
 variable "gateway_name" {
   description = "Logical name for this API deployment"

@@ -20,7 +20,7 @@ fi
 
 ROS_SETUP_SCRIPT="${SELECTED_SETUP:-}"
 ROSBRIDGE_PORT="${ROS_BRIDGE_PORT:-9090}"
-ROS_VENV="${ROS_VENV:-${ROOT_DIR}/ros/.venv}"
+ROS_VENV="${ROS_VENV:-${ROOT_DIR}/ros-bridge/.venv}"
 
 if [[ -z "${ROS_SETUP_SCRIPT}" || ! -f "${ROS_SETUP_SCRIPT}" ]]; then
   echo "Could not locate ROS 2 setup.bash. Set ROS_SETUP_SCRIPT or ROS_DISTRO." >&2
@@ -50,7 +50,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-cd "${ROOT_DIR}/ros"
+cd "${ROOT_DIR}/ros-bridge"
 
 source "${ROS_VENV}/bin/activate" 2>/dev/null || true
 
@@ -68,4 +68,4 @@ fi
 
 echo "[ros-core] rosbridge running on port ${ROSBRIDGE_PORT}"
 echo "[ros-core] launching robot bridge (auto-discovers camera topics)"
-exec "${PYTHON_BIN}" "${ROOT_DIR}/ros/camera_forwarder.py"
+exec "${PYTHON_BIN}" "${ROOT_DIR}/ros-bridge/camera_forwarder.py"
