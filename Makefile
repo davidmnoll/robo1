@@ -16,6 +16,7 @@ help:
 	@echo ""
 	@echo "  make tmux-stack - Launch ros-core, sim, api, web in tmux (preferred)"
 	@echo "  make dev        - Launch api, ros-bridge, web (no simulator)"
+	@echo "  make dev-local  - Launch api, web only (no ros-bridge)"
 	@echo "  make cloud-ros  - Run ros-bridge connected to cloud API"
 	@echo "  make cloud-web  - Run local dashboard against cloud API"
 	@echo "  make all        - Alias for make tmux-stack"
@@ -98,6 +99,17 @@ dev:
 	@tmux new-window -t dev -n ros-bridge "cd $(CURDIR) && $(MAKE) dev-ros; read"
 	@tmux new-window -t dev -n web "cd $(CURDIR) && ./web/run.sh; read"
 	@echo "Started tmux session 'dev' with [api] [ros-bridge (Humble)] [web]"
+	@tmux attach -t dev
+
+# Run api + web only (no ros-bridge)
+dev-local:
+	@if ! command -v tmux >/dev/null 2>&1; then \
+		echo "tmux required. Install with: sudo apt install tmux"; exit 1; \
+	fi
+	@tmux kill-session -t dev 2>/dev/null || true
+	@tmux new-session -d -s dev -n api "cd $(CURDIR) && ./api/run.sh; read"
+	@tmux new-window -t dev -n web "cd $(CURDIR) && ./web/run.sh; read"
+	@echo "Started tmux session 'dev' with [api] [web]"
 	@tmux attach -t dev
 
 # Build ros-bridge Humble container

@@ -69,6 +69,18 @@
         background: rgba(248,113,113,0.15);
         color: #f87171;
       }
+      .status-dot {
+        width: 10px;
+        height: 10px;
+        border-radius: 50%;
+        opacity: 0.5;
+      }
+      .status-dot.connected {
+        background: #4ade80;
+      }
+      .status-dot.disconnected {
+        background: #f87171;
+      }
       label {
         text-transform: uppercase;
         font-size: 0.75rem;
@@ -251,7 +263,7 @@
         margin-top: 0.75rem;
       }
       .tab-nav {
-        display: flex;
+        display: none;
         gap: 0.75rem;
         margin: 1rem 0;
       }
@@ -284,12 +296,6 @@
       }
       .robot-status.occupied {
         color: #fbbf24;
-      }
-      .teleop-layout {
-        display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
-        gap: 1rem;
-        align-items: start;
       }
       video {
         width: 100%;
@@ -365,12 +371,6 @@
         right: 0.75rem;
         z-index: 5;
         pointer-events: auto;
-      }
-      .status-grid {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 0.75rem;
-        margin-top: 0.5rem;
       }
       pre {
         background: rgba(2,6,23,0.9);
@@ -530,14 +530,6 @@
         body.mobile-teleop #teleop-pane {
           display: block;
         }
-        body.mobile-teleop .teleop-layout {
-          display: block;
-          height: 100vh;
-          width: 100vw;
-        }
-        body.mobile-teleop .teleop-layout > div:last-child {
-          display: none; /* Hide side panel on mobile */
-        }
         body.mobile-teleop .video-wrapper {
           position: fixed;
           top: 0;
@@ -564,9 +556,6 @@
           font-size: 0.8rem;
         }
         body.mobile-teleop .hud-log {
-          display: none;
-        }
-        body.mobile-teleop .status-grid {
           display: none;
         }
         body.mobile-teleop #video-meta {
@@ -622,10 +611,9 @@
       <header class="hero">
         <div>
           <h1>Robot Arena Dashboard</h1>
-          <p>Coordinate lobby access, manage bots, and teleoperate robots from your browser.</p>
         </div>
         <div class="hero-actions">
-          <div class="status disconnected" id="api-status">API unreachable</div>
+          <div class="status-dot disconnected" id="api-status"></div>
           <div class="user-menu" id="user-menu" hidden>
             <button id="menu-toggle" class="ghost menu-toggle" type="button" aria-haspopup="true" aria-expanded="false">
               ☰
@@ -659,15 +647,11 @@
       </section>
 
       <section class="card" id="dashboard-card" hidden>
-        <div class="lobby-actions" style="justify-content: space-between; align-items: center;">
-          <div>
-            <h2 style="margin:0;">Lobby Directory</h2>
-            <p class="hint" style="margin:0;">Browse public arenas or manage the ones you own.</p>
-          </div>
-          <button id="new-lobby-btn">New Lobby</button>
-        </div>
-
+        <!-- lobby directory view -->
         <div id="view-lobbies" class="view active">
+          <div style="display:flex;justify-content:flex-end;margin-bottom:1rem;">
+            <button id="new-lobby-btn">New Lobby</button>
+          </div>
           <div id="lobby-empty" class="empty-state" hidden>Sign in to view and create lobbies.</div>
           <div id="lobby-list">
             <div id="lobby-online-list" class="lobby-list"></div>
@@ -682,19 +666,15 @@
         </div>
 
         <div id="view-lobby-detail" class="view">
+          <!-- detail view header -->
           <div class="lobby-actions" style="justify-content: space-between;">
-            <button id="detail-back-btn" class="ghost">← Back to lobbies</button>
-            <div class="lobby-actions">
-              <button id="detail-edit-btn" class="ghost" title="Edit lobby" style="font-size:1.2rem;padding:0.5rem;">✏️</button>
-              <button id="detail-join-btn">Join lobby</button>
-            </div>
+            <button id="detail-back-btn" class="ghost" title="Back">←</button>
+            <button id="detail-edit-btn" class="ghost" title="Edit lobby" style="font-size:1.2rem;padding:0.5rem;">✏️</button>
           </div>
-          <h2 id="detail-title" style="margin-bottom:0.25rem;"></h2>
-          <p class="hint" id="detail-owner"></p>
-          <p id="detail-description" class="hint"></p>
-          <div id="detail-visibility" class="badge"></div>
-          <div id="detail-role" class="role-pill"></div>
-          <p class="hint" id="detail-role-hint"></p>
+          <div style="display:flex;align-items:center;gap:0.5rem;">
+            <h2 id="detail-title" style="margin:0;"></h2>
+            <span id="detail-ros-status" class="status disconnected">Offline</span>
+          </div>
 
           <div class="tab-nav" hidden>
             <button data-tab="lobby" class="active">Lobby</button>
@@ -702,79 +682,57 @@
           </div>
 
           <div data-panel="lobby" class="view active">
-            <p class="hint">Select an available robot to start controlling it. Busy robots display the active streamer.</p>
             <div id="detail-robots" class="robot-grid"></div>
           </div>
           <div data-panel="teleop" class="view">
             <div id="teleop-empty" class="empty-state">Select a robot from the lobby tab to begin streaming.</div>
-            <div id="teleop-pane" class="teleop-layout" hidden>
-              <div>
-                <div class="video-wrapper" id="video-wrapper">
-                  <video id="robot-video" autoplay playsinline controls></video>
-                  <button id="video-fullscreen-btn" class="ghost" type="button" aria-label="Toggle fullscreen">⤢</button>
-                  <button class="mobile-exit-btn" id="mobile-exit-btn" type="button">✕ Exit</button>
-                  <div class="touch-joystick-zone left" id="joystick-zone-left">
-                    <span class="joystick-label">Move</span>
-                  </div>
-                  <div class="touch-joystick-zone right" id="joystick-zone-right">
-                    <span class="joystick-label">Camera</span>
-                  </div>
-                  <div class="hud-overlay">
-                    <div class="hud-row">
+            <div id="teleop-pane" hidden>
+              <!-- full-width video with HUD overlay -->
+              <div class="video-wrapper" id="video-wrapper">
+                <video id="robot-video" autoplay playsinline controls></video>
+                <button id="video-fullscreen-btn" class="ghost" type="button" aria-label="Toggle fullscreen">⤢</button>
+                <button class="mobile-exit-btn" id="mobile-exit-btn" type="button">✕ Exit</button>
+                <div class="touch-joystick-zone left" id="joystick-zone-left">
+                  <span class="joystick-label">Move</span>
+                </div>
+                <div class="touch-joystick-zone right" id="joystick-zone-right">
+                  <span class="joystick-label">Camera</span>
+                </div>
+                <div class="hud-overlay">
+                  <div class="hud-row" style="justify-content:space-between;">
+                    <div style="display:flex;gap:0.5rem;align-items:center;">
+                      <div class="status disconnected" id="video-status" style="font-size:0.75rem;padding:0.25rem 0.5rem;">Video</div>
                       <div class="hud-panel">
-                        <p class="hint" style="margin:0;">Fwd/Back</p>
-                        <strong id="linear-speed-value">0.00 m/s</strong>
+                        <strong id="linear-speed-value">0.00</strong>
                       </div>
                       <div class="hud-panel">
-                        <p class="hint" style="margin:0;">Turn</p>
-                        <strong id="angular-speed-value">0.00 rad/s</strong>
+                        <strong id="angular-speed-value">0.00</strong>
                       </div>
                       <div class="hud-panel">
-                        <p class="hint" style="margin:0;">Front distance</p>
-                        <strong id="front-distance-value">-- m</strong>
+                        <strong id="front-distance-value">--</strong>
                       </div>
                     </div>
-                    <div class="hud-row">
-                      <div class="hud-panel hud-log">
-                        <p class="hint" style="margin:0 0 0.25rem;">Telemetry log</p>
-                        <pre id="telemetry">Waiting for telemetry...</pre>
-                      </div>
+                    <div style="display:flex;gap:0.5rem;align-items:center;">
+                      <button id="mic-toggle-btn" class="ghost mic-btn muted" type="button" title="Toggle microphone">🎤</button>
+                      <span id="mic-status" class="mic-status" style="color:#94a3b8;font-size:0.8rem;"></span>
+                      <button id="mobile-teleop-enter" class="ghost mobile-teleop-enter" type="button" title="Touch controls">📱</button>
                     </div>
                   </div>
                 </div>
-                <div class="status-grid">
-                  <div class="status disconnected" id="video-status">Video idle</div>
-                  <div class="status disconnected" id="ws-status">WS idle</div>
-                </div>
-                <p class="hint" id="video-meta">No active stream</p>
               </div>
-              <div>
-                <h3 style="margin-top:0;">Active robot</h3>
-                <p class="hint" id="active-robot-label">None selected</p>
-                <p class="hint" id="teleop-instructions" style="margin-top:0.5rem;">
-                  Movement: WASD or arrows. Camera: IJKL. Gamepad supported. Space to stop.
-                </p>
-                <button id="mobile-teleop-enter" class="mobile-teleop-enter" type="button">
-                  📱 Enter Touch Controls
-                </button>
-                <div class="audio-controls">
-                  <button id="mic-toggle-btn" class="ghost mic-btn muted" type="button" title="Toggle microphone">
-                    🎤
-                  </button>
-                  <label for="mic-volume">Vol</label>
-                  <input type="range" id="mic-volume" class="volume-slider" min="0" max="100" value="80" disabled>
-                  <span id="mic-status" class="mic-status">Mic off</span>
-                </div>
-                <div class="lobby-actions">
-                  <button id="leave-robot-btn" class="secondary">Leave robot</button>
-                </div>
-              </div>
+              <!-- hidden elements for compatibility -->
+              <div id="ws-status" hidden></div>
+              <!-- hidden elements for compatibility -->
+              <p id="active-robot-label" hidden></p>
+              <p id="video-meta" hidden></p>
+              <input type="range" id="mic-volume" hidden min="0" max="100" value="80">
+              <pre id="telemetry" hidden></pre>
             </div>
           </div>
         </div>
 
         <div id="view-lobby-manage" class="view">
-          <button id="manage-back-btn" class="ghost">← Back to lobbies</button>
+          <button id="manage-back-btn" class="ghost" title="Back">←</button>
           <h2 id="manage-title">Create lobby</h2>
           <form id="lobby-form">
             <label for="lobby-name">Name</label>
@@ -817,6 +775,15 @@
               </div>
               <label for="bot-desc">Description</label>
               <textarea id="bot-desc" placeholder="Optional summary"></textarea>
+              <div class="form-row">
+                <div style="flex:1;">
+                  <label for="bot-volume">Volume</label>
+                  <div style="display:flex;align-items:center;gap:0.5rem;">
+                    <input type="range" id="bot-volume" min="0" max="100" value="100" style="flex:1;">
+                    <span id="bot-volume-label" style="min-width:3ch;">100</span>%
+                  </div>
+                </div>
+              </div>
               <div class="lobby-actions">
                 <button type="submit" id="save-bot-btn">Save robot</button>
                 <button type="button" id="cancel-bot-edit" class="secondary">Cancel edit</button>
@@ -857,14 +824,9 @@
         const manageView = document.getElementById('view-lobby-manage');
         const detailBackBtn = document.getElementById('detail-back-btn');
         const detailEditBtn = document.getElementById('detail-edit-btn');
-        const detailJoinBtn = document.getElementById('detail-join-btn');
+        const detailRosStatus = document.getElementById('detail-ros-status');
         const manageBackBtn = document.getElementById('manage-back-btn');
         const detailTitle = document.getElementById('detail-title');
-        const detailOwner = document.getElementById('detail-owner');
-        const detailDescription = document.getElementById('detail-description');
-        const detailVisibility = document.getElementById('detail-visibility');
-        const detailRole = document.getElementById('detail-role');
-        const detailRoleHint = document.getElementById('detail-role-hint');
         const detailRobots = document.getElementById('detail-robots');
         const tabButtons = document.querySelectorAll('.tab-nav button');
         const lobbyTabBtn = document.querySelector('[data-tab="lobby"]');
@@ -878,7 +840,6 @@
         const linearSpeedValue = document.getElementById('linear-speed-value');
         const angularSpeedValue = document.getElementById('angular-speed-value');
         const activeRobotLabel = document.getElementById('active-robot-label');
-        const leaveRobotBtn = document.getElementById('leave-robot-btn');
         const micToggleBtn = document.getElementById('mic-toggle-btn');
         const micVolumeSlider = document.getElementById('mic-volume');
         const micStatusEl = document.getElementById('mic-status');
@@ -902,6 +863,8 @@
         const botNameInput = document.getElementById('bot-name');
         const botNamespaceInput = document.getElementById('bot-namespace');
         const botDescInput = document.getElementById('bot-desc');
+        const botVolumeInput = document.getElementById('bot-volume');
+        const botVolumeLabel = document.getElementById('bot-volume-label');
         const botMessage = document.getElementById('bot-message');
         const cancelBotEditBtn = document.getElementById('cancel-bot-edit');
 
@@ -991,6 +954,9 @@
           view: 'lobbies',
           lobbyTab: 'lobby',
           activeRobot: null,
+          viewOnly: false,
+          lastActivity: Date.now(),
+          idleTimeout: null,
           ws: null,
           pc: null,
           linearSpeed: 0,
@@ -1025,8 +991,61 @@
           cameraPan: 90,
           cameraTilt: 90,
           cameraPtzInterval: null,
+          connectedRobots: new Set(),
+          lobbyStatusWs: null,
         };
         let lobbyFetchController = null;
+
+        function connectLobbyStatusWs() {
+          if (state.lobbyStatusWs) return;
+          const base = apiBase().replace(/^http/, 'ws');
+          const url = `${base.replace(/\/api$/, '')}/api/ws/lobby-status`;
+          const ws = new WebSocket(url);
+          state.lobbyStatusWs = ws;
+          ws.onopen = () => console.info('[lobby-ws] connected');
+          ws.onclose = () => {
+            state.lobbyStatusWs = null;
+            // Reconnect after 5s
+            setTimeout(connectLobbyStatusWs, 5000);
+          };
+          ws.onerror = () => ws.close();
+          ws.onmessage = (event) => {
+            try {
+              const msg = JSON.parse(event.data);
+              if (msg.type === 'connected_robots') {
+                state.connectedRobots = new Set(msg.robots || []);
+                updateLobbyRosStatus();
+              } else if (msg.type === 'robot_status') {
+                if (msg.connected) {
+                  state.connectedRobots.add(msg.robot);
+                } else {
+                  state.connectedRobots.delete(msg.robot);
+                }
+                updateLobbyRosStatus();
+              }
+            } catch (e) {
+              console.warn('[lobby-ws] parse error:', e);
+            }
+          };
+        }
+
+        function updateLobbyRosStatus() {
+          // Update lobby cards in directory
+          state.lobbies.forEach(lobby => {
+            lobby.ros_connected = (lobby.bot_namespaces || []).some(
+              ns => state.connectedRobots.has(ns)
+            );
+          });
+          renderLobbies();
+          // Update current lobby detail if viewing
+          if (state.currentLobby) {
+            state.currentLobby.ros_connected = (state.currentLobby.bot_namespaces || []).some(
+              ns => state.connectedRobots.has(ns)
+            );
+            detailRosStatus.textContent = state.currentLobby.ros_connected ? 'Online' : 'Offline';
+            detailRosStatus.className = `status ${state.currentLobby.ros_connected ? 'connected' : 'disconnected'}`;
+          }
+        }
 
         function apiBase() {
           if (staticApiBase.endsWith('/api')) return staticApiBase;
@@ -1182,14 +1201,19 @@
               card.classList.add('offline');
             }
             const badgeClass = lobby.is_public ? 'public' : 'private';
+            const rosClass = lobby.ros_connected ? 'connected' : 'disconnected';
+            const rosLabel = lobby.ros_connected ? 'Online' : 'Offline';
             card.innerHTML = `
+              <!-- lobby card header with name and status badges -->
               <div style="display:flex;justify-content:space-between;align-items:center;gap:0.5rem;">
                 <h3>${lobby.name}</h3>
-                <span class="badge ${badgeClass}">${lobby.is_public ? 'Public' : 'Private'}</span>
+                <div style="display:flex;align-items:center;gap:0.25rem;">
+                  <span class="badge ${badgeClass}">${lobby.is_public ? 'Public' : 'Private'}</span>
+                  <span class="status ${rosClass}">${rosLabel}</span>
+                </div>
               </div>
-              <p class="hint" style="margin:0.25rem 0;">Owned by ${lobby.owner_email}</p>
-              <p class="hint" style="margin-bottom:0.5rem;">${lobby.description || 'No description'}</p>
-              <p class="hint">Robots: ${lobby.bot_count}</p>
+              <p class="hint" style="margin:0.25rem 0;">${lobby.owner_email}</p>
+              <p class="hint">${lobby.bot_count} robot${lobby.bot_count !== 1 ? 's' : ''}</p>
             `;
             if (options.offline) {
               const offlineNote = document.createElement('p');
@@ -1251,18 +1275,9 @@
           const lobby = state.currentLobby;
           if (!lobby) return;
           detailTitle.textContent = lobby.name;
-          detailOwner.textContent = `Owner: ${lobby.owner_email}`;
-          detailDescription.textContent = lobby.description || 'No description provided.';
-          detailVisibility.textContent = lobby.is_public ? 'Public lobby' : 'Private lobby';
-          detailVisibility.className = `badge ${lobby.is_public ? 'public' : 'private'}`;
-          const role = lobby.is_owner ? 'Owner' : 'Participant';
-          detailRole.textContent = `Your role: ${role}`;
-          detailRole.className = `role-pill ${lobby.is_owner ? 'owner' : 'participant'}`;
-          detailRoleHint.textContent = lobby.is_owner
-            ? 'Click the edit button to manage lobby settings and access key.'
-            : '';
+          detailRosStatus.textContent = lobby.ros_connected ? 'Online' : 'Offline';
+          detailRosStatus.className = `status ${lobby.ros_connected ? 'connected' : 'disconnected'}`;
           detailEditBtn.style.display = lobby.is_owner ? 'inline-flex' : 'none';
-          detailJoinBtn.style.display = 'none';
           renderLobbyRobots();
         }
 
@@ -1281,20 +1296,59 @@
             const card = document.createElement('div');
             card.className = 'robot-card';
             const streamerNames = bot.active_streamers || [];
-            const isBusy = streamerNames.length > 0 && !streamerNames.includes(state.userEmail);
+            const isUserStreaming = streamerNames.includes(state.userEmail);
+            const otherStreaming = streamerNames.length > 0 && !isUserStreaming;
             card.innerHTML = `
               <h4>${bot.name}</h4>
-              <p class="hint">Namespace: ${bot.ros_namespace}</p>
-              <p class="hint">${bot.description || '—'}</p>
-              <p class="robot-status ${isBusy ? 'occupied' : ''}">${streamerNames.length ? `Streaming: ${streamerNames.join(', ')}` : 'Available'}</p>
+              <p class="robot-status ${otherStreaming ? 'occupied' : ''}">${streamerNames.length ? `Streaming: ${streamerNames.join(', ')}` : 'Available'}</p>
             `;
             const button = document.createElement('button');
-            button.textContent = streamerNames.includes(state.userEmail) ? 'Resume control' : 'Control robot';
-            button.disabled = isBusy;
-            button.addEventListener('click', () => selectRobot(bot));
-            card.appendChild(button);
+            const isOffline = !lobby.ros_connected;
+            if (isUserStreaming) {
+              button.textContent = 'Resume streaming';
+              if (!isOffline) button.addEventListener('click', () => selectRobot(bot, false));
+            } else if (otherStreaming) {
+              button.textContent = 'View stream';
+              button.className = 'secondary';
+              if (!isOffline) button.addEventListener('click', () => selectRobot(bot, true));
+            } else {
+              button.textContent = 'Stream robot';
+              if (!isOffline) button.addEventListener('click', () => selectRobot(bot, false));
+            }
+            if (isOffline) {
+              button.disabled = true;
+              button.style.opacity = '0.5';
+              button.style.cursor = 'not-allowed';
+            }
+            const actions = document.createElement('div');
+            actions.style.cssText = 'display:flex;gap:0.5rem;align-items:center;';
+            actions.appendChild(button);
+            if (lobby.is_owner) {
+              const editBtn = document.createElement('button');
+              editBtn.className = 'ghost';
+              editBtn.textContent = '✏️';
+              editBtn.title = 'Edit robot';
+              editBtn.style.cssText = 'padding:0.25rem 0.5rem;font-size:1rem;';
+              editBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                openBotEdit(bot);
+              });
+              actions.appendChild(editBtn);
+            }
+            card.appendChild(actions);
             detailRobots.appendChild(card);
           });
+        }
+
+        async function openBotEdit(bot) {
+          const lobby = state.currentLobby;
+          if (!lobby) return;
+          state.manageLobby = lobby;
+          manageTitle.textContent = `Manage ${lobby.name}`;
+          populateLobbyForm(lobby);
+          renderManageRobots();
+          showView('manage');
+          startBotEdit(bot);
         }
 
         function setLobbyTab(tab) {
@@ -1331,27 +1385,61 @@
           videoFullscreenBtn.title = active ? 'Exit fullscreen' : 'Enter fullscreen';
         }
 
-        function selectRobot(bot) {
+        function selectRobot(bot, viewOnly = false) {
           state.activeRobot = bot;
-          activeRobotLabel.textContent = `${bot.name} (${bot.ros_namespace})`;
+          state.viewOnly = viewOnly;
+          activeRobotLabel.textContent = `${bot.name}${viewOnly ? ' (viewing)' : ''}`;
           setTeleopAvailability(true);
           resetJoy();
           setLobbyTab('teleop');
           teleopEmpty.hidden = true;
           teleopPane.hidden = false;
-          startTeleop(bot.ros_namespace);
+          startTeleop(bot.ros_namespace, viewOnly);
         }
 
-        function startTeleop(namespace) {
+        function startTeleop(namespace, viewOnly = false) {
           if (!namespace) return;
-          openWebSocket(namespace);
+          if (!viewOnly) {
+            openWebSocket(namespace);
+          }
           startVideo(namespace);  // Also sets up bidirectional audio via WebRTC
           updateMicUI();
+          startIdleTimeout();
+        }
+
+        const IDLE_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
+
+        function resetIdleTimeout() {
+          state.lastActivity = Date.now();
+        }
+
+        function startIdleTimeout() {
+          resetIdleTimeout();
+          if (state.idleTimeout) clearInterval(state.idleTimeout);
+          state.idleTimeout = setInterval(() => {
+            if (!state.activeRobot) return;
+            const idle = Date.now() - state.lastActivity;
+            if (idle >= IDLE_TIMEOUT_MS) {
+              console.info('[idle] stream timed out after 5 min inactivity');
+              logTelemetry('Stream timed out (idle)');
+              teardownTeleop();
+              setLobbyTab('lobby');
+            }
+          }, 10000); // Check every 10 seconds
+        }
+
+        function stopIdleTimeout() {
+          if (state.idleTimeout) {
+            clearInterval(state.idleTimeout);
+            state.idleTimeout = null;
+          }
         }
 
         function teardownTeleop() {
+          stopIdleTimeout();
           state.activeRobot = null;
-          activeRobotLabel.textContent = 'None selected';
+          state.viewOnly = false;
+          activeRobotLabel.textContent = '';
           setTeleopAvailability(false);
           resetJoy();
           stopMicrophone();
@@ -1384,7 +1472,7 @@
           if (document.fullscreenElement === videoWrapper) {
             document.exitFullscreen?.();
           }
-          videoStatus.textContent = 'Video idle';
+          videoStatus.textContent = 'Video';
           videoStatus.className = 'status disconnected';
           videoMeta.textContent = 'No active stream';
           wsStatus.textContent = 'WS idle';
@@ -1396,6 +1484,15 @@
         // ── Microphone handling (via WebRTC) ────────────────────────────
 
         function updateMicUI() {
+          // Hide mic controls in view-only mode
+          if (state.viewOnly) {
+            micToggleBtn.style.display = 'none';
+            micVolumeSlider.style.display = 'none';
+            micStatusEl.textContent = '';
+            return;
+          }
+          micToggleBtn.style.display = '';
+          micVolumeSlider.style.display = '';
           const enabled = state.micEnabled;
           micToggleBtn.classList.toggle('muted', !enabled);
           micToggleBtn.classList.toggle('active', enabled);
@@ -1591,6 +1688,7 @@
 
         function sendJoy() {
           if (!state.activeRobot) return;
+          if (state.viewOnly) return;  // View-only mode - no control
 
           // Only send via data channel - no HTTP fallback for safety
           if (!state.controlChannel || state.controlChannel.readyState !== 'open') {
@@ -1603,6 +1701,10 @@
             buttons: state.joyButtons.slice(),
             timestamp: Date.now(),
           };
+
+          // Reset idle timeout on actual input
+          const hasInput = state.joyAxes.some(v => Math.abs(v) > 0.01) || state.joyButtons.some(v => v);
+          if (hasInput) resetIdleTimeout();
 
           // Debug log every 10th send
           if (!state._joySendCount) state._joySendCount = 0;
@@ -1718,23 +1820,25 @@
             }
           });
 
-          // Create control data channel (browser -> robot, unordered for low latency)
-          const controlChannel = pc.createDataChannel('control', {
-            ordered: false,
-            maxRetransmits: 2,
-          });
-          state.controlChannel = controlChannel;
-          controlChannel.onopen = () => {
-            console.info('[data] control channel open');
-            logTelemetry('Control data channel connected');
-          };
-          controlChannel.onclose = () => {
-            console.info('[data] control channel closed');
-            state.controlChannel = null;
-          };
-          controlChannel.onerror = (event) => {
-            console.warn('[data] control channel error:', event);
-          };
+          // Create control data channel only if not view-only (browser -> robot, unordered for low latency)
+          if (!state.viewOnly) {
+            const controlChannel = pc.createDataChannel('control', {
+              ordered: false,
+              maxRetransmits: 2,
+            });
+            state.controlChannel = controlChannel;
+            controlChannel.onopen = () => {
+              console.info('[data] control channel open');
+              logTelemetry('Control data channel connected');
+            };
+            controlChannel.onclose = () => {
+              console.info('[data] control channel closed');
+              state.controlChannel = null;
+            };
+            controlChannel.onerror = (event) => {
+              console.warn('[data] control channel error:', event);
+            };
+          }
 
           // Request video from server (recvonly)
           pc.addTransceiver('video', { direction: 'recvonly' });
@@ -1742,16 +1846,16 @@
           // Receive robot audio (recvonly initially - mic is added on button click)
           pc.addTransceiver('audio', { direction: 'recvonly' });
           console.info('[video] added recvonly audio transceiver');
-          videoStatus.textContent = 'Video connecting...';
+          videoStatus.textContent = 'Connecting';
           videoStatus.className = 'status disconnected';
           pc.addEventListener('connectionstatechange', () => {
             console.info('[video] connection state changed:', pc.connectionState);
             if (pc.connectionState === 'connected') {
-              videoStatus.textContent = `Video streaming (${namespace})`;
+              videoStatus.textContent = 'Live';
               videoStatus.className = 'status connected';
               videoMeta.textContent = 'ROS stream active';
             } else if (pc.connectionState === 'failed') {
-              videoStatus.textContent = 'Video error';
+              videoStatus.textContent = 'Error';
               videoStatus.className = 'status disconnected';
             }
           });
@@ -1791,9 +1895,8 @@
             })
             .catch((err) => {
               console.error('Video setup failed', err);
-              videoStatus.textContent = 'Video error';
+              videoStatus.textContent = 'Error';
               videoStatus.className = 'status disconnected';
-              videoMeta.textContent = 'Unable to stream';
             });
         }
 
@@ -1947,6 +2050,7 @@
         }
 
         function sendCameraPtz() {
+          if (state.viewOnly) return;  // View-only mode - no control
           if (!state.controlChannel || state.controlChannel.readyState !== 'open') {
             return;
           }
@@ -1956,6 +2060,7 @@
             tilt: Math.round(state.cameraTilt),
             timestamp: Date.now(),
           };
+          resetIdleTimeout();
           try {
             state.controlChannel.send(JSON.stringify(payload));
           } catch (err) {
@@ -2186,10 +2291,6 @@
         window.addEventListener('keydown', (event) => handleKey(event, true));
         window.addEventListener('keyup', (event) => handleKey(event, false));
 
-        leaveRobotBtn.addEventListener('click', () => {
-          teardownTeleop();
-        });
-
         micToggleBtn.addEventListener('click', () => {
           toggleMicrophone();
         });
@@ -2303,6 +2404,9 @@
           botNameInput.value = bot.name;
           botNamespaceInput.value = bot.ros_namespace;
           botDescInput.value = bot.description || '';
+          const vol = Math.round((bot.volume ?? 1.0) * 100);
+          botVolumeInput.value = vol;
+          botVolumeLabel.textContent = vol;
           botMessage.textContent = `Editing ${bot.name}`;
         }
 
@@ -2311,6 +2415,8 @@
           botNameInput.value = '';
           botNamespaceInput.value = '';
           botDescInput.value = '';
+          botVolumeInput.value = 100;
+          botVolumeLabel.textContent = '100';
           botMessage.textContent = '';
         }
 
@@ -2402,6 +2508,7 @@
             name: botNameInput.value,
             ros_namespace: botNamespaceInput.value,
             description: botDescInput.value || null,
+            volume: parseInt(botVolumeInput.value, 10) / 100,
           };
           try {
             if (botForm.dataset.editingId) {
@@ -2439,6 +2546,10 @@
         cancelBotEditBtn.addEventListener('click', (event) => {
           event.preventDefault();
           resetBotForm();
+        });
+
+        botVolumeInput.addEventListener('input', () => {
+          botVolumeLabel.textContent = botVolumeInput.value;
         });
 
         async function deleteBot(botId) {
@@ -2505,12 +2616,23 @@
         });
 
         newLobbyBtn.addEventListener('click', () => openManageLobby(null));
-        detailBackBtn.addEventListener('click', () => showView('lobbies'));
-        manageBackBtn.addEventListener('click', () => showView('lobbies'));
+        detailBackBtn.addEventListener('click', () => {
+          if (state.lobbyTab === 'teleop') {
+            setLobbyTab('lobby');
+          } else {
+            showView('lobbies');
+          }
+        });
+        manageBackBtn.addEventListener('click', () => {
+          if (state.currentLobby) {
+            showView('detail');
+          } else {
+            showView('lobbies');
+          }
+        });
         detailEditBtn.addEventListener('click', () => {
           if (state.currentLobby?.id) openManageLobby(state.currentLobby.id);
         });
-        detailJoinBtn.addEventListener('click', () => setLobbyTab('lobby'));
 
         tabButtons.forEach((btn) => {
           btn.addEventListener('click', () => {
@@ -2522,17 +2644,15 @@
           try {
             const resp = await fetch(`${apiBase()}/health`);
             if (!resp.ok) throw new Error('API error');
-            const json = await resp.json();
-            apiStatus.textContent = json.ros_connected ? 'API & ROS connected' : 'API up, ROS unavailable';
-            apiStatus.className = `status ${json.ros_connected ? 'connected' : 'disconnected'}`;
+            apiStatus.className = 'status-dot connected';
           } catch (err) {
-            apiStatus.textContent = 'API unreachable';
-            apiStatus.className = 'status disconnected';
+            apiStatus.className = 'status-dot disconnected';
           }
         }
 
         setInterval(checkApiHealth, 30000);
         checkApiHealth();
+        connectLobbyStatusWs();
         updateAuthState();
         updateTeleopKeyState();
         updateSpeedIndicators();

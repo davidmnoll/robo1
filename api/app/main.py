@@ -137,6 +137,7 @@ class Bot(Base):
     name = Column(String(255), nullable=False)
     ros_namespace = Column(String(255), nullable=False, index=True)
     description = Column(Text, nullable=True)
+    volume = Column(Float, nullable=False, default=1.0, server_default=text("1.0"))
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     lobby_id = Column(Integer, ForeignKey("lobbies.id"), nullable=False)
     is_deleted = Column(Boolean, nullable=False, default=False, server_default=text("false"))
@@ -196,6 +197,9 @@ telemetry_subscribers: Dict[str, set[WebSocket]] = defaultdict(set)
 telemetry_ws_lock = asyncio.Lock()
 # Latest telemetry per robot for initial state on connect
 latest_telemetry: Dict[str, Dict[str, Any]] = {}
+# Lobby status subscribers (browser clients)
+lobby_status_subscribers: set[WebSocket] = set()
+lobby_status_lock = asyncio.Lock()
 
 
 # Browser audio relay tracks - for forwarding browser mic audio to ros-bridge (Hop 1)
@@ -718,12 +722,14 @@ class BotCreate(BaseModel):
     name: constr(min_length=1, strip_whitespace=True)
     ros_namespace: constr(min_length=1, strip_whitespace=True)
     description: Optional[str] = None
+    volume: Optional[float] = 1.0
 
 
 class BotUpdate(BaseModel):
     name: Optional[constr(min_length=1, strip_whitespace=True)] = None
     ros_namespace: Optional[constr(min_length=1, strip_whitespace=True)] = None
     description: Optional[str] = None
+    volume: Optional[float] = None
 
 
 class LobbyOut(BaseModel):
@@ -737,6 +743,8 @@ class LobbyOut(BaseModel):
     is_deleted: bool
     is_owner: bool
     bot_count: int
+    bot_namespaces: list[str]  # List of ros_namespace for status updates
+    ros_connected: bool  # True if any bot in lobby has active ROS bridge connection
 
 
 class BotOut(BaseModel):
@@ -744,6 +752,7 @@ class BotOut(BaseModel):
     name: str
     ros_namespace: str
     description: Optional[str]
+    volume: float
     lobby_id: int
     lobby_name: str
     owner_email: IdentifierStr
@@ -990,6 +999,7 @@ async def create_bot(
     if bot and bot.is_deleted:
         bot.name = payload.name.strip()
         bot.description = payload.description
+        bot.volume = payload.volume if payload.volume is not None else 1.0
         bot.lobby_id = lobby.id
         bot.is_deleted = False
     else:
@@ -997,6 +1007,7 @@ async def create_bot(
             name=payload.name.strip(),
             ros_namespace=normalized_namespace,
             description=payload.description,
+            volume=payload.volume if payload.volume is not None else 1.0,
             lobby_id=lobby.id,
         )
         session.add(bot)
@@ -1033,6 +1044,8 @@ async def update_bot(
             if ns_bot and ns_bot.id != bot.id:
                 raise HTTPException(status_code=400, detail="ROS namespace already registered in this lobby")
             bot.ros_namespace = new_ns
+    if payload.volume is not None:
+        bot.volume = max(0.0, min(1.0, payload.volume))
     await session.commit()
     await session.refresh(bot)
     bot.lobby = lobby
@@ -1106,8 +1119,12 @@ def lobby_to_out(lobby: Lobby, current_user: User) -> LobbyOut:
     owner_email = lobby.owner.email if lobby.owner else ""
     key = lobby.access_key if lobby.owner_id == current_user.id else None
     bots = getattr(lobby, "bots", []) or []
-    bot_count = sum(1 for bot in bots if not getattr(bot, "is_deleted", False))
+    active_bots = [bot for bot in bots if not getattr(bot, "is_deleted", False)]
+    bot_count = len(active_bots)
+    bot_namespaces = [bot.ros_namespace for bot in active_bots]
     is_owner = lobby.owner_id == current_user.id
+    # Check if any bot in this lobby has an active ROS bridge connection
+    ros_connected = any(ns in robot_forwarder_pcs for ns in bot_namespaces)
     return LobbyOut(
         id=lobby.id,
         name=lobby.name,
@@ -1119,6 +1136,8 @@ def lobby_to_out(lobby: Lobby, current_user: User) -> LobbyOut:
         is_deleted=bool(lobby.is_deleted),
         is_owner=is_owner,
         bot_count=bot_count,
+        bot_namespaces=bot_namespaces,
+        ros_connected=ros_connected,
     )
 
 
@@ -1140,6 +1159,7 @@ def bot_to_out(bot: Bot) -> BotOut:
         name=bot.name,
         ros_namespace=bot.ros_namespace,
         description=bot.description,
+        volume=bot.volume if bot.volume is not None else 1.0,
         lobby_id=bot.lobby_id,
         lobby_name=lobby_name,
         owner_email=owner_email,
@@ -1790,6 +1810,39 @@ async def robot_command_bridge(websocket: WebSocket) -> None:
         await unregister_robot_ws(websocket)
 
 
+async def broadcast_lobby_status(robot: str, connected: bool) -> None:
+    """Broadcast robot connection status change to all lobby subscribers."""
+    message = {"type": "robot_status", "robot": robot, "connected": connected}
+    async with lobby_status_lock:
+        dead = []
+        for ws in lobby_status_subscribers:
+            try:
+                await ws.send_json(message)
+            except Exception:
+                dead.append(ws)
+        for ws in dead:
+            lobby_status_subscribers.discard(ws)
+
+
+@app.websocket("/api/ws/lobby-status")
+async def lobby_status_ws(websocket: WebSocket) -> None:
+    """WebSocket for browser clients to receive lobby/robot status updates."""
+    await websocket.accept()
+    async with lobby_status_lock:
+        lobby_status_subscribers.add(websocket)
+    # Send current connected robots
+    connected_robots = list(robot_forwarder_pcs.keys())
+    await websocket.send_json({"type": "connected_robots", "robots": connected_robots})
+    try:
+        while True:
+            await websocket.receive_text()  # Keep alive, ignore messages
+    except WebSocketDisconnect:
+        pass
+    finally:
+        async with lobby_status_lock:
+            lobby_status_subscribers.discard(websocket)
+
+
 @app.websocket("/api/ws/{robot_id}")
 async def websocket_proxy(websocket: WebSocket, robot_id: str) -> None:
     await websocket.accept()
@@ -1857,6 +1910,7 @@ async def handle_forwarder_offer(ws: WebSocket, message: dict) -> None:
 
     pc = RTCPeerConnection()
     robot_forwarder_pcs[robot] = pc
+    asyncio.create_task(broadcast_lobby_status(robot, True))
 
     @pc.on("track")
     def on_track(track: MediaStreamTrack) -> None:
@@ -1908,6 +1962,7 @@ async def handle_forwarder_offer(ws: WebSocket, message: dict) -> None:
             robot_incoming_tracks.pop(robot, None)
             robot_incoming_audio_tracks.pop(robot, None)
             robot_forwarder_pcs.pop(robot, None)
+            asyncio.create_task(broadcast_lobby_status(robot, False))
             # Clean up browser audio relay (browser->robot direction)
             relay = browser_audio_relay_tracks.pop(robot, None)
             if relay:
