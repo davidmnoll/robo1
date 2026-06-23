@@ -74,7 +74,11 @@ variable "tls_contact_email" {
 variable "cors_allow_origins" {
   description = "List of allowed browser origins for CORS"
   type        = list(string)
-  default     = ["https://davidmnoll.github.io"]
+  default     = [
+    "https://davidmnoll.github.io",
+    "http://localhost:4173",
+    "http://localhost:5173"
+  ]
 }
 
 variable "seed_users_json" {

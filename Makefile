@@ -17,6 +17,7 @@ help:
 	@echo "  make tmux-stack - Launch ros-core, sim, api, web in tmux (preferred)"
 	@echo "  make dev        - Launch api, ros-bridge, web (no simulator)"
 	@echo "  make cloud-ros  - Run ros-bridge connected to cloud API"
+	@echo "  make cloud-web  - Run local dashboard against cloud API"
 	@echo "  make all        - Alias for make tmux-stack"
 	@echo "  make attach     - Attach to tmux session (arena)"
 	@echo "  make db-shell   - Open psql shell inside the db container"
@@ -41,6 +42,11 @@ bridge:
 web:
 	@echo "Starting Vite dev server at http://localhost:4173"
 	cd web && ./run.sh
+
+# Run local dashboard against cloud API
+cloud-web:
+	@echo "Starting Vite dev server pointing to cloud API..."
+	VITE_API_BASE_URL=https://34.42.43.54.sslip.io/api ./web/run.sh
 
 controller:
 	$(ROS_SETUP) && python3 bots/turtlebot3/simple_controller.py
