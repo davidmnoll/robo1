@@ -9,7 +9,7 @@ import time as _time
 from collections import defaultdict
 from datetime import datetime, timedelta
 from enum import Enum
-from typing import Any, Dict, Optional, TypeVar
+from typing import Annotated, Any, Dict, Optional, TypeVar
 
 import numpy as np
 from aiortc import AudioStreamTrack, MediaStreamTrack, RTCDataChannel, RTCPeerConnection, RTCSessionDescription
@@ -43,7 +43,7 @@ with contextlib.suppress(ImportError):
 
         _bcrypt.hashpw = _hashpw_with_trunc
 from passlib.context import CryptContext
-from pydantic import BaseModel, Field, ValidationError, constr
+from pydantic import BaseModel, Field, ValidationError, constr, field_validator
 from pydantic_settings import BaseSettings
 from sqlalchemy import Boolean, Column, DateTime, Float, ForeignKey, Integer, String, Text, delete, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -672,8 +672,24 @@ class TokenResponse(BaseModel):
 
 
 class RegisterRequest(BaseModel):
-    email: IdentifierStr
-    password: constr(min_length=6, max_length=32)
+    email: Annotated[str, Field(min_length=3, description="Username (min 3 characters)")]
+    password: Annotated[str, Field(min_length=6, max_length=32, description="Password (6-32 characters)")]
+
+    @field_validator("email")
+    @classmethod
+    def validate_email(cls, v: str) -> str:
+        if len(v) < 3:
+            raise ValueError("Username must be at least 3 characters")
+        return v
+
+    @field_validator("password")
+    @classmethod
+    def validate_password(cls, v: str) -> str:
+        if len(v) < 6:
+            raise ValueError("Password must be at least 6 characters")
+        if len(v) > 32:
+            raise ValueError("Password must be at most 32 characters")
+        return v
 
 
 class LoginRequest(BaseModel):
