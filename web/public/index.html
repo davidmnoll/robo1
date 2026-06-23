@@ -685,7 +685,7 @@
           <div class="lobby-actions" style="justify-content: space-between;">
             <button id="detail-back-btn" class="ghost">← Back to lobbies</button>
             <div class="lobby-actions">
-              <button id="detail-edit-btn" class="secondary">Edit lobby</button>
+              <button id="detail-edit-btn" class="ghost" title="Edit lobby" style="font-size:1.2rem;padding:0.5rem;">✏️</button>
               <button id="detail-join-btn">Join lobby</button>
             </div>
           </div>
@@ -695,16 +695,8 @@
           <div id="detail-visibility" class="badge"></div>
           <div id="detail-role" class="role-pill"></div>
           <p class="hint" id="detail-role-hint"></p>
-          <div class="key-row" id="detail-key-row" hidden>
-            <div>
-              <label>Access key</label>
-              <code id="detail-key-value">---</code>
-              <p id="detail-key-message" class="hint"></p>
-            </div>
-            <button id="detail-copy-key-btn" class="secondary" type="button">Copy</button>
-          </div>
 
-          <div class="tab-nav">
+          <div class="tab-nav" hidden>
             <button data-tab="lobby" class="active">Lobby</button>
             <button data-tab="teleop" hidden>Teleop</button>
           </div>
@@ -873,10 +865,6 @@
         const detailVisibility = document.getElementById('detail-visibility');
         const detailRole = document.getElementById('detail-role');
         const detailRoleHint = document.getElementById('detail-role-hint');
-        const detailKeyRow = document.getElementById('detail-key-row');
-        const detailKeyValue = document.getElementById('detail-key-value');
-        const detailKeyMessage = document.getElementById('detail-key-message');
-        const detailCopyKeyBtn = document.getElementById('detail-copy-key-btn');
         const detailRobots = document.getElementById('detail-robots');
         const tabButtons = document.querySelectorAll('.tab-nav button');
         const lobbyTabBtn = document.querySelector('[data-tab="lobby"]');
@@ -1211,31 +1199,15 @@
             }
             const actions = document.createElement('div');
             actions.className = 'lobby-actions';
-            const joinBtn = document.createElement('button');
-            joinBtn.textContent = options.offline ? 'Offline' : 'Join';
+            const enterBtn = document.createElement('button');
+            enterBtn.textContent = options.offline ? 'Offline' : 'Enter';
             if (options.offline) {
-              joinBtn.disabled = true;
-              joinBtn.title = 'Reconnect to open this lobby.';
+              enterBtn.disabled = true;
+              enterBtn.title = 'Reconnect to open this lobby.';
             } else {
-              joinBtn.addEventListener('click', () => openLobbyDetail(lobby.id));
+              enterBtn.addEventListener('click', () => openLobbyDetail(lobby.id));
             }
-            actions.appendChild(joinBtn);
-            if (lobby.is_owner) {
-              const editBtn = document.createElement('button');
-              editBtn.className = 'secondary';
-              editBtn.textContent = options.offline ? 'Edit (offline)' : 'Edit';
-              if (options.offline) {
-                editBtn.disabled = true;
-              } else {
-                editBtn.addEventListener('click', () => openManageLobby(lobby.id));
-              }
-              const copyBtn = document.createElement('button');
-              copyBtn.className = 'ghost';
-              copyBtn.textContent = 'Copy key';
-              copyBtn.addEventListener('click', () => copyText(lobby.access_key, 'Lobby key copied'));
-              actions.appendChild(editBtn);
-              actions.appendChild(copyBtn);
-            }
+            actions.appendChild(enterBtn);
             card.appendChild(actions);
             container.appendChild(card);
           });
@@ -1287,17 +1259,8 @@
           detailRole.textContent = `Your role: ${role}`;
           detailRole.className = `role-pill ${lobby.is_owner ? 'owner' : 'participant'}`;
           detailRoleHint.textContent = lobby.is_owner
-            ? 'Share this access key with bots or operators you trust.'
-            : 'Only lobby owners can view and share the access key.';
-          if (lobby.is_owner && lobby.access_key) {
-            detailKeyRow.hidden = false;
-            detailKeyValue.textContent = lobby.access_key;
-            detailKeyMessage.textContent = '';
-          } else {
-            detailKeyRow.hidden = true;
-            detailKeyValue.textContent = lobby.is_owner ? '---' : 'Restricted';
-            detailKeyMessage.textContent = '';
-          }
+            ? 'Click the edit button to manage lobby settings and access key.'
+            : '';
           detailEditBtn.style.display = lobby.is_owner ? 'inline-flex' : 'none';
           detailJoinBtn.style.display = 'none';
           renderLobbyRobots();
@@ -2531,12 +2494,6 @@
         offlineToggleBtn.addEventListener('click', () => {
           state.offlineCollapsed = !state.offlineCollapsed;
           updateOfflineSection();
-        });
-
-        detailCopyKeyBtn.addEventListener('click', () => {
-          if (state.currentLobby?.access_key) {
-            copyText(state.currentLobby.access_key, 'Lobby key copied', detailKeyMessage);
-          }
         });
 
         registerBtn.addEventListener('click', () => handleAuth('register'));
