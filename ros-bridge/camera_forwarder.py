@@ -9,21 +9,21 @@ import re
 import threading
 import time
 import urllib.parse
-from typing import Dict, Set
+from typing import Dict, Optional, Set
 
 import numpy as np
 import requests
 import rclpy
 import websocket
-from aiortc import RTCConfiguration, RTCIceServer, RTCPeerConnection, RTCSessionDescription, VideoStreamTrack, AudioStreamTrack
+from aiortc import RTCConfiguration, RTCDataChannel, RTCIceServer, RTCPeerConnection, RTCSessionDescription, VideoStreamTrack, AudioStreamTrack
 from av import VideoFrame, AudioFrame
-from geometry_msgs.msg import Twist
+from sensor_msgs.msg import Joy
 from rclpy.node import Node
 from rclpy.publisher import Publisher
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 from rclpy.subscription import Subscription
 from sensor_msgs.msg import Image
-from std_msgs.msg import String, UInt8MultiArray
+from std_msgs.msg import String, UInt8MultiArray, Int32MultiArray
 
 
 _CAMERA_TOPIC_RE = re.compile(r"^/([^/]+)/camera/image_raw$")
@@ -173,26 +173,32 @@ class RosAudioTrack(AudioStreamTrack):
     async def recv(self) -> AudioFrame:
         if self._frames_sent == 0:
             print(f"[RosAudioTrack] recv() started for {self.robot_id}", flush=True)
+
         while True:
             try:
                 samples = self._queue.get_nowait()
-                # Reshape for mono (1 channel)
-                samples = samples.reshape(1, -1)
-                # Create AudioFrame
-                frame = AudioFrame.from_ndarray(samples, format="s16", layout="mono")
+
+                # Create interleaved stereo to work around Opus sample duplication
+                # Same fix as browser->robot direction
+                chunk_interleaved = np.empty(len(samples) * 2, dtype=np.int16)
+                chunk_interleaved[0::2] = samples  # Left channel
+                chunk_interleaved[1::2] = samples  # Right channel (same data)
+
+                # Create AudioFrame with interleaved stereo
+                frame = AudioFrame.from_ndarray(
+                    chunk_interleaved.reshape(1, -1), format="s16", layout="stereo"
+                )
                 frame.sample_rate = self.sample_rate
                 frame.pts = self._pts
                 self._pts += self.SAMPLES_PER_FRAME
                 self._frames_sent += 1
                 if self._frames_sent <= 3 or self._frames_sent % 500 == 0:
                     rms = np.sqrt(np.mean(samples.astype(np.float32)**2))
-                    print(f"[RosAudioTrack] frame {self._frames_sent} for {self.robot_id}, rms={rms:.1f}", flush=True)
+                    qsize = self._queue.qsize()
+                    print(f"[RosAudioTrack] frame {self._frames_sent} for {self.robot_id}, rms={rms:.1f}, qsize={qsize}, stereo_samples={len(chunk_interleaved)}", flush=True)
                 return frame
             except queue.Empty:
-                await asyncio.sleep(0.02)
-            except Exception as e:
-                print(f"[RosAudioTrack] recv error: {e}", flush=True)
-                await asyncio.sleep(0.1)
+                await asyncio.sleep(0.01)  # Shorter sleep for lower latency
 
 
 class RobotBridgeNode(Node):
@@ -217,7 +223,8 @@ class RobotBridgeNode(Node):
         self.streaming_robots: Set[str] = set()
         self.camera_subscriptions: Dict[str, Subscription] = {}
         self.telemetry_subscriptions: Dict[str, Subscription] = {}
-        self.command_publishers: Dict[str, Publisher] = {}
+        self.joy_publishers: Dict[str, Publisher] = {}
+        self.ptz_publishers: Dict[str, Publisher] = {}
 
         # Audio handling
         self.audio_subscriptions: Dict[str, Subscription] = {}
@@ -230,6 +237,10 @@ class RobotBridgeNode(Node):
         self._peer_connections: Dict[str, RTCPeerConnection] = {}
         self._ice_servers: list[RTCIceServer] = list(_DEFAULT_ICE_SERVERS)
         self._ice_servers_fetched = False
+
+        # Data channels for control and telemetry
+        self._telemetry_channels: Dict[str, RTCDataChannel] = {}
+        self._control_channels: Dict[str, RTCDataChannel] = {}
 
         # Timers
         self.create_timer(0.1, self.flush_command_queue)
@@ -257,8 +268,10 @@ class RobotBridgeNode(Node):
 
         for robot in new_robots:
             self.get_logger().info(f"Discovered robot: {robot}")
-            cmd_topic = f"/{robot}/cmd_vel"
-            self.command_publishers[robot] = self.create_publisher(Twist, cmd_topic, 10)
+            joy_topic = f"/{robot}/joy"
+            self.joy_publishers[robot] = self.create_publisher(Joy, joy_topic, 10)
+            ptz_topic = f"/{robot}/camera_ptz"
+            self.ptz_publishers[robot] = self.create_publisher(Int32MultiArray, ptz_topic, 10)
             telemetry_topic = f"/{robot}/telemetry"
             self.telemetry_subscriptions[robot] = self.create_subscription(
                 String,
@@ -276,9 +289,12 @@ class RobotBridgeNode(Node):
             self.get_logger().info(f"Robot disappeared: {robot}")
             self._stop_streaming(robot)
             # Audio is now stopped via _stop_streaming
-            pub = self.command_publishers.pop(robot, None)
+            pub = self.joy_publishers.pop(robot, None)
             if pub:
                 self.destroy_publisher(pub)
+            ptz_pub = self.ptz_publishers.pop(robot, None)
+            if ptz_pub:
+                self.destroy_publisher(ptz_pub)
             tel_sub = self.telemetry_subscriptions.pop(robot, None)
             if tel_sub:
                 self.destroy_subscription(tel_sub)
@@ -350,6 +366,9 @@ class RobotBridgeNode(Node):
             asyncio.run_coroutine_threadsafe(pc.close(), self._aio_loop)
         self._video_tracks.pop(robot, None)
         self._audio_tracks.pop(robot, None)
+        # Clean up data channels
+        self._telemetry_channels.pop(robot, None)
+        self._control_channels.pop(robot, None)
         self.get_logger().info(f"Stopped streaming /{robot}/camera/image_raw + audio")
 
     def _handle_audio_webrtc(self, robot_id: str, msg: UInt8MultiArray) -> None:
@@ -436,6 +455,7 @@ class RobotBridgeNode(Node):
         """Create a PC, add video and audio tracks, send offer to the server.
 
         Bidirectional: sends video + robot audio, receives browser audio.
+        Also creates telemetry data channel and handles incoming control data channel.
         """
         ice_config = RTCConfiguration(iceServers=list(self._ice_servers))
         pc = RTCPeerConnection(configuration=ice_config)
@@ -449,6 +469,9 @@ class RobotBridgeNode(Node):
                 self._peer_connections.pop(robot, None)
                 self._video_tracks.pop(robot, None)
                 self._audio_tracks.pop(robot, None)
+                # Clean up data channels
+                self._telemetry_channels.pop(robot, None)
+                self._control_channels.pop(robot, None)
                 # Critical: remove from streaming_robots so we can restart streaming
                 self.streaming_robots.discard(robot)
                 self.get_logger().info(f"Cleaned up streaming state for {robot}")
@@ -462,12 +485,46 @@ class RobotBridgeNode(Node):
                 # Start a task to consume audio and publish to ROS
                 asyncio.ensure_future(self._consume_browser_audio(robot, track))
 
+        @pc.on("datachannel")
+        def _on_datachannel(channel: RTCDataChannel) -> None:
+            """Handle incoming data channel from API (control commands)."""
+            self.get_logger().info(f"Received data channel '{channel.label}' for {robot}")
+            if channel.label == "control":
+                self._control_channels[robot] = channel
+
+                @channel.on("message")
+                def on_control_message(message: str) -> None:
+                    """Handle control commands from browser via data channel."""
+                    self._handle_control_message(robot, message)
+
+                @channel.on("open")
+                def on_open() -> None:
+                    self.get_logger().info(f"Control data channel open for {robot}")
+
+                @channel.on("close")
+                def on_close() -> None:
+                    self.get_logger().info(f"Control data channel closed for {robot}")
+                    self._control_channels.pop(robot, None)
+
         # Send video and robot audio
         pc.addTrack(video_track)
         if audio_track:
             # Add audio track with sendrecv direction (send robot audio, receive browser audio)
             transceiver = pc.addTransceiver(audio_track, direction="sendrecv")
             self.get_logger().info(f"Added audio transceiver for {robot}: direction={transceiver.direction}")
+
+        # Create telemetry data channel (robot -> browser, unordered for low latency)
+        telemetry_channel = pc.createDataChannel("telemetry", ordered=False)
+        self._telemetry_channels[robot] = telemetry_channel
+
+        @telemetry_channel.on("open")
+        def _on_telemetry_open() -> None:
+            self.get_logger().info(f"Telemetry data channel open for {robot}")
+
+        @telemetry_channel.on("close")
+        def _on_telemetry_close() -> None:
+            self.get_logger().info(f"Telemetry data channel closed for {robot}")
+            self._telemetry_channels.pop(robot, None)
 
         offer = await pc.createOffer()
         await pc.setLocalDescription(offer)
@@ -553,17 +610,96 @@ class RobotBridgeNode(Node):
         except Exception as e:
             self.get_logger().info(f"Browser audio consumer ended for {robot}: {e}")
 
+    # ── Control message handling (via data channel) ─────────────────
+
+    def _handle_control_message(self, robot_id: str, message: str) -> None:
+        """Handle control commands received via data channel.
+
+        Publishes Joy messages directly to /{robot}/joy topic.
+        The robot-side controller handles velocity ramping/decay.
+        """
+        try:
+            data = json.loads(message)
+            msg_type = data.get("type")
+
+            if msg_type == "joy":
+                publisher = self.joy_publishers.get(robot_id)
+                if not publisher:
+                    self.get_logger().warning(f"No joy publisher for {robot_id}")
+                    return
+
+                # Create and publish Joy message
+                joy_msg = Joy()
+                joy_msg.header.stamp = self.get_clock().now().to_msg()
+                joy_msg.axes = [float(a) for a in data.get("axes", [])]
+                joy_msg.buttons = [int(b) for b in data.get("buttons", [])]
+                publisher.publish(joy_msg)
+
+                # Log occasionally
+                if not hasattr(self, "_dc_cmd_count"):
+                    self._dc_cmd_count = {}
+                self._dc_cmd_count[robot_id] = self._dc_cmd_count.get(robot_id, 0) + 1
+                if self._dc_cmd_count[robot_id] % 50 == 1:
+                    axes = joy_msg.axes
+                    self.get_logger().info(
+                        f"DC joy {self._dc_cmd_count[robot_id]} for {robot_id}: "
+                        f"axes[1]={axes[1] if len(axes) > 1 else 0:.2f} "
+                        f"axes[3]={axes[3] if len(axes) > 3 else 0:.2f}"
+                    )
+
+            elif msg_type == "camera_ptz":
+                publisher = self.ptz_publishers.get(robot_id)
+                if not publisher:
+                    self.get_logger().warning(f"No ptz publisher for {robot_id}")
+                    return
+
+                # Create and publish Int32MultiArray message [pan, tilt]
+                ptz_msg = Int32MultiArray()
+                ptz_msg.data = [int(data.get("pan", 90)), int(data.get("tilt", 90))]
+                publisher.publish(ptz_msg)
+
+                # Log occasionally
+                if not hasattr(self, "_dc_ptz_count"):
+                    self._dc_ptz_count = {}
+                self._dc_ptz_count[robot_id] = self._dc_ptz_count.get(robot_id, 0) + 1
+                if self._dc_ptz_count[robot_id] % 20 == 1:
+                    self.get_logger().info(
+                        f"DC ptz {self._dc_ptz_count[robot_id]} for {robot_id}: "
+                        f"pan={ptz_msg.data[0]}, tilt={ptz_msg.data[1]}"
+                    )
+
+        except (json.JSONDecodeError, ValueError) as exc:
+            self.get_logger().warning(f"Invalid control message for {robot_id}: {exc}")
+
     # ── Telemetry push ───────────────────────────────────────────────
 
     def _handle_telemetry(self, robot_id: str, msg: String) -> None:
-        """Forward telemetry data to the API."""
-        url = f"{self.telemetry_base}/{robot_id}"
+        """Forward telemetry data via data channel only."""
+        # Only send via data channel - no HTTP fallback
+        channel = self._telemetry_channels.get(robot_id)
+        if not channel or channel.readyState != "open":
+            return  # Drop silently if no channel
+
         try:
             payload = json.loads(msg.data)
-            resp = self.http_session.post(url, json=payload, headers=self.headers, timeout=2)
-            resp.raise_for_status()
-        except (json.JSONDecodeError, requests.RequestException) as exc:
-            self.get_logger().debug(f"Failed to push telemetry for {robot_id}: {exc}")
+        except json.JSONDecodeError as exc:
+            self.get_logger().debug(f"Invalid telemetry JSON for {robot_id}: {exc}")
+            return
+
+        try:
+            # Add type field for data channel protocol
+            dc_payload = {"type": "telemetry", **payload}
+            channel.send(json.dumps(dc_payload))
+            # Log occasionally
+            if not hasattr(self, "_dc_telemetry_count"):
+                self._dc_telemetry_count = {}
+            self._dc_telemetry_count[robot_id] = self._dc_telemetry_count.get(robot_id, 0) + 1
+            if self._dc_telemetry_count[robot_id] % 100 == 1:
+                self.get_logger().info(
+                    f"DC telemetry {self._dc_telemetry_count[robot_id]} for {robot_id}"
+                )
+        except Exception as exc:
+            self.get_logger().debug(f"Data channel send failed for {robot_id}: {exc}")
 
     # ── WebSocket ────────────────────────────────────────────────────
 
@@ -660,27 +796,22 @@ class RobotBridgeNode(Node):
         except Exception as exc:
             self.get_logger().debug(f"Failed to send command websocket message: {exc}")
 
-    # ── Command forwarding ───────────────────────────────────────────
+    # ── Command forwarding (legacy WebSocket path - deprecated) ─────
 
     def flush_command_queue(self) -> None:
+        """Flush legacy command queue. Commands now use data channels."""
         while not self.command_queue.empty():
             try:
                 payload = self.command_queue.get_nowait()
             except queue.Empty:
                 break
+            # Legacy cmd_vel commands are no longer supported
+            # Commands should come via data channel as joy messages
             robot = payload.get("robot")
             command = payload.get("command") or {}
-            publisher = self.command_publishers.get(robot or "")
-            if not publisher:
-                continue
-            twist = Twist()
-            twist.linear.x = float(command.get("linear_x", 0.0))
-            twist.linear.y = float(command.get("linear_y", 0.0))
-            twist.linear.z = float(command.get("linear_z", 0.0))
-            twist.angular.x = float(command.get("angular_x", 0.0))
-            twist.angular.y = float(command.get("angular_y", 0.0))
-            twist.angular.z = float(command.get("angular_z", 0.0))
-            publisher.publish(twist)
+            self.get_logger().debug(
+                f"Ignoring legacy WS command for {robot}: {command}"
+            )
             command_id = command.get("id")
             if command_id is None:
                 continue
@@ -689,7 +820,7 @@ class RobotBridgeNode(Node):
                     "type": "complete",
                     "robot": robot,
                     "command_id": command_id,
-                    "status": "delivered",
+                    "status": "deprecated",
                 }
             )
 

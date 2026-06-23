@@ -107,7 +107,7 @@ dev-ros:
 	docker run --rm --net=host \
 		-v $(CURDIR)/ros-bridge:/ros-bridge \
 		-e ROS_DOMAIN_ID=$(ROS_DOMAIN_ID) \
-		-e API_BASE_URL=http://localhost:8081/api \
+		-e API_BASE_URL=http://localhost:8080/api \
 		-e LOBBY_KEY=local-dev-key \
 		ros-bridge-humble
 

@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd -- "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-API_PORT="${API_PORT:-8081}"
+API_PORT="${API_PORT:-8080}"
 VENV_PATH="${API_VENV:-${ROOT_DIR}/api/.venv}"
 
 if [[ ! -x "${VENV_PATH}/bin/uvicorn" ]]; then

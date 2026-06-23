@@ -592,11 +592,11 @@
                   <div class="hud-overlay">
                     <div class="hud-row">
                       <div class="hud-panel">
-                        <p class="hint" style="margin:0;">Linear speed</p>
+                        <p class="hint" style="margin:0;">Fwd/Back</p>
                         <strong id="linear-speed-value">0.00 m/s</strong>
                       </div>
                       <div class="hud-panel">
-                        <p class="hint" style="margin:0;">Angular speed</p>
+                        <p class="hint" style="margin:0;">Turn</p>
                         <strong id="angular-speed-value">0.00 rad/s</strong>
                       </div>
                       <div class="hud-panel">
@@ -622,7 +622,7 @@
                 <h3 style="margin-top:0;">Active robot</h3>
                 <p class="hint" id="active-robot-label">None selected</p>
                 <p class="hint" id="teleop-instructions" style="margin-top:0.5rem;">
-                  Keyboard: W/S or ↑/↓ adjust throttle, A/D or ←/→ yaw, Q/E for flight-sim style yaw nudge, space resets speeds.
+                  Movement: WASD or arrows. Camera: IJKL (coming soon). Gamepad supported. Space to stop.
                 </p>
                 <div class="audio-controls">
                   <button id="mic-toggle-btn" class="ghost mic-btn muted" type="button" title="Toggle microphone">
@@ -783,14 +783,8 @@
           metaValue === 'undefined' ||
           metaValue.includes('VITE_API_BASE_URL');
         const resolvedMeta = isPlaceholder ? '' : metaValue;
-        const fallbackApiBase = 'http://localhost:8081/api';
+        const fallbackApiBase = 'http://localhost:8080/api';
         const staticApiBase = (resolvedMeta || fallbackApiBase).replace(/\/+$/, '');
-        const LINEAR_STEP = 0.1;
-        const LINEAR_FINE_STEP = 0.05;
-        const ANGULAR_STEP = 0.1;
-        const ANGULAR_FINE_STEP = 0.05;
-        const MAX_LINEAR_SPEED = 1.0;
-        const MAX_ANGULAR_SPEED = 1.0;
         const LOBBY_CACHE_KEY = 'arenaLobbyCache';
         const DEFAULT_ICE_SERVERS = [
           { urls: 'stun:stun.l.google.com:19302' },
@@ -882,6 +876,26 @@
           playbackContext: null,
           playbackQueue: [],
           playbackPlaying: false,
+          // Data channels for control and telemetry
+          controlChannel: null,
+          telemetryChannel: null,
+          // Joystick state (axes and buttons)
+          // axes[0]: left stick X, axes[1]: left stick Y (fwd/back)
+          // axes[2]: left trigger, axes[3]: right stick X (turn)
+          // axes[4]: right stick Y, axes[5]: right trigger
+          joyAxes: [0, 0, 0, 0, 0, 0],
+          joyButtons: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+          // Keyboard state for axis mapping
+          keysPressed: {},
+          // Gamepad polling
+          gamepadIndex: null,
+          gamepadPollInterval: null,
+          // Keyboard continuous sending interval
+          keySendInterval: null,
+          // Camera pan/tilt state (degrees, 0-180, center=90)
+          cameraPan: 90,
+          cameraTilt: 90,
+          cameraPtzInterval: null,
         };
         let lobbyFetchController = null;
 
@@ -1200,32 +1214,10 @@
           }
         }
 
-        function clamp(value, min, max) {
-          return Math.min(Math.max(value, min), max);
-        }
-
         function updateSpeedIndicators() {
+          // For backwards compatibility with telemetry display
           linearSpeedValue.textContent = `${state.linearSpeed.toFixed(2)} m/s`;
           angularSpeedValue.textContent = `${state.angularSpeed.toFixed(2)} rad/s`;
-        }
-
-        function resetSpeeds() {
-          state.linearSpeed = 0;
-          state.angularSpeed = 0;
-          updateSpeedIndicators();
-          sendVelocity(0, 0);
-        }
-
-        function adjustLinearSpeed(delta) {
-          state.linearSpeed = clamp(state.linearSpeed + delta, -MAX_LINEAR_SPEED, MAX_LINEAR_SPEED);
-          updateSpeedIndicators();
-          sendVelocity(state.linearSpeed, state.angularSpeed);
-        }
-
-        function adjustAngularSpeed(delta) {
-          state.angularSpeed = clamp(state.angularSpeed + delta, -MAX_ANGULAR_SPEED, MAX_ANGULAR_SPEED);
-          updateSpeedIndicators();
-          sendVelocity(state.linearSpeed, state.angularSpeed);
         }
 
         function updateFullscreenButton() {
@@ -1239,7 +1231,7 @@
           state.activeRobot = bot;
           activeRobotLabel.textContent = `${bot.name} (${bot.ros_namespace})`;
           setTeleopAvailability(true);
-          resetSpeeds();
+          resetJoy();
           setLobbyTab('teleop');
           teleopEmpty.hidden = true;
           teleopPane.hidden = false;
@@ -1257,8 +1249,9 @@
           state.activeRobot = null;
           activeRobotLabel.textContent = 'None selected';
           setTeleopAvailability(false);
-          resetSpeeds();
+          resetJoy();
           stopMicrophone();
+          stopGamepadPolling();
           teleopPane.hidden = true;
           teleopEmpty.hidden = false;
           logTelemetry('Teleop idle');
@@ -1266,6 +1259,15 @@
           if (state.ws) {
             state.ws.close();
             state.ws = null;
+          }
+          // Clean up data channels
+          if (state.controlChannel) {
+            state.controlChannel.close();
+            state.controlChannel = null;
+          }
+          if (state.telemetryChannel) {
+            state.telemetryChannel.close();
+            state.telemetryChannel = null;
           }
           if (state.pc) {
             state.pc.close();
@@ -1483,22 +1485,70 @@
           }
         }
 
-        function sendVelocity(linear, angular) {
+        function sendJoy() {
           if (!state.activeRobot) return;
-          const namespace = state.activeRobot.ros_namespace;
+
+          // Only send via data channel - no HTTP fallback for safety
+          if (!state.controlChannel || state.controlChannel.readyState !== 'open') {
+            return;  // Silently drop if channel not ready
+          }
+
           const payload = {
-            linear_x: linear,
-            linear_y: 0,
-            linear_z: 0,
-            angular_x: 0,
-            angular_y: 0,
-            angular_z: angular,
+            type: 'joy',
+            axes: state.joyAxes.slice(),  // Copy array
+            buttons: state.joyButtons.slice(),
+            timestamp: Date.now(),
           };
-          fetch(`${apiBase()}/robots/${encodeURIComponent(namespace)}/cmd_vel`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', ...authHeaders() },
-            body: JSON.stringify(payload),
-          }).catch((err) => console.error('Command failed', err));
+
+          // Debug log every 10th send
+          if (!state._joySendCount) state._joySendCount = 0;
+          state._joySendCount++;
+          if (state._joySendCount % 10 === 1) {
+            console.log(`[joy] #${state._joySendCount} axes[1]=${payload.axes[1]} axes[3]=${payload.axes[3]}`);
+          }
+
+          try {
+            state.controlChannel.send(JSON.stringify(payload));
+          } catch (err) {
+            console.error('[data] control channel send failed:', err);
+          }
+        }
+
+        function updateAxesFromKeyboard() {
+          // Map keyboard state to joystick axes
+          // axes[1]: forward/back (W/S, Up/Down)
+          // axes[3]: turn left/right (A/D, Left/Right)
+          const keys = state.keysPressed;
+
+          // Forward/back on axes[1] (positive = forward)
+          let fwdBack = 0;
+          if (keys['w'] || keys['arrowup']) fwdBack = 1;
+          if (keys['s'] || keys['arrowdown']) fwdBack = -1;
+
+          // Turn on axes[3] (positive = left, negative = right)
+          let turn = 0;
+          if (keys['a'] || keys['arrowleft']) turn = 1;
+          if (keys['d'] || keys['arrowright']) turn = -1;
+
+          // Detect changes for debugging
+          const prevFwd = state.joyAxes[1];
+          const prevTurn = state.joyAxes[3];
+          if (fwdBack !== prevFwd || turn !== prevTurn) {
+            console.log(`[axes] changed: fwd ${prevFwd}->${fwdBack}, turn ${prevTurn}->${turn}, keys:`, {...keys});
+          }
+
+          state.joyAxes[1] = fwdBack;
+          state.joyAxes[3] = turn;
+
+          // Update display
+          updateJoyIndicators();
+          sendJoy();
+        }
+
+        function updateJoyIndicators() {
+          // Display axes values (axes[1] = fwd/back, axes[3] = turn)
+          linearSpeedValue.textContent = `${state.joyAxes[1].toFixed(2)}`;
+          angularSpeedValue.textContent = `${state.joyAxes[3].toFixed(2)}`;
         }
 
         function logTelemetry(message) {
@@ -1511,6 +1561,10 @@
             state.pc.close();
             state.pc = null;
           }
+          // Clean up data channels
+          state.controlChannel = null;
+          state.telemetryChannel = null;
+
           console.info('[video] starting WebRTC for', namespace);
           const iceServers = await fetchIceServers();
           const pc = new RTCPeerConnection({ iceServers });
@@ -1539,6 +1593,44 @@
               });
             }
           });
+
+          // Handle incoming data channels (telemetry from API)
+          pc.addEventListener('datachannel', (event) => {
+            const channel = event.channel;
+            console.info('[data] received data channel:', channel.label);
+            if (channel.label === 'telemetry') {
+              state.telemetryChannel = channel;
+              channel.onopen = () => {
+                console.info('[data] telemetry channel open');
+                logTelemetry('Telemetry data channel connected');
+              };
+              channel.onclose = () => {
+                console.info('[data] telemetry channel closed');
+                state.telemetryChannel = null;
+              };
+              channel.onmessage = (event) => {
+                handleTelemetryData(event.data);
+              };
+            }
+          });
+
+          // Create control data channel (browser -> robot, unordered for low latency)
+          const controlChannel = pc.createDataChannel('control', {
+            ordered: false,
+            maxRetransmits: 2,
+          });
+          state.controlChannel = controlChannel;
+          controlChannel.onopen = () => {
+            console.info('[data] control channel open');
+            logTelemetry('Control data channel connected');
+          };
+          controlChannel.onclose = () => {
+            console.info('[data] control channel closed');
+            state.controlChannel = null;
+          };
+          controlChannel.onerror = (event) => {
+            console.warn('[data] control channel error:', event);
+          };
 
           // Request video from server (recvonly)
           pc.addTransceiver('video', { direction: 'recvonly' });
@@ -1601,46 +1693,258 @@
             });
         }
 
+        function handleTelemetryData(message) {
+          /**
+           * Handle telemetry data received via data channel.
+           */
+          try {
+            const data = JSON.parse(message);
+            if (data.type === 'telemetry') {
+              // Update actual speed from robot telemetry
+              if (typeof data.linear_speed === 'number') {
+                state.linearSpeed = data.linear_speed;
+              }
+              if (typeof data.angular_speed === 'number') {
+                state.angularSpeed = data.angular_speed;
+              }
+              updateSpeedIndicators();
+              logTelemetry(`[DC] vel: lin=${state.linearSpeed.toFixed(2)} ang=${state.angularSpeed.toFixed(2)}`);
+              if (typeof data.front_distance === 'number') {
+                frontDistanceValue.textContent = `${data.front_distance.toFixed(2)} m`;
+              }
+            }
+          } catch (err) {
+            console.warn('[data] failed to parse telemetry:', err);
+          }
+        }
+
         function updateTeleopKeyState() {
           window.__teleopKeysEnabled = Boolean(state.activeRobot && state.view === 'detail' && state.lobbyTab === 'teleop');
+          // Start/stop gamepad polling based on teleop state
+          if (window.__teleopKeysEnabled) {
+            startGamepadPolling();
+          } else {
+            stopGamepadPolling();
+          }
         }
 
         function handleKey(event, isKeyDown) {
           if (!window.__teleopKeysEnabled) return;
           const key = event.key.toLowerCase();
-          if (event.repeat && isKeyDown) return;
-          if (key === ' ') {
+
+          // Movement keys (WASD / arrows)
+          const movementKeys = ['w', 's', 'a', 'd', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright'];
+          if (movementKeys.includes(key)) {
             event.preventDefault();
-            if (isKeyDown) resetSpeeds();
+            const wasPressed = Object.values(state.keysPressed).some(v => v);
+            state.keysPressed[key] = isKeyDown;
+            const isPressed = Object.values(state.keysPressed).some(v => v);
+
+            // Debug: log key state changes
+            console.log(`[key] ${isKeyDown ? 'down' : 'up'} '${key}' wasPressed=${wasPressed} isPressed=${isPressed} interval=${!!state.keySendInterval}`);
+
+            // Start/stop continuous sending based on whether any key is held
+            if (isPressed && !wasPressed) {
+              console.log('[key] Starting continuous send');
+              startKeySending();
+            } else if (!isPressed && wasPressed) {
+              console.log('[key] Stopping continuous send');
+              stopKeySending();
+              updateAxesFromKeyboard(); // Send final zero state
+            }
             return;
           }
-          if (!isKeyDown) return;
-          const actions = {
-            w: () => adjustLinearSpeed(LINEAR_STEP),
-            arrowup: () => adjustLinearSpeed(LINEAR_STEP),
-            i: () => adjustLinearSpeed(LINEAR_STEP),
-            s: () => adjustLinearSpeed(-LINEAR_STEP),
-            arrowdown: () => adjustLinearSpeed(-LINEAR_STEP),
-            k: () => adjustLinearSpeed(-LINEAR_STEP),
-            r: () => adjustLinearSpeed(LINEAR_FINE_STEP),
-            f: () => adjustLinearSpeed(-LINEAR_FINE_STEP),
-            pageup: () => adjustLinearSpeed(LINEAR_FINE_STEP),
-            pagedown: () => adjustLinearSpeed(-LINEAR_FINE_STEP),
-            a: () => adjustAngularSpeed(ANGULAR_STEP),
-            arrowleft: () => adjustAngularSpeed(ANGULAR_STEP),
-            j: () => adjustAngularSpeed(ANGULAR_STEP),
-            d: () => adjustAngularSpeed(-ANGULAR_STEP),
-            arrowright: () => adjustAngularSpeed(-ANGULAR_STEP),
-            l: () => adjustAngularSpeed(-ANGULAR_STEP),
-            q: () => adjustAngularSpeed(ANGULAR_FINE_STEP),
-            e: () => adjustAngularSpeed(-ANGULAR_FINE_STEP),
-          };
-          const action = actions[key];
-          if (action) {
+
+          // Camera pan/tilt keys (IJKL)
+          const cameraKeys = ['i', 'j', 'k', 'l'];
+          if (cameraKeys.includes(key)) {
             event.preventDefault();
-            action();
+            state.keysPressed[key] = isKeyDown;
+
+            // Start/stop camera movement based on whether any camera key is held
+            const anyCameraKeyHeld = cameraKeys.some(k => state.keysPressed[k]);
+            if (anyCameraKeyHeld && !state.cameraPtzInterval) {
+              startCameraPtz();
+            } else if (!anyCameraKeyHeld && state.cameraPtzInterval) {
+              stopCameraPtz();
+            }
+            return;
+          }
+
+          // Space to reset
+          if (key === ' ' && isKeyDown) {
+            event.preventDefault();
+            resetJoy();
+            return;
           }
         }
+
+        function startKeySending() {
+          if (state.keySendInterval) return;
+          // Send joy state at 20Hz while keys are held
+          updateAxesFromKeyboard(); // Send immediately
+          state.keySendInterval = setInterval(() => {
+            updateAxesFromKeyboard();
+          }, 50);
+        }
+
+        function stopKeySending() {
+          if (state.keySendInterval) {
+            clearInterval(state.keySendInterval);
+            state.keySendInterval = null;
+          }
+        }
+
+        // Camera pan/tilt control (IJKL keys)
+        const CAMERA_STEP = 5;  // Degrees per update
+        const CAMERA_MIN = 0;
+        const CAMERA_MAX = 180;
+
+        function startCameraPtz() {
+          if (state.cameraPtzInterval) return;
+          updateCameraPtz();
+          state.cameraPtzInterval = setInterval(updateCameraPtz, 100);
+        }
+
+        function stopCameraPtz() {
+          if (state.cameraPtzInterval) {
+            clearInterval(state.cameraPtzInterval);
+            state.cameraPtzInterval = null;
+          }
+        }
+
+        function updateCameraPtz() {
+          const keys = state.keysPressed;
+          let changed = false;
+
+          // I = tilt up, K = tilt down
+          if (keys['i']) {
+            state.cameraTilt = Math.min(CAMERA_MAX, state.cameraTilt + CAMERA_STEP);
+            changed = true;
+          }
+          if (keys['k']) {
+            state.cameraTilt = Math.max(CAMERA_MIN, state.cameraTilt - CAMERA_STEP);
+            changed = true;
+          }
+
+          // J = pan left, L = pan right
+          if (keys['j']) {
+            state.cameraPan = Math.min(CAMERA_MAX, state.cameraPan + CAMERA_STEP);
+            changed = true;
+          }
+          if (keys['l']) {
+            state.cameraPan = Math.max(CAMERA_MIN, state.cameraPan - CAMERA_STEP);
+            changed = true;
+          }
+
+          if (changed) {
+            sendCameraPtz();
+          }
+        }
+
+        function sendCameraPtz() {
+          if (!state.controlChannel || state.controlChannel.readyState !== 'open') {
+            return;
+          }
+          const payload = {
+            type: 'camera_ptz',
+            pan: Math.round(state.cameraPan),
+            tilt: Math.round(state.cameraTilt),
+            timestamp: Date.now(),
+          };
+          try {
+            state.controlChannel.send(JSON.stringify(payload));
+          } catch (err) {
+            console.error('[data] camera_ptz send failed:', err);
+          }
+        }
+
+        function resetJoy() {
+          stopKeySending();
+          stopCameraPtz();
+          state.joyAxes = [0, 0, 0, 0, 0, 0];
+          state.joyButtons = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+          state.keysPressed = {};
+          // Reset camera to center
+          state.cameraPan = 90;
+          state.cameraTilt = 90;
+          updateJoyIndicators();
+          sendJoy();
+          sendCameraPtz();
+        }
+
+        // Gamepad support
+        function startGamepadPolling() {
+          if (state.gamepadPollInterval) return;
+          state.gamepadPollInterval = setInterval(pollGamepad, 16);  // ~60fps
+          console.info('[gamepad] polling started');
+        }
+
+        function stopGamepadPolling() {
+          if (state.gamepadPollInterval) {
+            clearInterval(state.gamepadPollInterval);
+            state.gamepadPollInterval = null;
+            console.info('[gamepad] polling stopped');
+          }
+        }
+
+        function pollGamepad() {
+          const gamepads = navigator.getGamepads ? navigator.getGamepads() : [];
+          let gp = null;
+
+          // Find first connected gamepad
+          for (let i = 0; i < gamepads.length; i++) {
+            if (gamepads[i] && gamepads[i].connected) {
+              gp = gamepads[i];
+              break;
+            }
+          }
+
+          if (!gp) {
+            // No gamepad, use keyboard state
+            return;
+          }
+
+          // If keyboard keys are pressed, prefer keyboard
+          if (Object.values(state.keysPressed).some(v => v)) {
+            return;
+          }
+
+          // Map gamepad axes (apply deadzone)
+          const DEADZONE = 0.15;
+          const applyDeadzone = (val) => Math.abs(val) < DEADZONE ? 0 : val;
+
+          // Standard gamepad mapping:
+          // axes[0]: left stick X, axes[1]: left stick Y
+          // axes[2]: right stick X, axes[3]: right stick Y
+          // We map to our format:
+          // our axes[1]: forward/back (gp left stick Y, inverted)
+          // our axes[3]: turn (gp right stick X or left stick X)
+          state.joyAxes[0] = applyDeadzone(gp.axes[0] || 0);  // left stick X
+          state.joyAxes[1] = -applyDeadzone(gp.axes[1] || 0); // left stick Y (inverted: up = positive)
+          state.joyAxes[2] = gp.buttons[6] ? gp.buttons[6].value : 0;  // left trigger
+          state.joyAxes[3] = applyDeadzone(gp.axes[2] || 0);  // right stick X
+          state.joyAxes[4] = -applyDeadzone(gp.axes[3] || 0); // right stick Y (inverted)
+          state.joyAxes[5] = gp.buttons[7] ? gp.buttons[7].value : 0;  // right trigger
+
+          // Map buttons
+          for (let i = 0; i < Math.min(gp.buttons.length, state.joyButtons.length); i++) {
+            state.joyButtons[i] = gp.buttons[i].pressed ? 1 : 0;
+          }
+
+          updateJoyIndicators();
+          sendJoy();
+        }
+
+        window.addEventListener('gamepadconnected', (e) => {
+          console.info('[gamepad] connected:', e.gamepad.id);
+          logTelemetry(`Gamepad connected: ${e.gamepad.id}`);
+        });
+
+        window.addEventListener('gamepaddisconnected', (e) => {
+          console.info('[gamepad] disconnected:', e.gamepad.id);
+          logTelemetry('Gamepad disconnected');
+        });
 
         window.addEventListener('keydown', (event) => handleKey(event, true));
         window.addEventListener('keyup', (event) => handleKey(event, false));

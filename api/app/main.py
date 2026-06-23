@@ -12,7 +12,7 @@ from enum import Enum
 from typing import Any, Dict, Optional, TypeVar
 
 import numpy as np
-from aiortc import AudioStreamTrack, MediaStreamTrack, RTCPeerConnection, RTCSessionDescription
+from aiortc import AudioStreamTrack, MediaStreamTrack, RTCDataChannel, RTCPeerConnection, RTCSessionDescription
 from aiortc.contrib.media import MediaRelay
 from av import AudioFrame
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, WebSocket, WebSocketDisconnect
@@ -200,11 +200,21 @@ latest_telemetry: Dict[str, Dict[str, Any]] = {}
 
 # Browser audio relay tracks - for forwarding browser mic audio to ros-bridge (Hop 1)
 browser_audio_relay_tracks: Dict[str, "BrowserAudioRelayTrack"] = {}
+# Active browser audio forwarding tasks (key: "robot_id:user_email")
+browser_audio_forward_tasks: Dict[str, asyncio.Task] = {}
 
 # Track browser PCs by user for renegotiation (key: "robot_id:user_email")
 browser_user_pcs: Dict[str, RTCPeerConnection] = {}
 # Robot audio broadcasters - consumes Hop1 audio and broadcasts to Hop2 subscribers
 robot_audio_broadcasters: Dict[str, "RobotAudioBroadcaster"] = {}
+
+# Data channels for control and telemetry relay
+# Hop1: ros-bridge <-> API
+hop1_telemetry_channels: Dict[str, RTCDataChannel] = {}  # robot_id -> channel from ros-bridge
+hop1_control_channels: Dict[str, RTCDataChannel] = {}    # robot_id -> channel to ros-bridge
+# Hop2: API <-> Browser(s)
+hop2_telemetry_channels: Dict[str, list[RTCDataChannel]] = defaultdict(list)  # robot_id -> list of channels to browsers
+hop2_control_channels: Dict[str, list[RTCDataChannel]] = defaultdict(list)    # robot_id -> list of channels from browsers
 
 
 class RobotAudioBroadcaster:
@@ -356,21 +366,37 @@ class Hop1AudioTrack(AudioStreamTrack):
         logger.info("Hop1AudioTrack created for %s (wrapping incoming Hop1 audio)", robot_id)
 
     async def recv(self) -> AudioFrame:
-        """Get frame from source and log RMS to verify audio is arriving."""
+        """Get frame from source, extract mono from stereo to fix Opus duplication."""
         frame = await self.source_track.recv()
         self._frame_count += 1
 
-        # Log RMS for first few frames and periodically
+        # Convert to numpy
+        arr = frame.to_ndarray()
+
+        # Log format for debugging
         if self._frame_count <= 5 or self._frame_count % 100 == 0:
             try:
-                arr = frame.to_ndarray()
                 rms = np.sqrt(np.mean(arr.astype(np.float32)**2))
-                logger.info("Hop1AudioTrack: frame %d for %s - rms=%.1f, samples=%d, rate=%d",
-                            self._frame_count, self.robot_id, rms, frame.samples, frame.sample_rate)
+                logger.info("Hop1AudioTrack: frame %d for %s - shape=%s, rms=%.1f, samples=%d, rate=%d",
+                            self._frame_count, self.robot_id, arr.shape, rms, frame.samples, frame.sample_rate)
             except Exception as e:
                 logger.warning("Hop1AudioTrack: couldn't compute RMS for %s: %s", self.robot_id, e)
 
-        return frame
+        # Extract mono from stereo to undo Opus duplication
+        # ros-bridge sends interleaved stereo (L,R,L,R), extract left channel
+        samples = arr.flatten()
+        if len(samples) > frame.samples:
+            # Interleaved stereo - extract left channel
+            samples = samples[::2]
+
+        # Create mono frame for downstream
+        mono_frame = AudioFrame.from_ndarray(
+            samples.reshape(1, -1).astype(np.int16), format="s16", layout="mono"
+        )
+        mono_frame.sample_rate = frame.sample_rate
+        mono_frame.pts = frame.pts
+
+        return mono_frame
 
 
 class AudioLoggingTrack(AudioStreamTrack):
@@ -1787,6 +1813,7 @@ async def handle_forwarder_offer(ws: WebSocket, message: dict) -> None:
     """Hop 1: accept the forwarder's WebRTC offer, store the incoming track.
 
     Bidirectional: receives video + robot audio, sends browser audio.
+    Also handles data channels for telemetry (receive) and control (send).
     """
     robot = (message.get("robot") or "").strip()
     sdp = message.get("sdp", "")
@@ -1807,6 +1834,10 @@ async def handle_forwarder_offer(ws: WebSocket, message: dict) -> None:
     old_relay = browser_audio_relay_tracks.pop(robot, None)
     if old_relay:
         old_relay.stop()
+
+    # Clean up old data channels
+    hop1_telemetry_channels.pop(robot, None)
+    hop1_control_channels.pop(robot, None)
 
     pc = RTCPeerConnection()
     robot_forwarder_pcs[robot] = pc
@@ -1832,6 +1863,27 @@ async def handle_forwarder_offer(ws: WebSocket, message: dict) -> None:
             if audio_evt:
                 audio_evt.set()
 
+    @pc.on("datachannel")
+    def on_datachannel(channel: RTCDataChannel) -> None:
+        """Handle incoming data channels from ros-bridge (telemetry)."""
+        logger.info("SFU Hop1: received data channel '%s' from ros-bridge for %s", channel.label, robot)
+        if channel.label == "telemetry":
+            hop1_telemetry_channels[robot] = channel
+
+            @channel.on("message")
+            def on_telemetry_message(message: str) -> None:
+                """Relay telemetry from ros-bridge to all connected browsers."""
+                _relay_telemetry_to_browsers(robot, message)
+
+            @channel.on("open")
+            def on_open() -> None:
+                logger.info("SFU Hop1: telemetry data channel open for %s", robot)
+
+            @channel.on("close")
+            def on_close() -> None:
+                logger.info("SFU Hop1: telemetry data channel closed for %s", robot)
+                hop1_telemetry_channels.pop(robot, None)
+
     @pc.on("connectionstatechange")
     async def on_state() -> None:
         state = pc.connectionState
@@ -1844,6 +1896,11 @@ async def handle_forwarder_offer(ws: WebSocket, message: dict) -> None:
             relay = browser_audio_relay_tracks.pop(robot, None)
             if relay:
                 relay.stop()
+            # Clean up data channels
+            hop1_telemetry_channels.pop(robot, None)
+            hop1_control_channels.pop(robot, None)
+            hop2_telemetry_channels.pop(robot, None)
+            hop2_control_channels.pop(robot, None)
             # Close all Hop 2 PCs for this robot
             browser_pcs = robot_browser_pcs.pop(robot, [])
             for bpc in browser_pcs:
@@ -1863,6 +1920,19 @@ async def handle_forwarder_offer(ws: WebSocket, message: dict) -> None:
     # This creates a new m-line in the answer for sending audio to ros-bridge
     pc.addTrack(browser_relay)
     logger.info("SFU Hop1: added browser audio relay for %s", robot)
+
+    # Create control data channel to send commands to ros-bridge
+    control_channel = pc.createDataChannel("control", ordered=False)
+    hop1_control_channels[robot] = control_channel
+
+    @control_channel.on("open")
+    def on_control_open() -> None:
+        logger.info("SFU Hop1: control data channel open for %s", robot)
+
+    @control_channel.on("close")
+    def on_control_close() -> None:
+        logger.info("SFU Hop1: control data channel closed for %s", robot)
+        hop1_control_channels.pop(robot, None)
 
     answer = await pc.createAnswer()
     await pc.setLocalDescription(answer)
@@ -1885,6 +1955,7 @@ async def start_webrtc(
     """Hop 2: relay the forwarder's track to this browser viewer.
 
     Bidirectional: sends video + robot audio, receives browser audio.
+    Also handles data channels for telemetry (send) and control (receive).
     Supports renegotiation (e.g., when browser adds mic track).
     """
     # Check if this is a renegotiation (user already has a PC for this robot)
@@ -1894,7 +1965,8 @@ async def start_webrtc(
                 robot_id, current_user.email, existing_pc is not None,
                 existing_pc.connectionState if existing_pc else "none")
 
-    if existing_pc and existing_pc.connectionState not in ("closed", "failed"):
+    # Only renegotiate if PC is fully connected (not disconnected/connecting)
+    if existing_pc and existing_pc.connectionState == "connected":
         # Renegotiation: reuse existing PC
         logger.info("SFU Hop2: renegotiating for %s (user=%s)", robot_id, current_user.email)
         pc = existing_pc
@@ -1902,6 +1974,15 @@ async def start_webrtc(
         answer = await pc.createAnswer()
         await pc.setLocalDescription(answer)
         return {"sdp": pc.localDescription.sdp, "type": pc.localDescription.type}
+
+    # Clean up existing PC if it exists but isn't connected
+    if existing_pc:
+        logger.info("SFU Hop2: closing stale PC for %s (state=%s)", user_pc_key, existing_pc.connectionState)
+        browser_user_pcs.pop(user_pc_key, None)
+        pcs = robot_browser_pcs.get(robot_id, [])
+        if existing_pc in pcs:
+            pcs.remove(existing_pc)
+        await existing_pc.close()
 
     # Track active viewers and trigger stream start if first viewer
     was_empty = not active_robot_streams.get(robot_id)
@@ -1943,9 +2024,38 @@ async def start_webrtc(
     def on_browser_track(track: MediaStreamTrack) -> None:
         """Handle incoming audio track from browser mic."""
         if track.kind == "audio":
-            logger.info("SFU Hop2: received browser audio track for %s", robot_id)
-            # Forward browser audio to the relay track (which sends to ros-bridge)
-            asyncio.ensure_future(_forward_browser_audio(robot_id, track))
+            logger.info("SFU Hop2: received browser audio track for %s (user=%s)", robot_id, current_user.email)
+            # Cancel any existing forwarding task for this user
+            old_task = browser_audio_forward_tasks.pop(user_pc_key, None)
+            if old_task and not old_task.done():
+                logger.info("SFU Hop2: cancelling old audio forward task for %s", user_pc_key)
+                old_task.cancel()
+            # Start new forwarding task
+            task = asyncio.ensure_future(_forward_browser_audio(robot_id, track))
+            browser_audio_forward_tasks[user_pc_key] = task
+
+    @pc.on("datachannel")
+    def on_browser_datachannel(channel: RTCDataChannel) -> None:
+        """Handle incoming data channels from browser (control commands)."""
+        logger.info("SFU Hop2: received data channel '%s' from browser for %s (user=%s)",
+                    channel.label, robot_id, current_user.email)
+        if channel.label == "control":
+            hop2_control_channels[robot_id].append(channel)
+
+            @channel.on("message")
+            def on_control_message(message: str) -> None:
+                """Relay control commands from browser to ros-bridge."""
+                _relay_control_to_robot(robot_id, message)
+
+            @channel.on("open")
+            def on_open() -> None:
+                logger.info("SFU Hop2: control data channel open for %s (user=%s)", robot_id, current_user.email)
+
+            @channel.on("close")
+            def on_close() -> None:
+                logger.info("SFU Hop2: control data channel closed for %s (user=%s)", robot_id, current_user.email)
+                if channel in hop2_control_channels.get(robot_id, []):
+                    hop2_control_channels[robot_id].remove(channel)
 
     @pc.on("connectionstatechange")
     async def on_state() -> None:
@@ -1958,8 +2068,12 @@ async def start_webrtc(
             if pc in pcs:
                 pcs.remove(pc)
                 logger.info("SFU Hop2: removed pc, remaining=%d", len(pcs))
-            # Clean up user PC tracking
+            # Clean up user PC tracking and audio forward task
             browser_user_pcs.pop(user_pc_key, None)
+            old_task = browser_audio_forward_tasks.pop(user_pc_key, None)
+            if old_task and not old_task.done():
+                old_task.cancel()
+            # Note: data channels are cleaned up in their on_close handlers
             await pc.close()
             # Don't auto-stop stream - let it keep running to avoid race conditions
             remaining = robot_browser_pcs.get(robot_id)
@@ -1971,12 +2085,65 @@ async def start_webrtc(
         pc.addTrack(relayed_audio_track)
         logger.info("SFU Hop2: added robot audio track for %s", robot_id)
 
+    # Create telemetry data channel to send to browser
+    telemetry_channel = pc.createDataChannel("telemetry", ordered=False)
+    hop2_telemetry_channels[robot_id].append(telemetry_channel)
+
+    @telemetry_channel.on("open")
+    def on_telemetry_open() -> None:
+        logger.info("SFU Hop2: telemetry data channel open for %s (user=%s)", robot_id, current_user.email)
+
+    @telemetry_channel.on("close")
+    def on_telemetry_close() -> None:
+        logger.info("SFU Hop2: telemetry data channel closed for %s (user=%s)", robot_id, current_user.email)
+        if telemetry_channel in hop2_telemetry_channels.get(robot_id, []):
+            hop2_telemetry_channels[robot_id].remove(telemetry_channel)
+
     browser_offer = RTCSessionDescription(sdp=offer.sdp, type=offer.type)
     await pc.setRemoteDescription(browser_offer)
     answer = await pc.createAnswer()
     await pc.setLocalDescription(answer)
 
     return {"sdp": pc.localDescription.sdp, "type": pc.localDescription.type}
+
+
+def _relay_telemetry_to_browsers(robot_id: str, message: str) -> None:
+    """Relay telemetry from ros-bridge to all connected browsers via data channels."""
+    channels = hop2_telemetry_channels.get(robot_id, [])
+    if not channels:
+        return
+    # Log occasionally
+    if not hasattr(_relay_telemetry_to_browsers, "_count"):
+        _relay_telemetry_to_browsers._count = {}
+    _relay_telemetry_to_browsers._count[robot_id] = _relay_telemetry_to_browsers._count.get(robot_id, 0) + 1
+    if _relay_telemetry_to_browsers._count[robot_id] % 100 == 1:
+        logger.info("DC relay telemetry %d for %s to %d browsers",
+                    _relay_telemetry_to_browsers._count[robot_id], robot_id, len(channels))
+    # Send to all browser channels
+    for channel in channels:
+        if channel.readyState == "open":
+            try:
+                channel.send(message)
+            except Exception as e:
+                logger.debug("Failed to relay telemetry to browser for %s: %s", robot_id, e)
+
+
+def _relay_control_to_robot(robot_id: str, message: str) -> None:
+    """Relay control command from browser to ros-bridge via data channel."""
+    channel = hop1_control_channels.get(robot_id)
+    if not channel or channel.readyState != "open":
+        logger.debug("No control channel for %s, dropping command", robot_id)
+        return
+    try:
+        channel.send(message)
+        # Log occasionally
+        if not hasattr(_relay_control_to_robot, "_count"):
+            _relay_control_to_robot._count = {}
+        _relay_control_to_robot._count[robot_id] = _relay_control_to_robot._count.get(robot_id, 0) + 1
+        if _relay_control_to_robot._count[robot_id] % 50 == 1:
+            logger.info("DC relay control %d for %s", _relay_control_to_robot._count[robot_id], robot_id)
+    except Exception as e:
+        logger.warning("Failed to relay control to robot %s: %s", robot_id, e)
 
 
 async def _forward_browser_audio(robot_id: str, track: MediaStreamTrack) -> None:

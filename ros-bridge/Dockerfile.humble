@@ -9,7 +9,11 @@ RUN apt-get update && apt-get install -y \
     libvpx-dev \
     pkg-config \
     ros-humble-rosbridge-server \
+    ros-humble-rmw-fastrtps-cpp \
     && rm -rf /var/lib/apt/lists/*
+
+# Set FastRTPS as the RMW implementation
+ENV RMW_IMPLEMENTATION=rmw_fastrtps_cpp
 
 # Install Python dependencies
 RUN pip3 install aiortc av numpy requests websocket-client
