@@ -519,20 +519,25 @@ class RobotBridgeNode(Node):
                 # Convert AudioFrame to raw PCM bytes (S16_LE)
                 samples = frame.to_ndarray()
 
-                # Debug: log format on first few frames
-                if frame_count <= 3:
+                # Debug: log format and RMS on first few frames and periodically
+                if frame_count <= 5 or frame_count % 50 == 0:
+                    rms = np.sqrt(np.mean(samples.astype(np.float32)**2))
                     self.get_logger().info(
                         f"Browser audio format for {robot}: dtype={samples.dtype}, shape={samples.shape}, "
-                        f"min={samples.min():.2f}, max={samples.max():.2f}"
+                        f"rms={rms:.1f}, min={samples.min()}, max={samples.max()}, first_samples={samples.flatten()[:10].tolist()}"
                     )
 
                 # Convert float to int16 if needed
                 if samples.dtype != np.int16:
                     samples = (samples * 32767).astype(np.int16)
 
-                # Flatten to mono if stereo
-                if samples.ndim > 1:
-                    samples = samples[0]
+                # Flatten array
+                samples = samples.flatten()
+
+                # Handle interleaved stereo: extract left channel (every other sample)
+                # API sends interleaved stereo (L,R,L,R) to work around Opus duplication
+                if len(samples) == 1920:
+                    samples = samples[::2]  # Extract left channel (960 samples)
 
                 # Convert to bytes and publish
                 audio_bytes = samples.tobytes()

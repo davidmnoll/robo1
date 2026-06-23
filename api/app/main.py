@@ -200,6 +200,9 @@ latest_telemetry: Dict[str, Dict[str, Any]] = {}
 
 # Browser audio relay tracks - for forwarding browser mic audio to ros-bridge (Hop 1)
 browser_audio_relay_tracks: Dict[str, "BrowserAudioRelayTrack"] = {}
+
+# Track browser PCs by user for renegotiation (key: "robot_id:user_email")
+browser_user_pcs: Dict[str, RTCPeerConnection] = {}
 # Robot audio broadcasters - consumes Hop1 audio and broadcasts to Hop2 subscribers
 robot_audio_broadcasters: Dict[str, "RobotAudioBroadcaster"] = {}
 
@@ -409,45 +412,79 @@ class BrowserAudioRelayTrack(AudioStreamTrack):
 
     This track is added to Hop 1 (API -> ros-bridge) to send browser audio.
     Audio frames are pushed from Hop 2 when browser sends mic data.
+    Splits incoming frames into 20ms chunks (960 samples) for Opus compatibility.
     """
 
     kind = "audio"
+    SAMPLES_PER_FRAME = 960  # 20ms at 48kHz - required for Opus
 
     def __init__(self, robot_id: str, sample_rate: int = 48000, channels: int = 1) -> None:
         super().__init__()
         self.robot_id = robot_id
         self.sample_rate = sample_rate
         self.channels = channels
-        self._queue: asyncio.Queue = asyncio.Queue(maxsize=50)
+        self._queue: asyncio.Queue = asyncio.Queue(maxsize=100)
         self._pts = 0
         self._running = True
+        self._push_count = 0
+        self._recv_count = 0
+        self._buffer = np.array([], dtype=np.int16)  # Buffer for splitting frames
 
     def push_frame(self, frame: AudioFrame) -> None:
         """Push an audio frame to the relay queue (called from Hop 2 track handler).
 
-        Normalizes frame to mono 48kHz s16 format to avoid resampler mismatches.
+        Normalizes frame to mono 48kHz s16 format and splits into 20ms chunks.
         """
         try:
-            # Convert frame to numpy, mix to mono if stereo, then recreate frame
-            arr = frame.to_ndarray()  # shape: (channels, samples)
+            # Convert frame to numpy
+            arr = frame.to_ndarray()  # shape depends on format
+
+            self._push_count += 1
+            # Log RMS for first few frames and periodically
+            if self._push_count <= 5 or self._push_count % 100 == 0:
+                rms = np.sqrt(np.mean(arr.astype(np.float32)**2))
+                logger.info("BrowserAudioRelay push_frame %d for %s: shape=%s, dtype=%s, rms=%.1f, min=%d, max=%d, frame.samples=%d",
+                            self._push_count, self.robot_id, arr.shape, arr.dtype, rms, arr.min(), arr.max(), frame.samples)
+
+            # Handle different stereo formats
             if arr.shape[0] > 1:
-                # Mix stereo to mono by averaging channels
-                arr = arr.mean(axis=0, keepdims=True).astype(np.int16)
+                # Planar stereo (2, N): take left channel
+                samples = arr[0].astype(np.int16)
+            elif arr.shape[1] > frame.samples:
+                # Packed/interleaved stereo (1, N*2): extract left channel (every other sample)
+                samples = arr.flatten()[::2].astype(np.int16)
+            else:
+                # Mono (1, N): use as-is
+                samples = arr.flatten()
 
-            normalized = AudioFrame.from_ndarray(arr, format="s16", layout="mono")
-            normalized.sample_rate = self.sample_rate
-            normalized.pts = frame.pts
+            self._buffer = np.concatenate([self._buffer, samples])
 
-            self._queue.put_nowait(normalized)
-        except asyncio.QueueFull:
-            # Drop oldest frame if queue is full
-            try:
-                self._queue.get_nowait()
-                self._queue.put_nowait(normalized)
-            except (asyncio.QueueEmpty, asyncio.QueueFull):
-                pass
-        except Exception:
-            pass  # Skip malformed frames
+            # Split buffer into 20ms chunks (960 samples)
+            while len(self._buffer) >= self.SAMPLES_PER_FRAME:
+                chunk = self._buffer[:self.SAMPLES_PER_FRAME]
+                self._buffer = self._buffer[self.SAMPLES_PER_FRAME:]
+
+                # Create interleaved stereo to work around Opus sample duplication
+                # PyAV packed stereo expects shape (1, samples*2) with L,R,L,R pattern
+                chunk_interleaved = np.empty(len(chunk) * 2, dtype=np.int16)
+                chunk_interleaved[0::2] = chunk  # Left channel
+                chunk_interleaved[1::2] = chunk  # Right channel (same data)
+                audio_frame = AudioFrame.from_ndarray(
+                    chunk_interleaved.reshape(1, -1), format="s16", layout="stereo"
+                )
+                audio_frame.sample_rate = self.sample_rate
+
+                try:
+                    self._queue.put_nowait(audio_frame)
+                except asyncio.QueueFull:
+                    # Drop oldest frame if queue is full
+                    try:
+                        self._queue.get_nowait()
+                        self._queue.put_nowait(audio_frame)
+                    except (asyncio.QueueEmpty, asyncio.QueueFull):
+                        pass
+        except Exception as e:
+            logger.warning("BrowserAudioRelay push_frame error for %s: %s", self.robot_id, e)
 
     async def recv(self) -> AudioFrame:
         """Receive the next audio frame to send to ros-bridge."""
@@ -457,11 +494,23 @@ class BrowserAudioRelayTrack(AudioStreamTrack):
                 # Update pts for proper timing
                 frame.pts = self._pts
                 self._pts += frame.samples
+
+                self._recv_count += 1
+                # Log RMS for first few frames and periodically
+                if self._recv_count <= 5 or self._recv_count % 100 == 0:
+                    try:
+                        arr = frame.to_ndarray()
+                        rms = np.sqrt(np.mean(arr.astype(np.float32)**2))
+                        logger.info("BrowserAudioRelay recv %d for %s: rms=%.1f, samples=%d, shape=%s, qsize=%d",
+                                    self._recv_count, self.robot_id, rms, frame.samples, arr.shape, self._queue.qsize())
+                    except Exception as e:
+                        logger.warning("BrowserAudioRelay recv logging error: %s", e)
+
                 return frame
             except asyncio.TimeoutError:
-                # Generate silence if no audio available
-                samples = np.zeros((1, 960), dtype=np.int16)  # 20ms of silence at 48kHz
-                frame = AudioFrame.from_ndarray(samples, format="s16", layout="mono")
+                # Generate silence in stereo to match push_frame format
+                silence = np.zeros(1920, dtype=np.int16)  # 20ms stereo at 48kHz (interleaved)
+                frame = AudioFrame.from_ndarray(silence.reshape(1, -1), format="s16", layout="stereo")
                 frame.sample_rate = self.sample_rate
                 frame.pts = self._pts
                 self._pts += frame.samples
@@ -1773,8 +1822,10 @@ async def handle_forwarder_offer(ws: WebSocket, message: dict) -> None:
             if evt:
                 evt.set()
         elif track.kind == "audio":
-            robot_incoming_audio_tracks[robot] = track
-            logger.info("SFU: stored audio track for %s", robot)
+            # Wrap with Hop1AudioTrack to log RMS values
+            wrapped_track = Hop1AudioTrack(track, robot)
+            robot_incoming_audio_tracks[robot] = wrapped_track
+            logger.info("SFU: stored audio track for %s (wrapped with Hop1AudioTrack)", robot)
 
             # Set audio track ready event
             audio_evt = robot_audio_track_ready.get(robot)
@@ -1807,6 +1858,9 @@ async def handle_forwarder_offer(ws: WebSocket, message: dict) -> None:
     # Create browser audio relay track to send browser mic audio to ros-bridge
     browser_relay = BrowserAudioRelayTrack(robot)
     browser_audio_relay_tracks[robot] = browser_relay
+
+    # Add browser audio relay as a new track
+    # This creates a new m-line in the answer for sending audio to ros-bridge
     pc.addTrack(browser_relay)
     logger.info("SFU Hop1: added browser audio relay for %s", robot)
 
@@ -1831,7 +1885,24 @@ async def start_webrtc(
     """Hop 2: relay the forwarder's track to this browser viewer.
 
     Bidirectional: sends video + robot audio, receives browser audio.
+    Supports renegotiation (e.g., when browser adds mic track).
     """
+    # Check if this is a renegotiation (user already has a PC for this robot)
+    user_pc_key = f"{robot_id}:{current_user.email}"
+    existing_pc = browser_user_pcs.get(user_pc_key)
+    logger.info("SFU Hop2: offer for %s (user=%s, existing_pc=%s, state=%s)",
+                robot_id, current_user.email, existing_pc is not None,
+                existing_pc.connectionState if existing_pc else "none")
+
+    if existing_pc and existing_pc.connectionState not in ("closed", "failed"):
+        # Renegotiation: reuse existing PC
+        logger.info("SFU Hop2: renegotiating for %s (user=%s)", robot_id, current_user.email)
+        pc = existing_pc
+        await pc.setRemoteDescription(RTCSessionDescription(sdp=offer.sdp, type=offer.type))
+        answer = await pc.createAnswer()
+        await pc.setLocalDescription(answer)
+        return {"sdp": pc.localDescription.sdp, "type": pc.localDescription.type}
+
     # Track active viewers and trigger stream start if first viewer
     was_empty = not active_robot_streams.get(robot_id)
     active_robot_streams[robot_id].add(current_user.email)
@@ -1865,6 +1936,8 @@ async def start_webrtc(
 
     pc = RTCPeerConnection()
     robot_browser_pcs[robot_id].append(pc)
+    browser_user_pcs[user_pc_key] = pc  # Track PC by user for renegotiation
+    logger.info("SFU Hop2: stored PC for key=%s, total_user_pcs=%d", user_pc_key, len(browser_user_pcs))
 
     @pc.on("track")
     def on_browser_track(track: MediaStreamTrack) -> None:
@@ -1885,9 +1958,10 @@ async def start_webrtc(
             if pc in pcs:
                 pcs.remove(pc)
                 logger.info("SFU Hop2: removed pc, remaining=%d", len(pcs))
+            # Clean up user PC tracking
+            browser_user_pcs.pop(user_pc_key, None)
             await pc.close()
             # Don't auto-stop stream - let it keep running to avoid race conditions
-            # The ros-bridge will handle idle streams
             remaining = robot_browser_pcs.get(robot_id)
             if not remaining:
                 logger.info("SFU Hop2: no viewers for %s, but keeping stream active", robot_id)
@@ -1918,10 +1992,17 @@ async def _forward_browser_audio(robot_id: str, track: MediaStreamTrack) -> None
         while True:
             frame = await track.recv()
             frame_count += 1
-            relay.push_frame(frame)
 
-            # Log every 500 frames (~10 seconds at 50fps)
-            if frame_count % 500 == 1:
-                logger.info("Browser audio frame %d forwarded for %s", frame_count, robot_id)
+            # Log RMS for first few frames and periodically to trace audio levels
+            if frame_count <= 5 or frame_count % 100 == 0:
+                try:
+                    arr = frame.to_ndarray()
+                    rms = np.sqrt(np.mean(arr.astype(np.float32)**2))
+                    logger.info("_forward_browser_audio frame %d for %s: dtype=%s, shape=%s, rms=%.1f, samples=%d",
+                                frame_count, robot_id, arr.dtype, arr.shape, rms, frame.samples)
+                except Exception:
+                    pass
+
+            relay.push_frame(frame)
     except Exception as e:
         logger.info("Browser audio forwarding ended for %s: %s", robot_id, e)

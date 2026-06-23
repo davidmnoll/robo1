@@ -1299,8 +1299,10 @@
         }
 
         async function enableMicrophone() {
+          console.log('[mic] enableMicrophone called (v2)');
           // If mic track already exists, just enable it
           if (state.micTrack) {
+            console.log('[mic] reusing existing track');
             state.micTrack.enabled = true;
             state.micEnabled = true;
             updateMicUI();
@@ -1353,17 +1355,19 @@
               }
             });
 
-            // Send renegotiation offer to API
-            const baseUrl = resolveApiBaseUrl();
-            const resp = await fetch(`${baseUrl}/api/webrtc/offer`, {
+            // Send renegotiation offer to API (same endpoint as initial offer)
+            const namespace = state.activeRobot?.ros_namespace;
+            console.log('[mic] sending renegotiation to', `${apiBase()}/robots/${encodeURIComponent(namespace)}/webrtc`);
+            const resp = await fetch(`${apiBase()}/robots/${encodeURIComponent(namespace)}/webrtc`, {
               method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
+              headers: {
+                'Content-Type': 'application/json',
+                ...authHeaders(),
+              },
               body: JSON.stringify({
                 sdp: state.pc.localDescription.sdp,
                 type: state.pc.localDescription.type,
-                robot: state.activeRobot?.ros_namespace,
               }),
-              credentials: 'include',
             });
 
             if (!resp.ok) {
