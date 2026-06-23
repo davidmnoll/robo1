@@ -11,6 +11,8 @@ dependencies = [
     "email-validator",
     "pydantic-settings",
     "aiortc",
+    "numpy",
+    "av",
     "SQLAlchemy",
     "asyncpg",
     "passlib[bcrypt]==1.7.4",
