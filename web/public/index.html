@@ -484,7 +484,138 @@
         font-family: 'JetBrains Mono', Consolas, monospace;
         font-size: 0.95rem;
       }
+
+      /* Mobile touch controls */
+      .touch-joystick-zone {
+        position: absolute;
+        bottom: 0;
+        width: 45%;
+        height: 50%;
+        z-index: 10;
+        pointer-events: auto;
+      }
+      .touch-joystick-zone.left {
+        left: 0;
+      }
+      .touch-joystick-zone.right {
+        right: 0;
+      }
+      .touch-joystick-zone .joystick-label {
+        position: absolute;
+        bottom: 10px;
+        left: 50%;
+        transform: translateX(-50%);
+        font-size: 0.7rem;
+        color: rgba(255,255,255,0.5);
+        text-transform: uppercase;
+        letter-spacing: 0.1em;
+        pointer-events: none;
+      }
+
+      /* Mobile fullscreen teleop mode */
+      @media (max-width: 768px) and (orientation: landscape) {
+        body.mobile-teleop {
+          padding: 0;
+          overflow: hidden;
+        }
+        body.mobile-teleop main {
+          max-width: none;
+          padding: 0;
+          margin: 0;
+        }
+        body.mobile-teleop .card {
+          border-radius: 0;
+          padding: 0;
+        }
+        body.mobile-teleop #teleop-pane {
+          display: block;
+        }
+        body.mobile-teleop .teleop-layout {
+          display: block;
+          height: 100vh;
+          width: 100vw;
+        }
+        body.mobile-teleop .teleop-layout > div:last-child {
+          display: none; /* Hide side panel on mobile */
+        }
+        body.mobile-teleop .video-wrapper {
+          position: fixed;
+          top: 0;
+          left: 0;
+          width: 100vw;
+          height: 100vh;
+          border-radius: 0;
+          border: none;
+          z-index: 100;
+        }
+        body.mobile-teleop .video-wrapper video {
+          width: 100%;
+          height: 100%;
+          object-fit: contain;
+          min-height: auto;
+        }
+        body.mobile-teleop .hud-overlay {
+          bottom: 0;
+          padding: 0.5rem;
+        }
+        body.mobile-teleop .hud-panel {
+          padding: 0.3rem 0.5rem;
+          min-width: auto;
+          font-size: 0.8rem;
+        }
+        body.mobile-teleop .hud-log {
+          display: none;
+        }
+        body.mobile-teleop .status-grid {
+          display: none;
+        }
+        body.mobile-teleop #video-meta {
+          display: none;
+        }
+        body.mobile-teleop #video-fullscreen-btn {
+          display: none;
+        }
+        /* Show touch joysticks on mobile */
+        body.mobile-teleop .touch-joystick-zone {
+          display: block;
+        }
+        /* Exit button for mobile */
+        body.mobile-teleop .mobile-exit-btn {
+          display: block;
+        }
+      }
+
+      /* Hide touch zones on desktop */
+      .touch-joystick-zone {
+        display: none;
+      }
+      .mobile-exit-btn {
+        display: none;
+        position: absolute;
+        top: 10px;
+        left: 50%;
+        transform: translateX(-50%);
+        z-index: 20;
+        background: rgba(0,0,0,0.6);
+        border: 1px solid rgba(255,255,255,0.3);
+        color: white;
+        padding: 0.4rem 1rem;
+        border-radius: 20px;
+        font-size: 0.8rem;
+      }
+
+      /* Touch device detection - show enter button */
+      @media (pointer: coarse) {
+        .mobile-teleop-enter {
+          display: inline-block;
+        }
+      }
+      .mobile-teleop-enter {
+        display: none;
+        margin-top: 0.5rem;
+      }
     </style>
+    <script src="https://unpkg.com/nipplejs@0.10.2/dist/nipplejs.min.js"></script>
   </head>
   <body>
     <main>
@@ -589,6 +720,13 @@
                 <div class="video-wrapper" id="video-wrapper">
                   <video id="robot-video" autoplay playsinline controls></video>
                   <button id="video-fullscreen-btn" class="ghost" type="button" aria-label="Toggle fullscreen">⤢</button>
+                  <button class="mobile-exit-btn" id="mobile-exit-btn" type="button">✕ Exit</button>
+                  <div class="touch-joystick-zone left" id="joystick-zone-left">
+                    <span class="joystick-label">Move</span>
+                  </div>
+                  <div class="touch-joystick-zone right" id="joystick-zone-right">
+                    <span class="joystick-label">Camera</span>
+                  </div>
                   <div class="hud-overlay">
                     <div class="hud-row">
                       <div class="hud-panel">
@@ -622,8 +760,11 @@
                 <h3 style="margin-top:0;">Active robot</h3>
                 <p class="hint" id="active-robot-label">None selected</p>
                 <p class="hint" id="teleop-instructions" style="margin-top:0.5rem;">
-                  Movement: WASD or arrows. Camera: IJKL (coming soon). Gamepad supported. Space to stop.
+                  Movement: WASD or arrows. Camera: IJKL. Gamepad supported. Space to stop.
                 </p>
+                <button id="mobile-teleop-enter" class="mobile-teleop-enter" type="button">
+                  📱 Enter Touch Controls
+                </button>
                 <div class="audio-controls">
                   <button id="mic-toggle-btn" class="ghost mic-btn muted" type="button" title="Toggle microphone">
                     🎤
@@ -1945,6 +2086,139 @@
           console.info('[gamepad] disconnected:', e.gamepad.id);
           logTelemetry('Gamepad disconnected');
         });
+
+        // ── Mobile Touch Controls (nipplejs) ──────────────────────────────
+        let moveJoystick = null;
+        let cameraJoystick = null;
+        let touchSendInterval = null;
+
+        const mobileEnterBtn = document.getElementById('mobile-teleop-enter');
+        const mobileExitBtn = document.getElementById('mobile-exit-btn');
+        const joystickZoneLeft = document.getElementById('joystick-zone-left');
+        const joystickZoneRight = document.getElementById('joystick-zone-right');
+
+        function isTouchDevice() {
+          return 'ontouchstart' in window || navigator.maxTouchPoints > 0;
+        }
+
+        function enterMobileTeleop() {
+          document.body.classList.add('mobile-teleop');
+          // Lock to landscape if possible
+          if (screen.orientation && screen.orientation.lock) {
+            screen.orientation.lock('landscape').catch(() => {});
+          }
+          initTouchJoysticks();
+          logTelemetry('Mobile teleop mode entered');
+        }
+
+        function exitMobileTeleop() {
+          document.body.classList.remove('mobile-teleop');
+          if (screen.orientation && screen.orientation.unlock) {
+            screen.orientation.unlock();
+          }
+          destroyTouchJoysticks();
+          logTelemetry('Mobile teleop mode exited');
+        }
+
+        function initTouchJoysticks() {
+          if (!window.nipplejs) {
+            console.warn('[touch] nipplejs not loaded');
+            return;
+          }
+
+          destroyTouchJoysticks();
+
+          // Movement joystick (left side)
+          moveJoystick = nipplejs.create({
+            zone: joystickZoneLeft,
+            mode: 'static',
+            position: { left: '50%', top: '50%' },
+            color: 'rgba(59, 130, 246, 0.5)',
+            size: 120,
+            restOpacity: 0.5,
+          });
+
+          moveJoystick.on('move', (evt, data) => {
+            // data.vector.x: -1 to 1 (left/right)
+            // data.vector.y: -1 to 1 (down/up, note: up is positive)
+            const force = Math.min(data.force, 1);
+            state.joyAxes[1] = data.vector.y * force;  // forward/back
+            state.joyAxes[3] = -data.vector.x * force; // turn (inverted for steering)
+            updateJoyIndicators();
+          });
+
+          moveJoystick.on('end', () => {
+            state.joyAxes[1] = 0;
+            state.joyAxes[3] = 0;
+            updateJoyIndicators();
+            sendJoy(); // Send zero state immediately
+          });
+
+          // Camera joystick (right side)
+          cameraJoystick = nipplejs.create({
+            zone: joystickZoneRight,
+            mode: 'static',
+            position: { left: '50%', top: '50%' },
+            color: 'rgba(20, 184, 166, 0.5)',
+            size: 120,
+            restOpacity: 0.5,
+          });
+
+          cameraJoystick.on('move', (evt, data) => {
+            const force = Math.min(data.force, 1);
+            // Adjust pan/tilt based on joystick position
+            // x: left = pan left (+), right = pan right (-)
+            // y: up = tilt up (+), down = tilt down (-)
+            const panDelta = -data.vector.x * force * 3;
+            const tiltDelta = data.vector.y * force * 3;
+            state.cameraPan = Math.max(CAMERA_MIN, Math.min(CAMERA_MAX, state.cameraPan + panDelta));
+            state.cameraTilt = Math.max(CAMERA_MIN, Math.min(CAMERA_MAX, state.cameraTilt + tiltDelta));
+          });
+
+          cameraJoystick.on('end', () => {
+            // Camera stays at current position when released
+          });
+
+          // Start continuous sending while in touch mode
+          if (touchSendInterval) clearInterval(touchSendInterval);
+          touchSendInterval = setInterval(() => {
+            if (state.joyAxes[1] !== 0 || state.joyAxes[3] !== 0) {
+              sendJoy();
+            }
+            // Always send camera position periodically
+            sendCameraPtz();
+          }, 50);
+
+          console.info('[touch] joysticks initialized');
+        }
+
+        function destroyTouchJoysticks() {
+          if (moveJoystick) {
+            moveJoystick.destroy();
+            moveJoystick = null;
+          }
+          if (cameraJoystick) {
+            cameraJoystick.destroy();
+            cameraJoystick = null;
+          }
+          if (touchSendInterval) {
+            clearInterval(touchSendInterval);
+            touchSendInterval = null;
+          }
+        }
+
+        // Show mobile enter button on touch devices
+        if (isTouchDevice() && mobileEnterBtn) {
+          mobileEnterBtn.style.display = 'inline-block';
+        }
+
+        if (mobileEnterBtn) {
+          mobileEnterBtn.addEventListener('click', enterMobileTeleop);
+        }
+
+        if (mobileExitBtn) {
+          mobileExitBtn.addEventListener('click', exitMobileTeleop);
+        }
 
         window.addEventListener('keydown', (event) => handleKey(event, true));
         window.addEventListener('keyup', (event) => handleKey(event, false));

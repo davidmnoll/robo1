@@ -16,6 +16,7 @@ help:
 	@echo ""
 	@echo "  make tmux-stack - Launch ros-core, sim, api, web in tmux (preferred)"
 	@echo "  make dev        - Launch api, ros-bridge, web (no simulator)"
+	@echo "  make cloud-ros  - Run ros-bridge connected to cloud API"
 	@echo "  make all        - Alias for make tmux-stack"
 	@echo "  make attach     - Attach to tmux session (arena)"
 	@echo "  make db-shell   - Open psql shell inside the db container"
@@ -109,6 +110,20 @@ dev-ros:
 		-e ROS_DOMAIN_ID=$(ROS_DOMAIN_ID) \
 		-e API_BASE_URL=http://localhost:8080/api \
 		-e LOBBY_KEY=local-dev-key \
+		ros-bridge-humble
+
+# Run ros-bridge connected to cloud API
+cloud-ros:
+	@if ! docker image inspect ros-bridge-humble >/dev/null 2>&1; then \
+		echo "Building ros-bridge-humble image..."; \
+		$(MAKE) dev-ros-build; \
+	fi
+	@echo "Starting ros-bridge connected to cloud API..."
+	docker run --rm --net=host \
+		-v $(CURDIR)/ros-bridge:/ros-bridge \
+		-e ROS_DOMAIN_ID=$(ROS_DOMAIN_ID) \
+		-e API_BASE_URL=https://34.42.43.54.sslip.io/api \
+		-e LOBBY_KEY=G-lV6Jrg0DW-m78AClMySQ \
 		ros-bridge-humble
 
 db-shell:
