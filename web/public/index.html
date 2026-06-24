@@ -38,6 +38,11 @@
         padding: 1.5rem;
         box-shadow: 0 20px 60px rgba(0,0,0,.45);
       }
+      #account-card {
+        width: 100%;
+        max-width: 380px;
+        margin: 0 auto;
+      }
       header.hero {
         display: flex;
         flex-wrap: wrap;
@@ -206,13 +211,6 @@
         border: 1px solid rgba(255,255,255,0.05);
         border-radius: 14px;
         padding: 1rem;
-      }
-      .lobby-card.offline {
-        opacity: 0.55;
-        filter: grayscale(0.4);
-      }
-      .lobby-card.offline button {
-        pointer-events: none;
       }
       .lobby-card h3 {
         margin: 0;
@@ -627,23 +625,25 @@
       </header>
 
       <section class="card" id="account-card">
-        <h2>Account</h2>
-        <div id="auth-status" class="status disconnected">Not signed in</div>
-        <div class="form-row">
-          <div>
-            <label for="auth-email">Username / Email</label>
-            <input id="auth-email" type="text" placeholder="Enter your username or email">
+        <form id="auth-form">
+          <div style="margin-bottom:0.75rem;">
+            <input id="auth-email" type="text" placeholder="Username or email" required>
           </div>
-          <div>
-            <label for="auth-password">Password</label>
-            <input id="auth-password" type="password" placeholder="••••••••">
+          <div style="margin-bottom:0.75rem;">
+            <input id="auth-password" type="password" placeholder="Password" required>
           </div>
-        </div>
-        <div class="lobby-actions">
-          <button id="register-btn">Sign Up</button>
-          <button id="login-btn">Sign In</button>
-          <span id="auth-message" class="hint"></span>
-        </div>
+          <div style="margin-bottom:0.75rem;text-align:left;">
+            <label style="display:inline-flex;align-items:center;gap:0.5rem;cursor:pointer;font-size:0.875rem;text-transform:none;font-weight:normal;white-space:nowrap;">
+              <input type="checkbox" id="remember-me" checked>
+              Remember me
+            </label>
+          </div>
+          <div class="lobby-actions" style="flex-direction:column;gap:0.5rem;align-items:center;">
+            <button type="submit" id="login-btn">Sign In</button>
+            <button type="button" id="register-btn" class="secondary">Sign Up</button>
+            <span id="auth-message" class="hint"></span>
+          </div>
+        </form>
       </section>
 
       <section class="card" id="dashboard-card" hidden>
@@ -798,9 +798,10 @@
     <script>
       (function() {
         const apiStatus = document.getElementById('api-status');
+        const authForm = document.getElementById('auth-form');
         const authEmailInput = document.getElementById('auth-email');
         const authPasswordInput = document.getElementById('auth-password');
-        const authStatus = document.getElementById('auth-status');
+        const rememberMeCheckbox = document.getElementById('remember-me');
         const authMessage = document.getElementById('auth-message');
         const accountCard = document.getElementById('account-card');
         const dashboardCard = document.getElementById('dashboard-card');
@@ -877,7 +878,6 @@
         const resolvedMeta = isPlaceholder ? '' : metaValue;
         const fallbackApiBase = 'http://localhost:8080/api';
         const staticApiBase = (resolvedMeta || fallbackApiBase).replace(/\/+$/, '');
-        const LOBBY_CACHE_KEY = 'arenaLobbyCache';
         const DEFAULT_ICE_SERVERS = [
           { urls: 'stun:stun.l.google.com:19302' },
         ];
@@ -908,44 +908,19 @@
           return DEFAULT_ICE_SERVERS;
         }
 
-        function readLobbyCache() {
-          try {
-            const raw = localStorage.getItem(LOBBY_CACHE_KEY);
-            return raw ? JSON.parse(raw) : {};
-          } catch (error) {
-            console.warn('Failed to parse lobby cache', error);
-            return {};
-          }
-        }
-
-        function loadCachedLobbies(email) {
-          if (!email) return [];
-          const cache = readLobbyCache();
-          const entry = cache[email];
-          return Array.isArray(entry) ? entry : [];
-        }
-
-        function saveCachedLobbies(email, items) {
-          if (!email) return;
-          const cache = readLobbyCache();
-          cache[email] = items;
-          localStorage.setItem(LOBBY_CACHE_KEY, JSON.stringify(cache));
-        }
-
         function setMenuOpen(open) {
           state.menuOpen = Boolean(open);
           menuPanel.hidden = !state.menuOpen;
           menuToggle.setAttribute('aria-expanded', String(state.menuOpen));
         }
 
-        const initialToken = localStorage.getItem('arenaToken') || '';
-        const initialEmail = localStorage.getItem('arenaUserEmail') || '';
+        const initialToken = localStorage.getItem('arenaToken') || sessionStorage.getItem('arenaToken') || '';
+        const initialEmail = localStorage.getItem('arenaUserEmail') || sessionStorage.getItem('arenaUserEmail') || '';
 
         const state = {
           authToken: initialToken,
           userEmail: initialEmail,
           lobbies: [],
-          cachedLobbies: loadCachedLobbies(initialEmail),
           offlineLobbies: [],
           offlineCollapsed: true,
           menuOpen: false,
@@ -992,6 +967,7 @@
           cameraTilt: 90,
           cameraPtzInterval: null,
           connectedRobots: new Set(),
+          connectedLobbies: new Set(),
           lobbyStatusWs: null,
         };
         let lobbyFetchController = null;
@@ -1012,7 +988,17 @@
           ws.onmessage = (event) => {
             try {
               const msg = JSON.parse(event.data);
-              if (msg.type === 'connected_robots') {
+              if (msg.type === 'connected_lobbies') {
+                state.connectedLobbies = new Set(msg.lobby_ids || []);
+                updateLobbyRosStatus();
+              } else if (msg.type === 'lobby_status') {
+                if (msg.connected) {
+                  state.connectedLobbies.add(msg.lobby_id);
+                } else {
+                  state.connectedLobbies.delete(msg.lobby_id);
+                }
+                updateLobbyRosStatus();
+              } else if (msg.type === 'connected_robots') {
                 state.connectedRobots = new Set(msg.robots || []);
                 updateLobbyRosStatus();
               } else if (msg.type === 'robot_status') {
@@ -1030,18 +1016,17 @@
         }
 
         function updateLobbyRosStatus() {
-          // Update lobby cards in directory
-          state.lobbies.forEach(lobby => {
-            lobby.ros_connected = (lobby.bot_namespaces || []).some(
-              ns => state.connectedRobots.has(ns)
-            );
+          // Combine all lobbies, update ros_connected, then re-split
+          const allLobbies = [...state.lobbies, ...state.offlineLobbies];
+          allLobbies.forEach(lobby => {
+            lobby.ros_connected = state.connectedLobbies.has(lobby.id);
           });
+          state.lobbies = allLobbies.filter(l => l.ros_connected);
+          state.offlineLobbies = allLobbies.filter(l => !l.ros_connected);
           renderLobbies();
           // Update current lobby detail if viewing
           if (state.currentLobby) {
-            state.currentLobby.ros_connected = (state.currentLobby.bot_namespaces || []).some(
-              ns => state.connectedRobots.has(ns)
-            );
+            state.currentLobby.ros_connected = state.connectedLobbies.has(state.currentLobby.id);
             detailRosStatus.textContent = state.currentLobby.ros_connected ? 'Online' : 'Offline';
             detailRosStatus.className = `status ${state.currentLobby.ros_connected ? 'connected' : 'disconnected'}`;
           }
@@ -1063,20 +1048,22 @@
           }
         }
 
-        function setAuth(token, email) {
+        function setAuth(token, email, remember = true) {
           state.authToken = token || '';
           state.userEmail = email || '';
           if (!state.authToken) {
             cancelLobbyFetch();
           }
+          // Clear both storages first
+          localStorage.removeItem('arenaToken');
+          localStorage.removeItem('arenaUserEmail');
+          sessionStorage.removeItem('arenaToken');
+          sessionStorage.removeItem('arenaUserEmail');
           if (state.authToken) {
-            localStorage.setItem('arenaToken', state.authToken);
-            localStorage.setItem('arenaUserEmail', state.userEmail);
-          } else {
-            localStorage.removeItem('arenaToken');
-            localStorage.removeItem('arenaUserEmail');
+            const storage = remember ? localStorage : sessionStorage;
+            storage.setItem('arenaToken', state.authToken);
+            storage.setItem('arenaUserEmail', state.userEmail);
           }
-          state.cachedLobbies = loadCachedLobbies(state.userEmail);
           state.offlineLobbies = [];
           state.offlineCollapsed = true;
           setMenuOpen(false);
@@ -1089,16 +1076,12 @@
           dashboardCard.hidden = !authed;
           userMenu.hidden = !authed;
           if (authed) {
-            authStatus.textContent = `Signed in as ${state.userEmail}`;
-            authStatus.className = 'status connected';
             menuUserEmail.textContent = state.userEmail || 'Signed in';
             setMenuOpen(false);
             lobbyEmptyEl.hidden = true;
             showView('lobbies');
             fetchLobbies();
           } else {
-            authStatus.textContent = 'Not signed in';
-            authStatus.className = 'status disconnected';
             setMenuOpen(false);
             state.lobbies = [];
             state.offlineLobbies = [];
@@ -1149,10 +1132,9 @@
             if (!resp.ok) throw new Error('Failed to load lobbies');
             const data = await resp.json();
             const items = Array.isArray(data.items) ? data.items : [];
-            state.lobbies = items;
-            state.cachedLobbies = items.slice();
-            state.offlineLobbies = [];
-            saveCachedLobbies(state.userEmail, state.cachedLobbies);
+            // Split lobbies by ros_connected status
+            state.lobbies = items.filter(l => l.ros_connected);
+            state.offlineLobbies = items.filter(l => !l.ros_connected);
             renderLobbies();
           } catch (err) {
             if (err && err.name === 'AbortError') {
@@ -1160,12 +1142,10 @@
             }
             console.error('Failed to load lobbies', err);
             state.lobbies = [];
-            state.offlineLobbies = state.cachedLobbies.slice();
+            state.offlineLobbies = [];
             renderLobbies();
-            if (!state.offlineLobbies.length) {
-              lobbyEmptyEl.hidden = false;
-              lobbyEmptyEl.textContent = 'Failed to load lobbies.';
-            }
+            lobbyEmptyEl.hidden = false;
+            lobbyEmptyEl.textContent = 'Failed to load lobbies.';
           } finally {
             lobbyFetchController = null;
           }
@@ -1186,7 +1166,7 @@
           } else {
             lobbyEmptyEl.hidden = false;
             lobbyEmptyEl.textContent = state.offlineLobbies.length
-              ? 'Lobbies unavailable. Expand Offline to view cached entries.'
+              ? 'No online lobbies. Expand below to view offline lobbies.'
               : 'No lobbies yet. Create one to get started.';
           }
           updateOfflineSection();
@@ -2582,7 +2562,7 @@
             });
             if (!resp.ok) throw new Error(await resp.text());
             const data = await resp.json();
-            setAuth(data.access_token, data.user.email);
+            setAuth(data.access_token, data.user.email, rememberMeCheckbox.checked);
             authMessage.textContent = path === 'login' ? 'Welcome back!' : 'Account created.';
           } catch (err) {
             console.error(err);
@@ -2607,8 +2587,11 @@
           updateOfflineSection();
         });
 
+        authForm.addEventListener('submit', (e) => {
+          e.preventDefault();
+          handleAuth('login');
+        });
         registerBtn.addEventListener('click', () => handleAuth('register'));
-        loginBtn.addEventListener('click', () => handleAuth('login'));
         logoutBtn.addEventListener('click', () => {
           setAuth('', '');
           setMenuOpen(false);

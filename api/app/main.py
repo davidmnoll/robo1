@@ -192,6 +192,8 @@ websocket_robot_map: Dict[int, set[str]] = {}
 # Internal bridge websockets (for sending start_stream/stop_stream)
 bridge_websockets: set[WebSocket] = set()
 command_ws_lock = asyncio.Lock()
+# Track which lobbies have active ros-bridge connections
+connected_lobby_ids: set[int] = set()
 # Telemetry subscribers - maps robot_id to set of websockets
 telemetry_subscribers: Dict[str, set[WebSocket]] = defaultdict(set)
 telemetry_ws_lock = asyncio.Lock()
@@ -1123,8 +1125,8 @@ def lobby_to_out(lobby: Lobby, current_user: User) -> LobbyOut:
     bot_count = len(active_bots)
     bot_namespaces = [bot.ros_namespace for bot in active_bots]
     is_owner = lobby.owner_id == current_user.id
-    # Check if any bot in this lobby has an active ROS bridge connection
-    ros_connected = any(ns in robot_forwarder_pcs for ns in bot_namespaces)
+    # Check if this lobby has an active ros-bridge command websocket connection
+    ros_connected = lobby.id in connected_lobby_ids
     return LobbyOut(
         id=lobby.id,
         name=lobby.name,
@@ -1356,6 +1358,11 @@ async def prepare_database(max_attempts: int = 60, delay: int = 5) -> None:
                 await conn.execute(
                     text(
                         "ALTER TABLE bots ADD COLUMN IF NOT EXISTS is_deleted BOOLEAN NOT NULL DEFAULT false"
+                    )
+                )
+                await conn.execute(
+                    text(
+                        "ALTER TABLE bots ADD COLUMN IF NOT EXISTS volume FLOAT NOT NULL DEFAULT 1.0"
                     )
                 )
             logger.info("Database connection established after %s attempt(s)", attempt + 1)
@@ -1718,6 +1725,9 @@ async def robot_command_bridge(websocket: WebSocket) -> None:
     ws_client_ip = ws_forwarded.split(",")[0].strip() if ws_forwarded else peer[0]
     allow_stun_ip(ws_client_ip)
     logger.info("Command websocket connected from %s:%s (lobby_id=%s)", ws_client_ip, peer[1], lobby_id)
+    # Mark lobby as online
+    connected_lobby_ids.add(lobby_id)
+    await broadcast_lobby_connection(lobby_id, True)
     try:
         while True:
             message = await websocket.receive_json()
@@ -1807,7 +1817,23 @@ async def robot_command_bridge(websocket: WebSocket) -> None:
     except WebSocketDisconnect:
         pass
     finally:
+        connected_lobby_ids.discard(lobby_id)
+        await broadcast_lobby_connection(lobby_id, False)
         await unregister_robot_ws(websocket)
+
+
+async def broadcast_lobby_connection(lobby_id: int, connected: bool) -> None:
+    """Broadcast lobby connection status change to all subscribers."""
+    message = {"type": "lobby_status", "lobby_id": lobby_id, "connected": connected}
+    async with lobby_status_lock:
+        dead = []
+        for ws in lobby_status_subscribers:
+            try:
+                await ws.send_json(message)
+            except Exception:
+                dead.append(ws)
+        for ws in dead:
+            lobby_status_subscribers.discard(ws)
 
 
 async def broadcast_lobby_status(robot: str, connected: bool) -> None:
@@ -1830,7 +1856,8 @@ async def lobby_status_ws(websocket: WebSocket) -> None:
     await websocket.accept()
     async with lobby_status_lock:
         lobby_status_subscribers.add(websocket)
-    # Send current connected robots
+    # Send current connected lobbies and robots
+    await websocket.send_json({"type": "connected_lobbies", "lobby_ids": list(connected_lobby_ids)})
     connected_robots = list(robot_forwarder_pcs.keys())
     await websocket.send_json({"type": "connected_robots", "robots": connected_robots})
     try:
