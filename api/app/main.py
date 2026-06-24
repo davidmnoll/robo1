@@ -206,6 +206,7 @@ lobby_status_lock = asyncio.Lock()
 
 # Browser audio relay tracks - for forwarding browser mic audio to ros-bridge (Hop 1)
 browser_audio_relay_tracks: Dict[str, "BrowserAudioRelayTrack"] = {}
+
 # Active browser audio forwarding tasks (key: "robot_id:user_email")
 browser_audio_forward_tasks: Dict[str, asyncio.Task] = {}
 

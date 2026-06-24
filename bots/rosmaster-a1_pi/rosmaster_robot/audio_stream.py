@@ -4,6 +4,9 @@ Audio Stream Node - Microphone to ROS2
 
 Captures audio from the microphone and publishes to /{robot_id}/audio_raw.
 Used for robot-to-operator voice communication.
+
+Includes echo cancellation via audio ducking - mutes mic when speaker audio
+is received, then ramps back up after speaker goes quiet.
 """
 
 import array
@@ -12,11 +15,60 @@ import re
 import socket
 import struct
 import subprocess
+import threading
 
+import numpy as np
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy
 from std_msgs.msg import UInt8MultiArray
+
+
+class EchoCanceller:
+    """Simple mic muting when speaker is playing.
+
+    Binary mute - no ramping, no gain changes. Just silence or pass-through.
+    """
+
+    def __init__(self, mute_duration_ms: float = 500, logger=None):
+        import time
+        self._time = time
+        self.mute_duration_sec = mute_duration_ms / 1000.0
+        self._last_loud_time = 0.0
+        self.lock = threading.Lock()
+        self.logger = logger
+
+    def speaker_audio_received(self, samples: np.ndarray) -> None:
+        """Called when speaker audio frame is received."""
+        self._speaker_count = getattr(self, '_speaker_count', 0) + 1
+        rms = np.sqrt(np.mean(samples.astype(np.float32) ** 2))
+
+        # Log every 50 frames to confirm subscription is working
+        if self.logger and self._speaker_count % 50 == 1:
+            self.logger.info(f"[AEC] Speaker frame #{self._speaker_count}, rms={rms:.0f}")
+
+        # Only mute if audio has significant amplitude
+        if rms > 300:
+            with self.lock:
+                self._last_loud_time = self._time.time()
+            if self.logger:
+                self.logger.info(f"[AEC] MUTING mic (speaker rms={rms:.0f})")
+
+    def process(self, mic_samples: np.ndarray) -> np.ndarray:
+        """Return silence if speaker was recently loud, otherwise pass through."""
+        self._process_count = getattr(self, '_process_count', 0) + 1
+
+        with self.lock:
+            time_since_loud = self._time.time() - self._last_loud_time
+
+        if time_since_loud < self.mute_duration_sec:
+            if self.logger:
+                self.logger.info(f"[AEC] SILENCING mic #{self._process_count} (time_since={time_since_loud:.3f}s)")
+            # Return silence - same shape and dtype as input
+            return np.zeros_like(mic_samples)
+
+        # Pass through unchanged
+        return mic_samples
 
 
 def get_robot_id() -> str:
@@ -39,6 +91,7 @@ class AudioStreamNode(Node):
     CHANNELS = 1
     CHUNK_SIZE = 9600  # 100ms of audio at 48kHz mono S16_LE (48000 * 0.1 * 2 bytes)
     AUDIO_GAIN = 4.0  # Software gain multiplier (adjust as needed)
+    ENABLE_AEC = True  # Enable echo cancellation
 
     def __init__(self, robot_id: str = None):
         self.robot_id = robot_id or get_robot_id()
@@ -52,6 +105,17 @@ class AudioStreamNode(Node):
         self.publisher = self.create_publisher(UInt8MultiArray, topic, qos)
         self.get_logger().info(f"Publishing audio to {topic}")
 
+        # Echo cancellation - subscribe to speaker audio
+        if self.ENABLE_AEC:
+            self.echo_canceller = EchoCanceller(mute_duration_ms=1000, logger=self.get_logger())
+            speaker_topic = f"/{self.robot_id}/audio_play"
+            self.speaker_sub = self.create_subscription(
+                UInt8MultiArray, speaker_topic, self._on_speaker_audio, qos
+            )
+            self.get_logger().info(f"AEC enabled, monitoring speaker on {speaker_topic}")
+        else:
+            self.echo_canceller = None
+
         # Start arecord process
         self.proc = None
         self._start_capture()
@@ -63,13 +127,28 @@ class AudioStreamNode(Node):
             f"AudioStreamNode initialized for robot_id={self.robot_id}"
         )
 
+    def _on_speaker_audio(self, msg: UInt8MultiArray) -> None:
+        """Called when speaker audio is about to play - notify echo canceller."""
+        self._speaker_cb_count = getattr(self, '_speaker_cb_count', 0) + 1
+        if self._speaker_cb_count % 50 == 1:
+            self.get_logger().info(f"[AEC] Received speaker msg #{self._speaker_cb_count}, len={len(msg.data)}")
+
+        if self.echo_canceller is None:
+            return
+        try:
+            data = bytes(msg.data)
+            samples = np.frombuffer(data, dtype=np.int16)
+            self.echo_canceller.speaker_audio_received(samples)
+        except Exception as e:
+            self.get_logger().warning(f"Error processing speaker audio: {e}")
+
     def _start_capture(self) -> None:
         """Start the audio capture subprocess."""
         try:
             self.proc = subprocess.Popen(
                 [
                     "arecord",
-                    "-D", "hw:2,0",  # Explicitly specify USB audio device
+                    "-D", "plughw:2,0",  # USB audio device (plughw for format conversion)
                     "-f", "S16_LE",
                     "-r", str(self.SAMPLE_RATE),
                     "-c", str(self.CHANNELS),
@@ -121,22 +200,23 @@ class AudioStreamNode(Node):
         try:
             data = self.proc.stdout.read(self.CHUNK_SIZE)
             if data:
-                # Apply software gain to boost audio levels
-                if self.AUDIO_GAIN != 1.0:
-                    # Unpack S16_LE samples, apply gain, clip to prevent overflow, repack
-                    num_samples = len(data) // 2
-                    samples = struct.unpack(f'<{num_samples}h', data)
-                    gained = []
-                    for s in samples:
-                        v = int(s * self.AUDIO_GAIN)
-                        # Clip to 16-bit signed range
-                        v = max(-32768, min(32767, v))
-                        gained.append(v)
-                    data = struct.pack(f'<{num_samples}h', *gained)
+                # Convert to numpy for processing
+                samples = np.frombuffer(data, dtype=np.int16).copy()
 
+                # Apply software gain
+                if self.AUDIO_GAIN != 1.0:
+                    samples = np.clip(
+                        samples.astype(np.float32) * self.AUDIO_GAIN,
+                        -32768, 32767
+                    ).astype(np.int16)
+
+                # Apply echo cancellation
+                if self.echo_canceller is not None:
+                    samples = self.echo_canceller.process(samples)
+
+                # Convert back to bytes and publish
                 msg = UInt8MultiArray()
-                # Use array.array instead of list() for much better performance
-                msg.data = array.array('B', data)
+                msg.data = array.array('B', samples.tobytes())
                 self.publisher.publish(msg)
         except Exception as e:
             self.get_logger().error(f"Error reading audio: {e}")
