@@ -314,12 +314,54 @@
         overflow: hidden;
         background: #0b1120;
         border: 1px solid rgba(148,163,184,0.2);
+        touch-action: none;
       }
       .video-wrapper video {
         display: block;
         width: 100%;
         min-height: 240px;
         background: #000;
+      }
+      /* Hide native fullscreen button */
+      video::-webkit-media-controls-fullscreen-button {
+        display: none;
+      }
+      /* Full-page teleop mode */
+      #view-lobby-detail.teleop-active .lobby-actions,
+      #view-lobby-detail.teleop-active #detail-header,
+      #view-lobby-detail.teleop-active .tab-nav {
+        display: none;
+      }
+      #view-lobby-detail.teleop-active [data-panel="teleop"] {
+        position: fixed;
+        top: 0;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        z-index: 50;
+        background: #020617;
+        overflow: hidden;
+        touch-action: none;
+        overscroll-behavior: none;
+      }
+      #view-lobby-detail.teleop-active #teleop-pane {
+        height: 100%;
+        display: flex;
+        flex-direction: column;
+      }
+      #view-lobby-detail.teleop-active .video-wrapper {
+        flex: 1;
+        height: 100%;
+        border-radius: 0;
+        border: none;
+      }
+      #view-lobby-detail.teleop-active .video-wrapper video {
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+      }
+      body.teleop-active {
+        overflow: hidden;
       }
       .hud-overlay {
         position: absolute;
@@ -337,19 +379,48 @@
         display: flex;
         gap: 0.75rem;
         flex-wrap: wrap;
+        padding-right: 120px; /* Space for top-right controls */
       }
       .hud-panel {
         background: rgba(2,6,23,0.6);
         border: 1px solid rgba(148,163,184,0.35);
         border-radius: 12px;
         padding: 0.5rem 0.75rem;
-        min-width: 150px;
+        min-width: 100px;
         pointer-events: auto;
+        flex-shrink: 1;
       }
       .hud-panel strong {
         display: block;
         font-size: 1.1rem;
         color: #f8fafc;
+        white-space: nowrap;
+      }
+      @media (max-width: 600px) {
+        .hud-overlay {
+          padding: 0.5rem;
+        }
+        .hud-row {
+          gap: 0.4rem;
+          padding-right: 100px;
+        }
+        .hud-panel {
+          padding: 0.3rem 0.5rem;
+          min-width: 70px;
+          border-radius: 8px;
+        }
+        .hud-panel strong {
+          font-size: 0.85rem;
+        }
+      }
+      @media (max-width: 400px) {
+        .hud-panel {
+          padding: 0.25rem 0.4rem;
+          min-width: 55px;
+        }
+        .hud-panel strong {
+          font-size: 0.75rem;
+        }
       }
       .hud-log {
         flex: 1;
@@ -363,9 +434,21 @@
         margin: 0;
         border: none;
       }
-      #video-fullscreen-btn {
+      .video-controls-top {
         position: absolute;
         top: 0.75rem;
+        right: 0.75rem;
+        z-index: 5;
+        display: flex;
+        gap: 0.5rem;
+        pointer-events: auto;
+      }
+      .video-controls-top button {
+        pointer-events: auto;
+      }
+      .video-fullscreen-btn {
+        position: absolute;
+        bottom: 50px;
         right: 0.75rem;
         z-index: 5;
         pointer-events: auto;
@@ -421,6 +504,7 @@
         justify-content: center;
         font-size: 1.2rem;
         flex-shrink: 0;
+        pointer-events: auto;
       }
       .mic-btn.muted {
         background: rgba(248,113,113,0.2);
@@ -428,9 +512,15 @@
         color: #f87171;
       }
       .mic-btn.active {
-        background: rgba(34,197,94,0.2);
-        border-color: rgba(34,197,94,0.4);
+        background: rgba(34,197,94,0.3);
+        border-color: rgba(34,197,94,0.5);
         color: #4ade80;
+      }
+      .mic-btn.active.speaking {
+        background: rgba(22,163,74,0.6);
+        border-color: rgba(22,163,74,0.8);
+        color: #22c55e;
+        box-shadow: 0 0 12px rgba(34,197,94,0.5);
       }
       .volume-slider {
         flex: 1;
@@ -462,12 +552,6 @@
       .volume-slider:disabled {
         opacity: 0.5;
       }
-      .mic-status {
-        font-size: 0.8rem;
-        color: #94a3b8;
-        min-width: 60px;
-        text-align: right;
-      }
       .key-row {
         display: flex;
         align-items: center;
@@ -483,14 +567,20 @@
         font-size: 0.95rem;
       }
 
-      /* Mobile touch controls */
+      /* Touch controls - always visible with low opacity */
       .touch-joystick-zone {
         position: absolute;
-        bottom: 0;
-        width: 45%;
-        height: 50%;
-        z-index: 10;
+        bottom: 50px;
+        width: 40%;
+        height: 45%;
+        z-index: 20;
         pointer-events: auto;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        touch-action: none;
+        -webkit-user-select: none;
+        user-select: none;
       }
       .touch-joystick-zone.left {
         left: 0;
@@ -498,16 +588,37 @@
       .touch-joystick-zone.right {
         right: 0;
       }
+      .touch-joystick-zone .joystick-indicator {
+        width: 100px;
+        height: 100px;
+        border: 2px solid rgba(255,255,255,0.15);
+        border-radius: 50%;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        pointer-events: none;
+      }
+      .touch-joystick-zone .joystick-indicator::after {
+        content: '';
+        width: 40px;
+        height: 40px;
+        background: rgba(255,255,255,0.1);
+        border-radius: 50%;
+      }
       .touch-joystick-zone .joystick-label {
         position: absolute;
         bottom: 10px;
         left: 50%;
         transform: translateX(-50%);
         font-size: 0.7rem;
-        color: rgba(255,255,255,0.5);
+        color: rgba(255,255,255,0.3);
         text-transform: uppercase;
         letter-spacing: 0.1em;
         pointer-events: none;
+      }
+      /* Hide indicators when joystick is active */
+      .touch-joystick-zone.active .joystick-indicator {
+        display: none;
       }
 
       /* Mobile fullscreen teleop mode */
@@ -559,7 +670,7 @@
         body.mobile-teleop #video-meta {
           display: none;
         }
-        body.mobile-teleop #video-fullscreen-btn {
+        body.mobile-teleop .video-controls-top {
           display: none;
         }
         /* Show touch joysticks on mobile */
@@ -572,9 +683,11 @@
         }
       }
 
-      /* Hide touch zones on desktop */
-      .touch-joystick-zone {
-        display: none;
+      /* Hide touch indicators on very small screens or non-touch */
+      @media (hover: hover) and (pointer: fine) {
+        .touch-joystick-zone {
+          display: none;
+        }
       }
       .mobile-exit-btn {
         display: none;
@@ -590,19 +703,8 @@
         border-radius: 20px;
         font-size: 0.8rem;
       }
-
-      /* Touch device detection - show enter button */
-      @media (pointer: coarse) {
-        .mobile-teleop-enter {
-          display: inline-block;
-        }
-      }
-      .mobile-teleop-enter {
-        display: none;
-        margin-top: 0.5rem;
-      }
     </style>
-    <script src="https://unpkg.com/nipplejs@0.10.2/dist/nipplejs.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/nipplejs@0.10.2/dist/nipplejs.min.js"></script>
   </head>
   <body>
     <main>
@@ -671,7 +773,7 @@
             <button id="detail-back-btn" class="ghost" title="Back">←</button>
             <button id="detail-edit-btn" class="ghost" title="Edit lobby" style="font-size:1.2rem;padding:0.5rem;">✏️</button>
           </div>
-          <div style="display:flex;align-items:center;gap:0.5rem;">
+          <div id="detail-header" style="display:flex;align-items:center;gap:0.5rem;">
             <h2 id="detail-title" style="margin:0;"></h2>
             <span id="detail-ros-status" class="status disconnected">Offline</span>
           </div>
@@ -689,19 +791,27 @@
             <div id="teleop-pane" hidden>
               <!-- full-width video with HUD overlay -->
               <div class="video-wrapper" id="video-wrapper">
-                <video id="robot-video" autoplay playsinline controls></video>
-                <button id="video-fullscreen-btn" class="ghost" type="button" aria-label="Toggle fullscreen">⤢</button>
+                <video id="robot-video" autoplay playsinline controls controlsList="nofullscreen"></video>
+                <div class="video-controls-top">
+                  <button id="mic-toggle-btn" class="ghost mic-btn muted" type="button" title="Toggle microphone">🎤</button>
+                  <button id="video-back-btn" class="ghost" type="button" aria-label="Exit stream">←</button>
+                </div>
+                <button id="video-fullscreen-btn" class="ghost video-fullscreen-btn" type="button" aria-label="Toggle fullscreen">⤢</button>
                 <button class="mobile-exit-btn" id="mobile-exit-btn" type="button">✕ Exit</button>
                 <div class="touch-joystick-zone left" id="joystick-zone-left">
+                  <div class="joystick-indicator"></div>
                   <span class="joystick-label">Move</span>
                 </div>
                 <div class="touch-joystick-zone right" id="joystick-zone-right">
-                  <span class="joystick-label">Camera</span>
+                  <div class="joystick-indicator"></div>
+                  <span class="joystick-label">Look</span>
                 </div>
                 <div class="hud-overlay">
                   <div class="hud-row" style="justify-content:space-between;">
                     <div style="display:flex;gap:0.5rem;align-items:center;">
-                      <div class="status disconnected" id="video-status" style="font-size:0.75rem;padding:0.25rem 0.5rem;">Video</div>
+                      <div class="hud-panel hud-robot-name" id="hud-robot-name">
+                        <strong>Robot</strong>
+                      </div>
                       <div class="hud-panel">
                         <strong id="linear-speed-value">0.00</strong>
                       </div>
@@ -712,16 +822,9 @@
                         <strong id="front-distance-value">--</strong>
                       </div>
                     </div>
-                    <div style="display:flex;gap:0.5rem;align-items:center;">
-                      <button id="mic-toggle-btn" class="ghost mic-btn muted" type="button" title="Toggle microphone">🎤</button>
-                      <span id="mic-status" class="mic-status" style="color:#94a3b8;font-size:0.8rem;"></span>
-                      <button id="mobile-teleop-enter" class="ghost mobile-teleop-enter" type="button" title="Touch controls">📱</button>
-                    </div>
                   </div>
                 </div>
               </div>
-              <!-- hidden elements for compatibility -->
-              <div id="ws-status" hidden></div>
               <!-- hidden elements for compatibility -->
               <p id="active-robot-label" hidden></p>
               <p id="video-meta" hidden></p>
@@ -835,19 +938,19 @@
         const tabPanels = document.querySelectorAll('[data-panel]');
         const teleopPane = document.getElementById('teleop-pane');
         const teleopEmpty = document.getElementById('teleop-empty');
-        const wsStatus = document.getElementById('ws-status');
+        const hudRobotName = document.getElementById('hud-robot-name');
         const telemetryLog = document.getElementById('telemetry');
         const frontDistanceValue = document.getElementById('front-distance-value');
         const linearSpeedValue = document.getElementById('linear-speed-value');
         const angularSpeedValue = document.getElementById('angular-speed-value');
         const activeRobotLabel = document.getElementById('active-robot-label');
         const micToggleBtn = document.getElementById('mic-toggle-btn');
+        console.log('[init] micToggleBtn=', micToggleBtn);
         const micVolumeSlider = document.getElementById('mic-volume');
-        const micStatusEl = document.getElementById('mic-status');
         const videoWrapper = document.getElementById('video-wrapper');
         const videoFullscreenBtn = document.getElementById('video-fullscreen-btn');
+        const videoBackBtn = document.getElementById('video-back-btn');
         const videoElement = document.getElementById('robot-video');
-        const videoStatus = document.getElementById('video-status');
         const videoMeta = document.getElementById('video-meta');
         const lobbyForm = document.getElementById('lobby-form');
         const lobbyNameInput = document.getElementById('lobby-name');
@@ -1342,6 +1445,9 @@
             panel.classList.toggle('active', match);
             panel.hidden = !match;
           });
+          // Full-page teleop mode
+          detailView.classList.toggle('teleop-active', tab === 'teleop');
+          document.body.classList.toggle('teleop-active', tab === 'teleop');
           updateTeleopKeyState();
         }
 
@@ -1369,6 +1475,7 @@
           state.activeRobot = bot;
           state.viewOnly = viewOnly;
           activeRobotLabel.textContent = `${bot.name}${viewOnly ? ' (viewing)' : ''}`;
+          hudRobotName.querySelector('strong').textContent = bot.name;
           setTeleopAvailability(true);
           resetJoy();
           setLobbyTab('teleop');
@@ -1385,6 +1492,10 @@
           startVideo(namespace);  // Also sets up bidirectional audio via WebRTC
           updateMicUI();
           startIdleTimeout();
+          // Auto-initialize touch joysticks on touch devices
+          if (isTouchDevice()) {
+            initTouchJoysticks();
+          }
         }
 
         const IDLE_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
@@ -1424,6 +1535,7 @@
           resetJoy();
           stopMicrophone();
           stopGamepadPolling();
+          destroyTouchJoysticks();
           teleopPane.hidden = true;
           teleopEmpty.hidden = false;
           logTelemetry('Teleop idle');
@@ -1452,11 +1564,7 @@
           if (document.fullscreenElement === videoWrapper) {
             document.exitFullscreen?.();
           }
-          videoStatus.textContent = 'Video';
-          videoStatus.className = 'status disconnected';
           videoMeta.textContent = 'No active stream';
-          wsStatus.textContent = 'WS idle';
-          wsStatus.className = 'status disconnected';
           updateTeleopKeyState();
           updateFullscreenButton();
         }
@@ -1468,7 +1576,6 @@
           if (state.viewOnly) {
             micToggleBtn.style.display = 'none';
             micVolumeSlider.style.display = 'none';
-            micStatusEl.textContent = '';
             return;
           }
           micToggleBtn.style.display = '';
@@ -1478,7 +1585,6 @@
           micToggleBtn.classList.toggle('active', enabled);
           micToggleBtn.title = enabled ? 'Mute microphone' : 'Unmute microphone';
           micVolumeSlider.disabled = true; // Volume control not yet implemented for WebRTC
-          micStatusEl.textContent = enabled ? 'Mic on' : 'Mic off';
         }
 
         async function enableMicrophone() {
@@ -1512,6 +1618,9 @@
             state.micStream = micStream;
             const micTrack = micStream.getAudioTracks()[0];
             state.micTrack = micTrack;
+
+            // Set up audio level detection for visual feedback
+            setupMicLevelDetection(micStream);
 
             // Add mic track to peer connection
             state.pc.addTrack(micTrack, micStream);
@@ -1571,11 +1680,13 @@
         }
 
         function disableMicrophone() {
+          console.log('[mic] disableMicrophone called');
           // Disable (mute) the mic track
           if (state.micTrack) {
             state.micTrack.enabled = false;
           }
           state.micEnabled = false;
+          micToggleBtn.classList.remove('speaking');
           updateMicUI();
         }
 
@@ -1588,16 +1699,56 @@
             state.micStream.getTracks().forEach((track) => track.stop());
             state.micStream = null;
           }
+          // Clean up audio level detection
+          if (state.micLevelInterval) {
+            clearInterval(state.micLevelInterval);
+            state.micLevelInterval = null;
+          }
+          if (state.micAudioContext) {
+            state.micAudioContext.close();
+            state.micAudioContext = null;
+          }
+          micToggleBtn.classList.remove('speaking');
           state.micTrack = null;
           state.micEnabled = false;
           updateMicUI();
         }
 
+        function setupMicLevelDetection(stream) {
+          try {
+            const audioContext = new AudioContext();
+            const analyser = audioContext.createAnalyser();
+            const source = audioContext.createMediaStreamSource(stream);
+            source.connect(analyser);
+            analyser.fftSize = 256;
+            const dataArray = new Uint8Array(analyser.frequencyBinCount);
+            state.micAudioContext = audioContext;
+
+            // Check audio levels periodically
+            state.micLevelInterval = setInterval(() => {
+              if (!state.micEnabled) {
+                micToggleBtn.classList.remove('speaking');
+                return;
+              }
+              analyser.getByteFrequencyData(dataArray);
+              const average = dataArray.reduce((a, b) => a + b, 0) / dataArray.length;
+              // Threshold for "speaking" - adjust as needed
+              const isSpeaking = average > 15;
+              micToggleBtn.classList.toggle('speaking', isSpeaking);
+            }, 100);
+          } catch (err) {
+            console.warn('[mic] Could not set up level detection:', err);
+          }
+        }
+
         function toggleMicrophone() {
+          console.log('[mic] toggleMicrophone called, state.micEnabled=', state.micEnabled);
           if (state.micEnabled) {
+            console.log('[mic] calling disableMicrophone');
             disableMicrophone();
             logTelemetry('Microphone muted');
           } else {
+            console.log('[mic] calling enableMicrophone');
             enableMicrophone();
           }
         }
@@ -1614,11 +1765,7 @@
           if (state.ws) state.ws.close();
           const ws = new WebSocket(`${wsBase}/ws/${encodeURIComponent(namespace)}`);
           state.ws = ws;
-          wsStatus.textContent = 'Connecting...';
-          wsStatus.className = 'status disconnected';
           ws.onopen = () => {
-            wsStatus.textContent = `WS connected (${namespace})`;
-            wsStatus.className = 'status connected';
             logTelemetry(`WebSocket connected to ${namespace}`);
           };
           ws.onmessage = (event) => {
@@ -1645,8 +1792,7 @@
             }
           };
           ws.onclose = () => {
-            wsStatus.textContent = 'WS disconnected';
-            wsStatus.className = 'status disconnected';
+            logTelemetry('WebSocket disconnected');
           };
           ws.onerror = (event) => {
             console.error('WS error', event);
@@ -1826,17 +1972,10 @@
           // Receive robot audio (recvonly initially - mic is added on button click)
           pc.addTransceiver('audio', { direction: 'recvonly' });
           console.info('[video] added recvonly audio transceiver');
-          videoStatus.textContent = 'Connecting';
-          videoStatus.className = 'status disconnected';
           pc.addEventListener('connectionstatechange', () => {
             console.info('[video] connection state changed:', pc.connectionState);
             if (pc.connectionState === 'connected') {
-              videoStatus.textContent = 'Live';
-              videoStatus.className = 'status connected';
               videoMeta.textContent = 'ROS stream active';
-            } else if (pc.connectionState === 'failed') {
-              videoStatus.textContent = 'Error';
-              videoStatus.className = 'status disconnected';
             }
           });
           pc.addEventListener('iceconnectionstatechange', () => {
@@ -1875,8 +2014,6 @@
             })
             .catch((err) => {
               console.error('Video setup failed', err);
-              videoStatus.textContent = 'Error';
-              videoStatus.className = 'status disconnected';
             });
         }
 
@@ -2140,7 +2277,6 @@
         let cameraJoystick = null;
         let touchSendInterval = null;
 
-        const mobileEnterBtn = document.getElementById('mobile-teleop-enter');
         const mobileExitBtn = document.getElementById('mobile-exit-btn');
         const joystickZoneLeft = document.getElementById('joystick-zone-left');
         const joystickZoneRight = document.getElementById('joystick-zone-right');
@@ -2149,26 +2285,20 @@
           return 'ontouchstart' in window || navigator.maxTouchPoints > 0;
         }
 
-        function enterMobileTeleop() {
-          document.body.classList.add('mobile-teleop');
-          // Lock to landscape if possible
-          if (screen.orientation && screen.orientation.lock) {
-            screen.orientation.lock('landscape').catch(() => {});
-          }
-          initTouchJoysticks();
-          logTelemetry('Mobile teleop mode entered');
-        }
-
         function exitMobileTeleop() {
           document.body.classList.remove('mobile-teleop');
           if (screen.orientation && screen.orientation.unlock) {
             screen.orientation.unlock();
           }
-          destroyTouchJoysticks();
           logTelemetry('Mobile teleop mode exited');
         }
 
         function initTouchJoysticks() {
+          console.log('[touch] initTouchJoysticks called');
+          console.log('[touch] nipplejs:', !!window.nipplejs);
+          console.log('[touch] joystickZoneLeft:', joystickZoneLeft);
+          console.log('[touch] joystickZoneRight:', joystickZoneRight);
+
           if (!window.nipplejs) {
             console.warn('[touch] nipplejs not loaded');
             return;
@@ -2181,9 +2311,8 @@
             zone: joystickZoneLeft,
             mode: 'static',
             position: { left: '50%', top: '50%' },
-            color: 'rgba(59, 130, 246, 0.5)',
-            size: 120,
-            restOpacity: 0.5,
+            color: 'rgba(59, 130, 246, 0.6)',
+            size: 100,
           });
 
           moveJoystick.on('move', (evt, data) => {
@@ -2192,10 +2321,18 @@
             const force = Math.min(data.force, 1);
             state.joyAxes[1] = data.vector.y * force;  // forward/back
             state.joyAxes[3] = -data.vector.x * force; // turn (inverted for steering)
+            console.log('[touch] move:', state.joyAxes[1].toFixed(2), state.joyAxes[3].toFixed(2));
             updateJoyIndicators();
           });
 
+          moveJoystick.on('start', () => {
+            console.log('[touch] joystick start');
+            joystickZoneLeft.classList.add('active');
+          });
+
           moveJoystick.on('end', () => {
+            console.log('[touch] joystick end');
+            joystickZoneLeft.classList.remove('active');
             state.joyAxes[1] = 0;
             state.joyAxes[3] = 0;
             updateJoyIndicators();
@@ -2207,9 +2344,12 @@
             zone: joystickZoneRight,
             mode: 'static',
             position: { left: '50%', top: '50%' },
-            color: 'rgba(20, 184, 166, 0.5)',
-            size: 120,
-            restOpacity: 0.5,
+            color: 'rgba(20, 184, 166, 0.6)',
+            size: 100,
+          });
+
+          cameraJoystick.on('start', () => {
+            joystickZoneRight.classList.add('active');
           });
 
           cameraJoystick.on('move', (evt, data) => {
@@ -2224,7 +2364,7 @@
           });
 
           cameraJoystick.on('end', () => {
-            // Camera stays at current position when released
+            joystickZoneRight.classList.remove('active');
           });
 
           // Start continuous sending while in touch mode
@@ -2237,7 +2377,7 @@
             sendCameraPtz();
           }, 50);
 
-          console.info('[touch] joysticks initialized');
+          console.info('[touch] joysticks initialized, controlChannel:', state.controlChannel?.readyState);
         }
 
         function destroyTouchJoysticks() {
@@ -2255,14 +2395,6 @@
           }
         }
 
-        // Show mobile enter button on touch devices
-        if (isTouchDevice() && mobileEnterBtn) {
-          mobileEnterBtn.style.display = 'inline-block';
-        }
-
-        if (mobileEnterBtn) {
-          mobileEnterBtn.addEventListener('click', enterMobileTeleop);
-        }
 
         if (mobileExitBtn) {
           mobileExitBtn.addEventListener('click', exitMobileTeleop);
@@ -2272,6 +2404,7 @@
         window.addEventListener('keyup', (event) => handleKey(event, false));
 
         micToggleBtn.addEventListener('click', () => {
+          console.log('[mic] button clicked, micEnabled=', state.micEnabled);
           toggleMicrophone();
         });
 
@@ -2288,6 +2421,13 @@
             }
           });
           document.addEventListener('fullscreenchange', updateFullscreenButton);
+        }
+
+        if (videoBackBtn) {
+          videoBackBtn.addEventListener('click', () => {
+            teardownTeleop();
+            setLobbyTab('lobby');
+          });
         }
 
         function copyText(text, successMessage, target = lobbyMessage) {

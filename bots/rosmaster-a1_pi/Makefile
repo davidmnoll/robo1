@@ -13,21 +13,29 @@ help:
 	@echo "Rosmaster A1 Pi Robot"
 	@echo ""
 	@echo "From dev machine:"
-	@echo "  make sync-to     - Push code to Pi"
-	@echo "  make sync-from   - Pull code from Pi"
-	@echo "  make deploy      - Sync + build (one command)"
-	@echo "  make ssh         - SSH to the Pi"
-	@echo "  make shell       - Shell into Docker container"
-	@echo "  make build-remote - Build package on Pi"
-	@echo "  make start       - Start robot (remote)"
-	@echo "  make stop        - Stop robot (remote)"
-	@echo "  make logs        - Tail logs (remote)"
+	@echo "  make sync-to        - Push code to Pi"
+	@echo "  make sync-from      - Pull code from Pi"
+	@echo "  make deploy         - Sync + build + install service"
+	@echo "  make ssh            - SSH to the Pi"
+	@echo "  make shell          - Shell into Docker container"
+	@echo "  make build-remote   - Build package on Pi"
+	@echo "  make start          - Start robot (remote, one-time)"
+	@echo "  make stop           - Stop robot (remote)"
+	@echo "  make logs           - Tail logs (remote)"
+	@echo ""
+	@echo "Systemd service (auto-start on boot):"
+	@echo "  make install-service - Install/update systemd service"
+	@echo "  make service-start   - Start the service"
+	@echo "  make service-stop    - Stop the service"
+	@echo "  make service-restart - Restart the service"
+	@echo "  make service-status  - Check service status"
+	@echo "  make service-logs    - Tail service logs"
 	@echo ""
 	@echo "On robot (in container):"
-	@echo "  make build         - Build the ROS2 package"
-	@echo "  make run           - Launch all services"
+	@echo "  make build          - Build the ROS2 package"
+	@echo "  make run            - Launch all services"
 	@echo "  make run-controller - Controller only"
-	@echo "  make run-camera    - Camera only"
+	@echo "  make run-camera     - Camera only"
 	@echo ""
 	@echo "Config: ROBOT_ID=$(ROBOT_ID) ROS_DOMAIN_ID=$(ROS_DOMAIN_ID)"
 
@@ -66,8 +74,34 @@ build-remote:
 	@echo "Building ROS2 package on $(PI_HOST)..."
 	ssh $(PI_HOST) "docker exec \$$(docker ps -q) bash -c 'cd $(CONTAINER_DIR) && make build'"
 
-deploy: sync-to build-remote
+deploy: sync-to build-remote install-service
 	@echo "Deployed and built on $(PI_HOST)"
+
+install-service:
+	@echo "Installing systemd service on $(PI_HOST)..."
+	ssh $(PI_HOST) "chmod +x $(REMOTE_DIR)/start-robot.sh $(REMOTE_DIR)/stop-robot.sh"
+	ssh $(PI_HOST) "sudo cp $(REMOTE_DIR)/rosmaster.service /etc/systemd/system/"
+	ssh $(PI_HOST) "sudo systemctl daemon-reload"
+	ssh $(PI_HOST) "sudo systemctl enable rosmaster.service"
+	@echo "Service installed. Use 'make service-start' to start."
+
+service-start:
+	ssh $(PI_HOST) "sudo systemctl start rosmaster.service"
+	@echo "Service started"
+
+service-stop:
+	ssh $(PI_HOST) "sudo systemctl stop rosmaster.service"
+	@echo "Service stopped"
+
+service-restart:
+	ssh $(PI_HOST) "sudo systemctl restart rosmaster.service"
+	@echo "Service restarted"
+
+service-status:
+	ssh $(PI_HOST) "sudo systemctl status rosmaster.service"
+
+service-logs:
+	ssh $(PI_HOST) "sudo journalctl -u rosmaster.service -f"
 
 logs:
 	ssh -t $(PI_HOST) "docker exec \$$(docker ps -q) bash -c '\

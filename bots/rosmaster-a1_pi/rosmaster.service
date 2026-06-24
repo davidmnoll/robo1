@@ -1,0 +1,16 @@
+[Unit]
+Description=Rosmaster Robot Services
+After=network.target docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+EnvironmentFile=-/home/pi/share/rosmaster/.env
+ExecStart=/home/pi/share/rosmaster/start-robot.sh
+ExecStop=/home/pi/share/rosmaster/stop-robot.sh
+Restart=always
+RestartSec=10
+User=pi
+
+[Install]
+WantedBy=multi-user.target
