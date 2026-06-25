@@ -738,7 +738,7 @@ class ControlAggregator:
         if not self._running:
             self._running = True
             self._task = asyncio.create_task(self._send_loop())
-            logger.info("ControlAggregator started for %s", robot_id)
+            logger.info("ControlAggregator started for %s", self.robot_id)
 
     def stop(self) -> None:
         """Stop the aggregation loop."""
