@@ -721,6 +721,103 @@ class GroupAudioRelayTrack(AudioStreamTrack):
         super().stop()
 
 
+class MixedAudioTrack(AudioStreamTrack):
+    """Mixes robot audio with group audio (other users) into a single track.
+
+    This allows sending both robot audio and group call audio to the browser
+    without needing a second audio track (which breaks SDP negotiation).
+    """
+
+    kind = "audio"
+    SAMPLES_PER_FRAME = 960
+
+    def __init__(
+        self,
+        robot_track: MediaStreamTrack,
+        mixer: GroupAudioMixer,
+        user_key: str,
+        sample_rate: int = 48000,
+    ) -> None:
+        super().__init__()
+        self.robot_track = robot_track
+        self.mixer = mixer
+        self.user_key = user_key
+        self.sample_rate = sample_rate
+        self._pts = 0
+        self._running = True
+        self._recv_count = 0
+        logger.info("MixedAudioTrack created for user %s on robot %s",
+                   user_key, mixer.robot_id)
+
+    async def recv(self) -> AudioFrame:
+        """Get the next mixed audio frame (robot + group, excluding self)."""
+        if not self._running:
+            raise Exception("Track stopped")
+
+        self._recv_count += 1
+
+        # Get robot audio frame
+        try:
+            robot_frame = await self.robot_track.recv()
+            robot_arr = robot_frame.to_ndarray()
+            # Convert to mono if stereo
+            if robot_arr.shape[0] > 1:
+                robot_samples = robot_arr[0].astype(np.float32)
+            else:
+                robot_samples = robot_arr.flatten().astype(np.float32)
+            # Ensure correct length
+            if len(robot_samples) > self.SAMPLES_PER_FRAME:
+                robot_samples = robot_samples[:self.SAMPLES_PER_FRAME]
+            elif len(robot_samples) < self.SAMPLES_PER_FRAME:
+                robot_samples = np.pad(robot_samples, (0, self.SAMPLES_PER_FRAME - len(robot_samples)))
+        except Exception as e:
+            # If robot track fails, use silence
+            if self._recv_count % 500 == 1:
+                logger.warning("MixedAudioTrack: robot track error: %s", e)
+            robot_samples = np.zeros(self.SAMPLES_PER_FRAME, dtype=np.float32)
+
+        # Get group audio (other users, excluding self)
+        group_samples = self.mixer.get_mixed_frame(exclude_user=self.user_key).astype(np.float32)
+
+        # Mix: average if both have audio, otherwise use whichever has audio
+        robot_rms = np.sqrt(np.mean(robot_samples**2))
+        group_rms = np.sqrt(np.mean(group_samples**2))
+
+        if robot_rms > 100 and group_rms > 100:
+            # Both have audio - mix them (average)
+            mixed = (robot_samples + group_samples) / 2
+        elif group_rms > 100:
+            # Only group audio
+            mixed = group_samples
+        else:
+            # Only robot audio (or silence)
+            mixed = robot_samples
+
+        # Clip and convert to int16
+        mixed = np.clip(mixed, -32768, 32767).astype(np.int16)
+
+        # Create stereo frame
+        stereo = np.empty(len(mixed) * 2, dtype=np.int16)
+        stereo[0::2] = mixed
+        stereo[1::2] = mixed
+
+        frame = AudioFrame.from_ndarray(stereo.reshape(1, -1), format="s16", layout="stereo")
+        frame.sample_rate = self.sample_rate
+        frame.pts = self._pts
+        self._pts += self.SAMPLES_PER_FRAME
+
+        if self._recv_count % 500 == 1:
+            logger.info("MixedAudioTrack recv %d for %s: robot_rms=%.1f, group_rms=%.1f",
+                       self._recv_count, self.user_key, robot_rms, group_rms)
+
+        return frame
+
+    def stop(self) -> None:
+        """Stop the mixed track."""
+        self._running = False
+        super().stop()
+
+
 # Group audio mixers per robot
 group_audio_mixers: Dict[str, GroupAudioMixer] = {}
 
@@ -2786,15 +2883,16 @@ async def start_webrtc(
                 await notify_bridge_stream(robot_id, False)
 
     pc.addTrack(relayed_video_track)
-    if relayed_audio_track:
-        pc.addTrack(relayed_audio_track)
-        logger.info("SFU Hop2: added robot audio track for %s", robot_id)
 
-    # Add group audio track so user can hear other users
-    group_mixer = get_or_create_group_mixer(robot_id)
-    group_audio_track = GroupAudioRelayTrack(group_mixer, user_pc_key)
-    pc.addTrack(group_audio_track)
-    logger.info("SFU Hop2: added group audio track for %s (user=%s)", robot_id, current_user.email)
+    # Add mixed audio track (robot audio + group audio from other users)
+    # This combines both into a single track to avoid SDP negotiation issues
+    if relayed_audio_track:
+        group_mixer = get_or_create_group_mixer(robot_id)
+        mixed_audio_track = MixedAudioTrack(relayed_audio_track, group_mixer, user_pc_key)
+        pc.addTrack(mixed_audio_track)
+        logger.info("SFU Hop2: added mixed audio track for %s (user=%s)", robot_id, current_user.email)
+    else:
+        logger.warning("SFU Hop2: no audio track for %s", robot_id)
 
     # Create telemetry data channel to send to browser
     telemetry_channel = pc.createDataChannel("telemetry", ordered=False)
