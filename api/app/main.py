@@ -219,9 +219,11 @@ robot_audio_broadcasters: Dict[str, "RobotAudioBroadcaster"] = {}
 # Hop1: ros-bridge <-> API
 hop1_telemetry_channels: Dict[str, RTCDataChannel] = {}  # robot_id -> channel from ros-bridge
 hop1_control_channels: Dict[str, RTCDataChannel] = {}    # robot_id -> channel to ros-bridge
+hop1_map_channels: Dict[str, RTCDataChannel] = {}        # robot_id -> map channel from ros-bridge
 # Hop2: API <-> Browser(s)
 hop2_telemetry_channels: Dict[str, list[RTCDataChannel]] = defaultdict(list)  # robot_id -> list of channels to browsers
 hop2_control_channels: Dict[str, list[RTCDataChannel]] = defaultdict(list)    # robot_id -> list of channels from browsers
+hop2_map_channels: Dict[str, list[RTCDataChannel]] = defaultdict(list)        # robot_id -> list of map channels to browsers
 
 
 class RobotAudioBroadcaster:
@@ -553,6 +555,293 @@ class BrowserAudioRelayTrack(AudioStreamTrack):
         """Stop the relay track."""
         self._running = False
         super().stop()
+
+
+class GroupAudioMixer:
+    """Mixes audio from multiple users for group calling.
+
+    Each user's audio frames are stored in a per-user buffer.
+    When mixed audio is requested, all users' recent frames are combined.
+    """
+
+    SAMPLES_PER_FRAME = 960  # 20ms at 48kHz
+    MAX_BUFFER_FRAMES = 5   # Keep last 100ms of audio per user
+
+    def __init__(self, robot_id: str) -> None:
+        self.robot_id = robot_id
+        # user_key -> list of recent audio frames (as numpy arrays)
+        self._user_buffers: Dict[str, list[np.ndarray]] = defaultdict(list)
+        self._lock = asyncio.Lock()
+        self._push_count = 0
+        logger.info("GroupAudioMixer created for %s", robot_id)
+
+    def push_frame(self, user_key: str, frame: AudioFrame) -> None:
+        """Push an audio frame from a user to the mixer."""
+        try:
+            arr = frame.to_ndarray()
+            # Convert to mono if needed
+            if arr.shape[0] > 1:
+                samples = arr[0].astype(np.int16)
+            elif len(arr.shape) > 1 and arr.shape[1] > frame.samples:
+                samples = arr.flatten()[::2].astype(np.int16)
+            else:
+                samples = arr.flatten().astype(np.int16)
+
+            # Store in user's buffer
+            self._user_buffers[user_key].append(samples)
+            # Keep only recent frames
+            while len(self._user_buffers[user_key]) > self.MAX_BUFFER_FRAMES:
+                self._user_buffers[user_key].pop(0)
+
+            self._push_count += 1
+            if self._push_count % 500 == 1:
+                logger.info("GroupAudioMixer %s: push from %s, active_users=%d",
+                           self.robot_id, user_key, len(self._user_buffers))
+        except Exception as e:
+            logger.warning("GroupAudioMixer push error for %s: %s", self.robot_id, e)
+
+    def get_mixed_frame(self, exclude_user: str = None) -> np.ndarray:
+        """Get mixed audio from all users, optionally excluding one user.
+
+        Returns a mono int16 numpy array of SAMPLES_PER_FRAME samples.
+        """
+        mixed = np.zeros(self.SAMPLES_PER_FRAME, dtype=np.float32)
+        contributing_users = 0
+
+        for user_key, frames in self._user_buffers.items():
+            if exclude_user and user_key == exclude_user:
+                continue
+            if not frames:
+                continue
+            # Use the most recent frame from this user
+            frame_data = frames[-1]
+            # Pad or truncate to SAMPLES_PER_FRAME
+            if len(frame_data) >= self.SAMPLES_PER_FRAME:
+                mixed += frame_data[:self.SAMPLES_PER_FRAME].astype(np.float32)
+            else:
+                mixed[:len(frame_data)] += frame_data.astype(np.float32)
+            contributing_users += 1
+
+        # Normalize if multiple users to avoid clipping
+        if contributing_users > 1:
+            mixed = mixed / contributing_users
+
+        # Clip to int16 range and convert
+        mixed = np.clip(mixed, -32768, 32767).astype(np.int16)
+        return mixed
+
+    def remove_user(self, user_key: str) -> None:
+        """Remove a user's audio buffer when they disconnect."""
+        self._user_buffers.pop(user_key, None)
+        logger.info("GroupAudioMixer %s: removed user %s, remaining=%d",
+                   self.robot_id, user_key, len(self._user_buffers))
+
+    def has_audio(self, exclude_user: str = None) -> bool:
+        """Check if there's any audio to mix (excluding a specific user)."""
+        for user_key, frames in self._user_buffers.items():
+            if exclude_user and user_key == exclude_user:
+                continue
+            if frames:
+                return True
+        return False
+
+
+class GroupAudioRelayTrack(AudioStreamTrack):
+    """Relay track that provides mixed group audio to a specific user.
+
+    Pulls mixed audio from GroupAudioMixer, excluding the receiving user's own audio.
+    """
+
+    kind = "audio"
+    SAMPLES_PER_FRAME = 960
+
+    def __init__(self, mixer: GroupAudioMixer, user_key: str, sample_rate: int = 48000) -> None:
+        super().__init__()
+        self.mixer = mixer
+        self.user_key = user_key
+        self.sample_rate = sample_rate
+        self._pts = 0
+        self._running = True
+        self._recv_count = 0
+        logger.info("GroupAudioRelayTrack created for user %s on robot %s",
+                   user_key, mixer.robot_id)
+
+    async def recv(self) -> AudioFrame:
+        """Get the next mixed audio frame (excluding self)."""
+        if not self._running:
+            raise Exception("Track stopped")
+
+        # Small delay to allow frames to accumulate
+        await asyncio.sleep(0.02)  # 20ms
+
+        self._recv_count += 1
+
+        # Get mixed audio excluding our own
+        mixed = self.mixer.get_mixed_frame(exclude_user=self.user_key)
+
+        # Create stereo frame (duplicate mono to both channels)
+        stereo = np.empty(len(mixed) * 2, dtype=np.int16)
+        stereo[0::2] = mixed
+        stereo[1::2] = mixed
+
+        frame = AudioFrame.from_ndarray(stereo.reshape(1, -1), format="s16", layout="stereo")
+        frame.sample_rate = self.sample_rate
+        frame.pts = self._pts
+        self._pts += self.SAMPLES_PER_FRAME
+
+        if self._recv_count % 500 == 1:
+            rms = np.sqrt(np.mean(mixed.astype(np.float32)**2))
+            has_audio = self.mixer.has_audio(exclude_user=self.user_key)
+            logger.info("GroupAudioRelayTrack recv %d for %s: rms=%.1f, has_other_audio=%s",
+                       self._recv_count, self.user_key, rms, has_audio)
+
+        return frame
+
+    def stop(self) -> None:
+        """Stop the relay track."""
+        self._running = False
+        super().stop()
+
+
+# Group audio mixers per robot
+group_audio_mixers: Dict[str, GroupAudioMixer] = {}
+
+
+def get_or_create_group_mixer(robot_id: str) -> GroupAudioMixer:
+    """Get or create a group audio mixer for a robot."""
+    if robot_id not in group_audio_mixers:
+        group_audio_mixers[robot_id] = GroupAudioMixer(robot_id)
+    return group_audio_mixers[robot_id]
+
+
+class ControlAggregator:
+    """Aggregates control commands from multiple users and sends averaged commands.
+
+    Each user's most recent command is stored. Periodically, all commands are
+    averaged and sent to the robot. Opposing inputs cancel out.
+    """
+
+    SEND_INTERVAL = 0.05  # 20Hz - send averaged command every 50ms
+    STALE_TIMEOUT = 0.2   # Commands older than 200ms are ignored
+
+    def __init__(self, robot_id: str) -> None:
+        self.robot_id = robot_id
+        # user_key -> (timestamp, parsed command)
+        self._user_commands: Dict[str, tuple[float, dict]] = {}
+        self._running = False
+        self._task: asyncio.Task | None = None
+        self._send_count = 0
+        logger.info("ControlAggregator created for %s", robot_id)
+
+    def start(self) -> None:
+        """Start the aggregation loop."""
+        if not self._running:
+            self._running = True
+            self._task = asyncio.create_task(self._send_loop())
+            logger.info("ControlAggregator started for %s", robot_id)
+
+    def stop(self) -> None:
+        """Stop the aggregation loop."""
+        self._running = False
+        if self._task:
+            self._task.cancel()
+            self._task = None
+        logger.info("ControlAggregator stopped for %s", self.robot_id)
+
+    def push_command(self, user_key: str, message: str) -> None:
+        """Store a control command from a user."""
+        try:
+            cmd = json.loads(message)
+            self._user_commands[user_key] = (_time.time(), cmd)
+        except json.JSONDecodeError:
+            logger.warning("ControlAggregator: invalid JSON from %s", user_key)
+
+    def remove_user(self, user_key: str) -> None:
+        """Remove a user's commands when they disconnect."""
+        self._user_commands.pop(user_key, None)
+        logger.info("ControlAggregator %s: removed user %s", self.robot_id, user_key)
+
+    async def _send_loop(self) -> None:
+        """Periodically compute averaged command and send to robot."""
+        while self._running:
+            try:
+                await asyncio.sleep(self.SEND_INTERVAL)
+                self._send_averaged_command()
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.warning("ControlAggregator send loop error: %s", e)
+
+    def _send_averaged_command(self) -> None:
+        """Compute averaged command from all users and send to robot."""
+        now = _time.time()
+        valid_commands = []
+
+        # Collect non-stale commands
+        for user_key, (timestamp, cmd) in list(self._user_commands.items()):
+            if now - timestamp > self.STALE_TIMEOUT:
+                # Remove stale command
+                self._user_commands.pop(user_key, None)
+            elif cmd.get("type") == "joy":
+                valid_commands.append(cmd)
+
+        if not valid_commands:
+            return  # No active commands
+
+        # Average the axes
+        num_users = len(valid_commands)
+        averaged_axes = [0.0] * 6
+        for cmd in valid_commands:
+            axes = cmd.get("axes", [])
+            for i in range(min(len(axes), 6)):
+                averaged_axes[i] += axes[i]
+
+        # Divide by number of users (averaging)
+        averaged_axes = [a / num_users for a in averaged_axes]
+
+        # For buttons, use OR (any user pressing counts)
+        merged_buttons = [0] * 12
+        for cmd in valid_commands:
+            buttons = cmd.get("buttons", [])
+            for i in range(min(len(buttons), 12)):
+                if buttons[i]:
+                    merged_buttons[i] = 1
+
+        # Create averaged command
+        averaged_cmd = {
+            "type": "joy",
+            "axes": averaged_axes,
+            "buttons": merged_buttons,
+            "timestamp": int(now * 1000),
+            "users": num_users,  # Include for debugging
+        }
+
+        # Send to robot
+        channel = hop1_control_channels.get(self.robot_id)
+        if channel and channel.readyState == "open":
+            try:
+                channel.send(json.dumps(averaged_cmd))
+                self._send_count += 1
+                if self._send_count % 100 == 1:
+                    logger.info("ControlAggregator %s: sent cmd #%d (users=%d, axes=%.2f,%.2f)",
+                               self.robot_id, self._send_count, num_users,
+                               averaged_axes[1], averaged_axes[3])
+            except Exception as e:
+                logger.warning("ControlAggregator send error: %s", e)
+
+
+# Control aggregators per robot
+control_aggregators: Dict[str, ControlAggregator] = {}
+
+
+def get_or_create_control_aggregator(robot_id: str) -> ControlAggregator:
+    """Get or create a control aggregator for a robot."""
+    if robot_id not in control_aggregators:
+        agg = ControlAggregator(robot_id)
+        agg.start()
+        control_aggregators[robot_id] = agg
+    return control_aggregators[robot_id]
+
 
 # STUN whitelist: maps IP -> expiry timestamp
 stun_whitelist: Dict[str, float] = {}
@@ -1935,6 +2224,7 @@ async def handle_forwarder_offer(ws: WebSocket, message: dict) -> None:
     # Clean up old data channels
     hop1_telemetry_channels.pop(robot, None)
     hop1_control_channels.pop(robot, None)
+    hop1_map_channels.pop(robot, None)
 
     pc = RTCPeerConnection()
     robot_forwarder_pcs[robot] = pc
@@ -1963,7 +2253,7 @@ async def handle_forwarder_offer(ws: WebSocket, message: dict) -> None:
 
     @pc.on("datachannel")
     def on_datachannel(channel: RTCDataChannel) -> None:
-        """Handle incoming data channels from ros-bridge (telemetry)."""
+        """Handle incoming data channels from ros-bridge (telemetry, map)."""
         logger.info("SFU Hop1: received data channel '%s' from ros-bridge for %s", channel.label, robot)
         if channel.label == "telemetry":
             hop1_telemetry_channels[robot] = channel
@@ -1982,6 +2272,23 @@ async def handle_forwarder_offer(ws: WebSocket, message: dict) -> None:
                 logger.info("SFU Hop1: telemetry data channel closed for %s", robot)
                 hop1_telemetry_channels.pop(robot, None)
 
+        elif channel.label == "map":
+            hop1_map_channels[robot] = channel
+
+            @channel.on("message")
+            def on_map_message(message: str) -> None:
+                """Relay map data from ros-bridge to all connected browsers."""
+                _relay_map_to_browsers(robot, message)
+
+            @channel.on("open")
+            def on_map_open() -> None:
+                logger.info("SFU Hop1: map data channel open for %s", robot)
+
+            @channel.on("close")
+            def on_map_close() -> None:
+                logger.info("SFU Hop1: map data channel closed for %s", robot)
+                hop1_map_channels.pop(robot, None)
+
     @pc.on("connectionstatechange")
     async def on_state() -> None:
         state = pc.connectionState
@@ -1998,8 +2305,15 @@ async def handle_forwarder_offer(ws: WebSocket, message: dict) -> None:
             # Clean up data channels
             hop1_telemetry_channels.pop(robot, None)
             hop1_control_channels.pop(robot, None)
+            hop1_map_channels.pop(robot, None)
             hop2_telemetry_channels.pop(robot, None)
             hop2_control_channels.pop(robot, None)
+            hop2_map_channels.pop(robot, None)
+            # Clean up group audio mixer and control aggregator for this robot
+            mixer = group_audio_mixers.pop(robot, None)
+            agg = control_aggregators.pop(robot, None)
+            if agg:
+                agg.stop()
             # Close all Hop 2 PCs for this robot
             browser_pcs = robot_browser_pcs.pop(robot, [])
             for bpc in browser_pcs:
@@ -2129,8 +2443,8 @@ async def start_webrtc(
             if old_task and not old_task.done():
                 logger.info("SFU Hop2: cancelling old audio forward task for %s", user_pc_key)
                 old_task.cancel()
-            # Start new forwarding task
-            task = asyncio.ensure_future(_forward_browser_audio(robot_id, track))
+            # Start new forwarding task (pass user_key for group audio)
+            task = asyncio.ensure_future(_forward_browser_audio(robot_id, track, user_pc_key))
             browser_audio_forward_tasks[user_pc_key] = task
 
     @pc.on("datachannel")
@@ -2140,11 +2454,13 @@ async def start_webrtc(
                     channel.label, robot_id, current_user.email)
         if channel.label == "control":
             hop2_control_channels[robot_id].append(channel)
+            # Get control aggregator for multi-user command averaging
+            aggregator = get_or_create_control_aggregator(robot_id)
 
             @channel.on("message")
             def on_control_message(message: str) -> None:
-                """Relay control commands from browser to ros-bridge."""
-                _relay_control_to_robot(robot_id, message)
+                """Buffer control commands for averaging with other users."""
+                aggregator.push_command(user_pc_key, message)
 
             @channel.on("open")
             def on_open() -> None:
@@ -2155,6 +2471,8 @@ async def start_webrtc(
                 logger.info("SFU Hop2: control data channel closed for %s (user=%s)", robot_id, current_user.email)
                 if channel in hop2_control_channels.get(robot_id, []):
                     hop2_control_channels[robot_id].remove(channel)
+                # Remove user from aggregator
+                aggregator.remove_user(user_pc_key)
 
     @pc.on("connectionstatechange")
     async def on_state() -> None:
@@ -2174,15 +2492,33 @@ async def start_webrtc(
                 old_task.cancel()
             # Note: data channels are cleaned up in their on_close handlers
             await pc.close()
-            # Don't auto-stop stream - let it keep running to avoid race conditions
+            # Clean up user from group audio mixer and control aggregator
+            mixer = group_audio_mixers.get(robot_id)
+            if mixer:
+                mixer.remove_user(user_pc_key)
+            agg = control_aggregators.get(robot_id)
+            if agg:
+                agg.remove_user(user_pc_key)
+            # Release the streaming lock for this user immediately
+            active_robot_streams[robot_id].discard(current_user.email)
+            logger.info("SFU Hop2: released stream lock for %s (user=%s), remaining viewers=%s",
+                        robot_id, current_user.email, active_robot_streams.get(robot_id))
+            # Stop robot stream if no more viewers
             remaining = robot_browser_pcs.get(robot_id)
             if not remaining:
-                logger.info("SFU Hop2: no viewers for %s, but keeping stream active", robot_id)
+                logger.info("SFU Hop2: no viewers for %s, stopping robot stream", robot_id)
+                await notify_bridge_stream(robot_id, False)
 
     pc.addTrack(relayed_video_track)
     if relayed_audio_track:
         pc.addTrack(relayed_audio_track)
         logger.info("SFU Hop2: added robot audio track for %s", robot_id)
+
+    # Add group audio track so user can hear other users
+    group_mixer = get_or_create_group_mixer(robot_id)
+    group_audio_track = GroupAudioRelayTrack(group_mixer, user_pc_key)
+    pc.addTrack(group_audio_track)
+    logger.info("SFU Hop2: added group audio track for %s (user=%s)", robot_id, current_user.email)
 
     # Create telemetry data channel to send to browser
     telemetry_channel = pc.createDataChannel("telemetry", ordered=False)
@@ -2197,6 +2533,20 @@ async def start_webrtc(
         logger.info("SFU Hop2: telemetry data channel closed for %s (user=%s)", robot_id, current_user.email)
         if telemetry_channel in hop2_telemetry_channels.get(robot_id, []):
             hop2_telemetry_channels[robot_id].remove(telemetry_channel)
+
+    # Create map data channel to send SLAM minimap to browser
+    map_channel = pc.createDataChannel("map", ordered=False)
+    hop2_map_channels[robot_id].append(map_channel)
+
+    @map_channel.on("open")
+    def on_map_open() -> None:
+        logger.info("SFU Hop2: map data channel open for %s (user=%s)", robot_id, current_user.email)
+
+    @map_channel.on("close")
+    def on_map_close() -> None:
+        logger.info("SFU Hop2: map data channel closed for %s (user=%s)", robot_id, current_user.email)
+        if map_channel in hop2_map_channels.get(robot_id, []):
+            hop2_map_channels[robot_id].remove(map_channel)
 
     browser_offer = RTCSessionDescription(sdp=offer.sdp, type=offer.type)
     await pc.setRemoteDescription(browser_offer)
@@ -2227,6 +2577,27 @@ def _relay_telemetry_to_browsers(robot_id: str, message: str) -> None:
                 logger.debug("Failed to relay telemetry to browser for %s: %s", robot_id, e)
 
 
+def _relay_map_to_browsers(robot_id: str, message: str) -> None:
+    """Relay map data from ros-bridge to all connected browsers via data channels."""
+    channels = hop2_map_channels.get(robot_id, [])
+    if not channels:
+        return
+    # Log occasionally
+    if not hasattr(_relay_map_to_browsers, "_count"):
+        _relay_map_to_browsers._count = {}
+    _relay_map_to_browsers._count[robot_id] = _relay_map_to_browsers._count.get(robot_id, 0) + 1
+    if _relay_map_to_browsers._count[robot_id] % 10 == 1:
+        logger.info("DC relay map %d for %s to %d browsers",
+                    _relay_map_to_browsers._count[robot_id], robot_id, len(channels))
+    # Send to all browser channels
+    for channel in channels:
+        if channel.readyState == "open":
+            try:
+                channel.send(message)
+            except Exception as e:
+                logger.debug("Failed to relay map to browser for %s: %s", robot_id, e)
+
+
 def _relay_control_to_robot(robot_id: str, message: str) -> None:
     """Relay control command from browser to ros-bridge via data channel."""
     channel = hop1_control_channels.get(robot_id)
@@ -2245,14 +2616,17 @@ def _relay_control_to_robot(robot_id: str, message: str) -> None:
         logger.warning("Failed to relay control to robot %s: %s", robot_id, e)
 
 
-async def _forward_browser_audio(robot_id: str, track: MediaStreamTrack) -> None:
-    """Forward audio frames from browser to the browser audio relay track."""
+async def _forward_browser_audio(robot_id: str, track: MediaStreamTrack, user_key: str = None) -> None:
+    """Forward audio frames from browser to the robot and group mixer."""
     relay = browser_audio_relay_tracks.get(robot_id)
     if not relay:
         logger.warning("No browser audio relay track for %s", robot_id)
         return
 
-    logger.info("Starting browser audio forwarding for %s", robot_id)
+    # Get or create group mixer for this robot
+    mixer = get_or_create_group_mixer(robot_id)
+
+    logger.info("Starting browser audio forwarding for %s (user=%s)", robot_id, user_key)
     frame_count = 0
     try:
         while True:
@@ -2269,6 +2643,14 @@ async def _forward_browser_audio(robot_id: str, track: MediaStreamTrack) -> None
                 except Exception:
                     pass
 
+            # Forward to robot
             relay.push_frame(frame)
+
+            # Also push to group mixer for other users to hear
+            if user_key:
+                mixer.push_frame(user_key, frame)
     except Exception as e:
-        logger.info("Browser audio forwarding ended for %s: %s", robot_id, e)
+        logger.info("Browser audio forwarding ended for %s (user=%s): %s", robot_id, user_key, e)
+        # Clean up user from mixer when they disconnect
+        if user_key:
+            mixer.remove_user(user_key)

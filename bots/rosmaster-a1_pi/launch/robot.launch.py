@@ -14,6 +14,12 @@ def generate_launch_description():
         description='Robot identifier for topic namespacing'
     )
 
+    lidar_port_arg = DeclareLaunchArgument(
+        'lidar_port',
+        default_value='/dev/ttyUSB0',
+        description='YDLIDAR serial port'
+    )
+
     camera_device_arg = DeclareLaunchArgument(
         'camera_device',
         default_value='/dev/video0',
@@ -43,6 +49,7 @@ def generate_launch_description():
     camera_width = LaunchConfiguration('camera_width')
     camera_height = LaunchConfiguration('camera_height')
     camera_fps = LaunchConfiguration('camera_fps')
+    lidar_port = LaunchConfiguration('lidar_port')
 
     # Controller node
     controller_node = Node(
@@ -97,14 +104,23 @@ def generate_launch_description():
         ],
     )
 
+    # TODO: SLAM/LIDAR nodes - enable once lidar driver is installed
+    # ydlidar_node = Node(...)
+    # static_tf_base_to_laser = Node(...)
+    # slam_node = Node(...)
+
     return LaunchDescription([
         robot_id_arg,
         camera_device_arg,
         camera_width_arg,
         camera_height_arg,
         camera_fps_arg,
+        lidar_port_arg,
         controller_node,
         audio_stream_node,
         audio_play_node,
         camera_node,
+        # ydlidar_node,
+        # static_tf_base_to_laser,
+        # slam_node,
     ])

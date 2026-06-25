@@ -24,8 +24,9 @@ from pathlib import Path
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy
-from sensor_msgs.msg import Joy
+from sensor_msgs.msg import Joy, LaserScan
 from std_msgs.msg import String, Int32MultiArray
+import math
 
 # Try to import the Rosmaster library - it may not be available in dev environments
 try:
@@ -105,6 +106,12 @@ class RosmasterController(Node):
     # Telemetry publish rate (Hz)
     TELEMETRY_RATE = 10.0
 
+    # Collision avoidance settings
+    SLOWDOWN_START_DISTANCE = 0.3  # meters - start reducing speed at this distance
+    MIN_SPEED_DISTANCE = 0.1       # meters - minimum speed factor applied at this distance
+    MIN_SPEED_FACTOR = 0.15        # never reduce below 15% of commanded speed
+    OBSTACLE_SCAN_ANGLE = 0.52     # radians (±30 degrees front cone)
+
     # Servo limits (degrees)
     SERVO_MIN_ANGLE = 0
     SERVO_MAX_ANGLE = 180
@@ -154,6 +161,10 @@ class RosmasterController(Node):
         self.camera_pan = self.SERVO_CENTER
         self.camera_tilt = self.SERVO_CENTER
 
+        # Collision avoidance state
+        self.min_front_distance = float('inf')
+        self.obstacle_speed_factor = 1.0  # 1.0 = full speed, lower = slower
+
         # QoS for joy - use RELIABLE to match publisher
         joy_qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE)
 
@@ -175,6 +186,13 @@ class RosmasterController(Node):
         # Center camera on startup
         self._set_camera_servo(self.SERVO_PAN, self.SERVO_CENTER)
         self._set_camera_servo(self.SERVO_TILT, self.SERVO_CENTER)
+
+        # Subscribe to LaserScan for collision avoidance
+        scan_topic = f"/{self.robot_id}/scan"
+        self.scan_sub = self.create_subscription(
+            LaserScan, scan_topic, self._scan_callback, 10
+        )
+        self.get_logger().info(f"Subscribed to {scan_topic} for collision avoidance")
 
         # Publisher for telemetry
         telemetry_topic = f"/{self.robot_id}/telemetry"
@@ -244,6 +262,48 @@ class RosmasterController(Node):
 
         self.get_logger().debug(f"Camera PTZ: pan={pan}, tilt={tilt}")
 
+    def _scan_callback(self, msg: LaserScan) -> None:
+        """Process LaserScan data for collision avoidance.
+
+        Checks front cone (±30 degrees) for obstacles and calculates
+        speed reduction factor based on proximity (exponential curve).
+        """
+        front_ranges = []
+        angle = msg.angle_min
+
+        for r in msg.ranges:
+            # Check if angle is within front cone (±OBSTACLE_SCAN_ANGLE radians)
+            if -self.OBSTACLE_SCAN_ANGLE < angle < self.OBSTACLE_SCAN_ANGLE:
+                # Only consider valid range readings
+                if msg.range_min < r < msg.range_max and not math.isnan(r) and not math.isinf(r):
+                    front_ranges.append(r)
+            angle += msg.angle_increment
+
+        if front_ranges:
+            self.min_front_distance = min(front_ranges)
+            old_factor = self.obstacle_speed_factor
+
+            if self.min_front_distance >= self.SLOWDOWN_START_DISTANCE:
+                # No slowdown needed
+                self.obstacle_speed_factor = 1.0
+            else:
+                # Calculate normalized distance (0 at MIN_SPEED_DISTANCE, 1 at SLOWDOWN_START_DISTANCE)
+                range_span = self.SLOWDOWN_START_DISTANCE - self.MIN_SPEED_DISTANCE
+                normalized = (self.min_front_distance - self.MIN_SPEED_DISTANCE) / range_span
+                normalized = max(0.0, min(1.0, normalized))
+
+                # Exponential curve (quadratic) - gets progressively harder to move forward
+                self.obstacle_speed_factor = max(self.MIN_SPEED_FACTOR, normalized ** 2)
+
+            # Log significant changes in speed factor
+            if abs(self.obstacle_speed_factor - old_factor) > 0.1:
+                self.get_logger().info(
+                    f"Obstacle at {self.min_front_distance:.2f}m - speed factor: {self.obstacle_speed_factor:.2f}"
+                )
+        else:
+            self.min_front_distance = float('inf')
+            self.obstacle_speed_factor = 1.0
+
     def _set_camera_servo(self, servo_id: int, angle: int) -> None:
         """Set camera servo position."""
         if self.bot is not None:
@@ -280,7 +340,7 @@ class RosmasterController(Node):
                 # Set drive motors (linear only, no angular for Ackermann)
                 self.bot.set_car_motion(linear_x, 0, 0)
 
-                # Set steering servo
+                # Set steering servo AFTER drive command
                 self.bot.set_pwm_servo(self.SERVO_STEERING, steering_angle)
 
             except Exception as e:
@@ -306,9 +366,14 @@ class RosmasterController(Node):
             dt,
         )
 
+        # Collision avoidance: reduce forward velocity based on proximity
+        effective_linear_x = self.current_linear_x
+        if self.current_linear_x > 0 and self.obstacle_speed_factor < 1.0:
+            effective_linear_x = self.current_linear_x * self.obstacle_speed_factor
+
         # Steering is direct (no ramping for car-like steering)
         # Send command to motors
-        self._set_motion(self.current_linear_x, self.current_steering)
+        self._set_motion(effective_linear_x, self.current_steering)
 
         # Publish telemetry at lower rate
         self.telemetry_counter += 1
@@ -356,6 +421,8 @@ class RosmasterController(Node):
             "camera_pan": self.camera_pan,
             "camera_tilt": self.camera_tilt,
             "timestamp": current_time,
+            "front_distance": self.min_front_distance if self.min_front_distance != float('inf') else -1,
+            "obstacle_speed_factor": self.obstacle_speed_factor,
         }
 
         # Add battery info if available

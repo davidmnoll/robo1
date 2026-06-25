@@ -567,6 +567,33 @@
         font-size: 0.95rem;
       }
 
+      /* SLAM Minimap HUD */
+      .hud-minimap {
+        position: absolute;
+        bottom: 60px;
+        right: 10px;
+        width: 150px;
+        height: 150px;
+        background: rgba(0,0,0,0.7);
+        border: 1px solid rgba(148,163,184,0.5);
+        border-radius: 8px;
+        pointer-events: none;
+        z-index: 10;
+      }
+      #minimap-canvas {
+        width: 100%;
+        height: 100%;
+        border-radius: 8px;
+      }
+      @media (max-width: 600px) {
+        .hud-minimap {
+          width: 100px;
+          height: 100px;
+          bottom: 50px;
+          right: 5px;
+        }
+      }
+
       /* Touch controls - always visible with low opacity */
       .touch-joystick-zone {
         position: absolute;
@@ -883,6 +910,9 @@
                       </div>
                     </div>
                   </div>
+                  <div class="hud-minimap" id="hud-minimap">
+                    <canvas id="minimap-canvas" width="150" height="150"></canvas>
+                  </div>
                 </div>
               </div>
               <!-- hidden elements for compatibility -->
@@ -1128,9 +1158,12 @@
           playbackContext: null,
           playbackQueue: [],
           playbackPlaying: false,
-          // Data channels for control and telemetry
+          // Data channels for control, telemetry, and map
           controlChannel: null,
           telemetryChannel: null,
+          mapChannel: null,
+          // SLAM map data
+          mapData: null,
           // Joystick state (axes and buttons)
           // axes[0]: left stick X, axes[1]: left stick Y (fwd/back)
           // axes[2]: left trigger, axes[3]: right stick X (turn)
@@ -1674,6 +1707,13 @@
             state.telemetryChannel.close();
             state.telemetryChannel = null;
           }
+          if (state.mapChannel) {
+            state.mapChannel.close();
+            state.mapChannel = null;
+          }
+          // Clear minimap
+          state.mapData = null;
+          clearMinimap();
           if (state.pc) {
             state.pc.close();
             state.pc = null;
@@ -2047,7 +2087,7 @@
             }
           });
 
-          // Handle incoming data channels (telemetry from API)
+          // Handle incoming data channels (telemetry and map from API)
           pc.addEventListener('datachannel', (event) => {
             const channel = event.channel;
             console.info('[data] received data channel:', channel.label);
@@ -2063,6 +2103,19 @@
               };
               channel.onmessage = (event) => {
                 handleTelemetryData(event.data);
+              };
+            } else if (channel.label === 'map') {
+              state.mapChannel = channel;
+              channel.onopen = () => {
+                console.info('[data] map channel open');
+                logTelemetry('Map data channel connected');
+              };
+              channel.onclose = () => {
+                console.info('[data] map channel closed');
+                state.mapChannel = null;
+              };
+              channel.onmessage = (event) => {
+                handleMapData(event.data);
               };
             }
           });
@@ -2153,14 +2206,122 @@
                 state.angularSpeed = data.angular_speed;
               }
               updateSpeedIndicators();
-              logTelemetry(`[DC] vel: lin=${state.linearSpeed.toFixed(2)} ang=${state.angularSpeed.toFixed(2)}`);
-              if (typeof data.front_distance === 'number') {
-                frontDistanceValue.textContent = `${data.front_distance.toFixed(2)} m`;
+              // Update front distance display
+              if (typeof data.front_distance === 'number' && data.front_distance > 0) {
+                const distText = `${data.front_distance.toFixed(2)} m`;
+                frontDistanceValue.textContent = distText;
+                // Color gradient based on speed factor (1.0 = normal, lower = more red)
+                const factor = data.obstacle_speed_factor ?? 1.0;
+                if (factor < 1.0) {
+                  // Interpolate from yellow (factor=1) to red (factor=0.1)
+                  const intensity = Math.max(0, (factor - 0.1) / 0.9);
+                  const red = 248;
+                  const green = Math.round(113 + (180 - 113) * intensity);
+                  frontDistanceValue.style.color = `rgb(${red}, ${green}, 113)`;
+                } else {
+                  frontDistanceValue.style.color = '';
+                }
+              } else {
+                frontDistanceValue.textContent = '-- m';
+                frontDistanceValue.style.color = '';
               }
             }
           } catch (err) {
             console.warn('[data] failed to parse telemetry:', err);
           }
+        }
+
+        function handleMapData(message) {
+          /**
+           * Handle SLAM map data received via data channel.
+           */
+          try {
+            const data = JSON.parse(message);
+            if (data.type === 'map_update') {
+              state.mapData = data;
+              renderMinimap();
+            }
+          } catch (err) {
+            console.warn('[data] failed to parse map data:', err);
+          }
+        }
+
+        function renderMinimap() {
+          const canvas = document.getElementById('minimap-canvas');
+          if (!canvas) return;
+          const ctx = canvas.getContext('2d');
+          const map = state.mapData;
+          if (!map) {
+            clearMinimap();
+            return;
+          }
+
+          // Decode base64 map data
+          const binaryString = atob(map.data);
+          const grid = new Uint8Array(binaryString.length);
+          for (let i = 0; i < binaryString.length; i++) {
+            grid[i] = binaryString.charCodeAt(i);
+          }
+
+          // Create image data
+          const imgData = ctx.createImageData(map.width, map.height);
+          for (let i = 0; i < grid.length; i++) {
+            const v = grid[i];
+            const idx = i * 4;
+            if (v === 0) {
+              // Unknown (-1 + 1 = 0) -> Gray
+              imgData.data[idx] = 64;
+              imgData.data[idx + 1] = 64;
+              imgData.data[idx + 2] = 64;
+            } else if (v === 1) {
+              // Free (0 + 1 = 1) -> White/light
+              imgData.data[idx] = 200;
+              imgData.data[idx + 1] = 200;
+              imgData.data[idx + 2] = 200;
+            } else {
+              // Occupied (100 + 1 = 101 or higher) -> Dark/black
+              imgData.data[idx] = 20;
+              imgData.data[idx + 1] = 20;
+              imgData.data[idx + 2] = 20;
+            }
+            imgData.data[idx + 3] = 255; // Alpha
+          }
+
+          // Draw scaled to canvas
+          const tmpCanvas = document.createElement('canvas');
+          tmpCanvas.width = map.width;
+          tmpCanvas.height = map.height;
+          tmpCanvas.getContext('2d').putImageData(imgData, 0, 0);
+
+          // Clear and draw scaled
+          ctx.clearRect(0, 0, canvas.width, canvas.height);
+          ctx.drawImage(tmpCanvas, 0, 0, canvas.width, canvas.height);
+
+          // Draw robot position indicator (center for now - TODO: use odometry)
+          ctx.fillStyle = '#3b82f6';
+          ctx.beginPath();
+          ctx.arc(canvas.width / 2, canvas.height / 2, 4, 0, 2 * Math.PI);
+          ctx.fill();
+
+          // Draw direction indicator
+          ctx.strokeStyle = '#3b82f6';
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          ctx.moveTo(canvas.width / 2, canvas.height / 2);
+          ctx.lineTo(canvas.width / 2, canvas.height / 2 - 8);
+          ctx.stroke();
+        }
+
+        function clearMinimap() {
+          const canvas = document.getElementById('minimap-canvas');
+          if (!canvas) return;
+          const ctx = canvas.getContext('2d');
+          ctx.clearRect(0, 0, canvas.width, canvas.height);
+          // Draw placeholder text
+          ctx.fillStyle = 'rgba(148, 163, 184, 0.5)';
+          ctx.font = '10px sans-serif';
+          ctx.textAlign = 'center';
+          ctx.fillText('No map', canvas.width / 2, canvas.height / 2);
         }
 
         function updateTeleopKeyState() {
@@ -2196,6 +2357,9 @@
               console.log('[key] Stopping continuous send');
               stopKeySending();
               updateAxesFromKeyboard(); // Send final zero state
+            } else if (isPressed) {
+              // Key changed while other keys held - update immediately
+              updateAxesFromKeyboard();
             }
             return;
           }
@@ -2241,7 +2405,7 @@
         }
 
         // Camera pan/tilt control (IJKL keys)
-        const CAMERA_STEP = 5;  // Degrees per update
+        const CAMERA_STEP = 2;  // Degrees per update (slower for smoother control)
         const CAMERA_MIN = 0;
         const CAMERA_MAX = 180;
 
@@ -2469,8 +2633,22 @@
             size: 100,
           });
 
+          // Double-tap detection for camera joystick
+          let cameraLastTapTime = 0;
+          const DOUBLE_TAP_THRESHOLD = 300; // ms
+
           cameraJoystick.on('start', () => {
             joystickZoneRight.classList.add('active');
+
+            // Check for double-tap
+            const now = Date.now();
+            if (now - cameraLastTapTime < DOUBLE_TAP_THRESHOLD) {
+              console.log('[touch] camera double-tap detected, resetting');
+              resetJoy();
+              cameraLastTapTime = 0; // Reset to prevent triple-tap
+            } else {
+              cameraLastTapTime = now;
+            }
           });
 
           cameraJoystick.on('move', (evt, data) => {

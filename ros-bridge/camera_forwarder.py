@@ -24,6 +24,8 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 from rclpy.subscription import Subscription
 from sensor_msgs.msg import Image
 from std_msgs.msg import String, UInt8MultiArray, Int32MultiArray
+from nav_msgs.msg import OccupancyGrid
+import base64
 
 
 _CAMERA_TOPIC_RE = re.compile(r"^/([^/]+)/camera/image_raw$")
@@ -231,6 +233,10 @@ class RobotBridgeNode(Node):
         self.audio_publishers: Dict[str, Publisher] = {}
         self.audio_streaming_robots: Set[str] = set()
 
+        # Map handling
+        self.map_subscriptions: Dict[str, Subscription] = {}
+        self._map_channels: Dict[str, RTCDataChannel] = {}
+
         # SFU: one track and one PC per robot (forwarder -> server)
         self._video_tracks: Dict[str, RosVideoTrack] = {}
         self._audio_tracks: Dict[str, RosAudioTrack] = {}
@@ -343,13 +349,22 @@ class RobotBridgeNode(Node):
             _AUDIO_QOS,
         )
 
+        # Subscribe to map topic for SLAM minimap
+        map_topic = f"/{robot}/map"
+        self.map_subscriptions[robot] = self.create_subscription(
+            OccupancyGrid,
+            map_topic,
+            lambda msg, ns=robot: self._handle_map(ns, msg),
+            10,
+        )
+
         if not self._ice_servers_fetched:
             self._fetch_ice_servers()
 
         asyncio.run_coroutine_threadsafe(
             self._create_forwarder_offer(robot, video_track, audio_track), self._aio_loop
         )
-        self.get_logger().info(f"Started streaming {topic} + {audio_topic}")
+        self.get_logger().info(f"Started streaming {topic} + {audio_topic} + {map_topic}")
 
     def _stop_streaming(self, robot: str) -> None:
         if robot not in self.streaming_robots:
@@ -360,6 +375,9 @@ class RobotBridgeNode(Node):
         audio_sub = self.audio_subscriptions.pop(robot, None)
         if audio_sub:
             self.destroy_subscription(audio_sub)
+        map_sub = self.map_subscriptions.pop(robot, None)
+        if map_sub:
+            self.destroy_subscription(map_sub)
         self.streaming_robots.discard(robot)
         pc = self._peer_connections.pop(robot, None)
         if pc:
@@ -369,7 +387,8 @@ class RobotBridgeNode(Node):
         # Clean up data channels
         self._telemetry_channels.pop(robot, None)
         self._control_channels.pop(robot, None)
-        self.get_logger().info(f"Stopped streaming /{robot}/camera/image_raw + audio")
+        self._map_channels.pop(robot, None)
+        self.get_logger().info(f"Stopped streaming /{robot}/camera/image_raw + audio + map")
 
     def _handle_audio_webrtc(self, robot_id: str, msg: UInt8MultiArray) -> None:
         """Push incoming robot audio to the WebRTC audio track."""
@@ -384,6 +403,41 @@ class RobotBridgeNode(Node):
                     f"Audio {self._audio_count[robot_id]} for {robot_id}: {len(msg.data)} bytes"
                 )
             track.push_audio(bytes(msg.data))
+
+    def _handle_map(self, robot_id: str, msg: OccupancyGrid) -> None:
+        """Send map data via data channel for minimap display."""
+        channel = self._map_channels.get(robot_id)
+        if not channel or channel.readyState != "open":
+            return
+
+        # OccupancyGrid.data is int8[] with values -1 (unknown), 0 (free), 100 (occupied)
+        # Convert to uint8: -1 -> 0, 0 -> 1, 100 -> 101 (add 1 to shift range)
+        map_bytes = bytes([(v + 1) & 0xFF for v in msg.data])
+        map_b64 = base64.b64encode(map_bytes).decode('ascii')
+
+        payload = {
+            "type": "map_update",
+            "width": msg.info.width,
+            "height": msg.info.height,
+            "resolution": msg.info.resolution,
+            "origin_x": msg.info.origin.position.x,
+            "origin_y": msg.info.origin.position.y,
+            "data": map_b64,
+        }
+
+        try:
+            channel.send(json.dumps(payload))
+            # Log occasionally
+            if not hasattr(self, '_map_count'):
+                self._map_count = {}
+            self._map_count[robot_id] = self._map_count.get(robot_id, 0) + 1
+            if self._map_count[robot_id] % 10 == 1:
+                self.get_logger().info(
+                    f"Map {self._map_count[robot_id]} for {robot_id}: "
+                    f"{msg.info.width}x{msg.info.height}, {len(map_b64)} bytes"
+                )
+        except Exception as e:
+            self.get_logger().debug(f"Map channel send failed for {robot_id}: {e}")
 
     # ── Frame handling ───────────────────────────────────────────────
 
@@ -472,6 +526,7 @@ class RobotBridgeNode(Node):
                 # Clean up data channels
                 self._telemetry_channels.pop(robot, None)
                 self._control_channels.pop(robot, None)
+                self._map_channels.pop(robot, None)
                 # Critical: remove from streaming_robots so we can restart streaming
                 self.streaming_robots.discard(robot)
                 self.get_logger().info(f"Cleaned up streaming state for {robot}")
@@ -525,6 +580,19 @@ class RobotBridgeNode(Node):
         def _on_telemetry_close() -> None:
             self.get_logger().info(f"Telemetry data channel closed for {robot}")
             self._telemetry_channels.pop(robot, None)
+
+        # Create map data channel (robot -> browser, for SLAM minimap)
+        map_channel = pc.createDataChannel("map", ordered=False)
+        self._map_channels[robot] = map_channel
+
+        @map_channel.on("open")
+        def _on_map_open() -> None:
+            self.get_logger().info(f"Map data channel open for {robot}")
+
+        @map_channel.on("close")
+        def _on_map_close() -> None:
+            self.get_logger().info(f"Map data channel closed for {robot}")
+            self._map_channels.pop(robot, None)
 
         offer = await pc.createOffer()
         await pc.setLocalDescription(offer)
