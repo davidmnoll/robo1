@@ -128,6 +128,7 @@ class Lobby(Base):
 
     owner = relationship("User", back_populates="lobbies")
     bots = relationship("Bot", back_populates="lobby", cascade="all, delete-orphan")
+    chat_messages = relationship("ChatMessage", back_populates="lobby", cascade="all, delete-orphan")
 
 
 class Bot(Base):
@@ -162,6 +163,20 @@ class RobotCommand(Base):
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     claimed_at = Column(DateTime, nullable=True)
     completed_at = Column(DateTime, nullable=True)
+
+
+class ChatMessage(Base):
+    __tablename__ = "chat_messages"
+
+    id = Column(Integer, primary_key=True, index=True)
+    lobby_id = Column(Integer, ForeignKey("lobbies.id"), nullable=False, index=True)
+    user_id = Column(String(255), nullable=True)  # null for system messages
+    user_name = Column(String(255), nullable=True)
+    message_type = Column(String(32), default="text")  # "text" or "system"
+    content = Column(Text, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+
+    lobby = relationship("Lobby", back_populates="chat_messages")
 
 
 async def get_session() -> AsyncSession:
@@ -202,6 +217,9 @@ latest_telemetry: Dict[str, Dict[str, Any]] = {}
 # Lobby status subscribers (browser clients)
 lobby_status_subscribers: set[WebSocket] = set()
 lobby_status_lock = asyncio.Lock()
+# Chat subscribers - maps lobby_id to set of WebSockets
+chat_subscribers: Dict[int, set[WebSocket]] = defaultdict(set)
+chat_lock = asyncio.Lock()
 
 
 # Browser audio relay tracks - for forwarding browser mic audio to ros-bridge (Hop 1)
@@ -1083,6 +1101,20 @@ class RobotCommandComplete(BaseModel):
     message: Optional[str] = None
 
 
+class ChatMessageCreate(BaseModel):
+    content: str = Field(..., min_length=1, max_length=2000)
+
+
+class ChatMessageOut(BaseModel):
+    id: int
+    lobby_id: int
+    user_id: Optional[str]
+    user_name: Optional[str]
+    message_type: str
+    content: str
+    created_at: datetime
+
+
 async def get_current_user(
     authorization: str = Header(default=None),
     session: AsyncSession = Depends(get_session),
@@ -1245,6 +1277,93 @@ async def delete_lobby(
         bot.is_deleted = True
     await session.commit()
     return {"status": "deleted"}
+
+
+# -----------------------------------------------------------------------------
+# Chat Message Endpoints
+# -----------------------------------------------------------------------------
+
+
+@app.get("/api/lobbies/{lobby_id}/messages")
+async def get_lobby_messages(
+    lobby_id: int,
+    limit: int = 50,
+    before: Optional[datetime] = None,
+    current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    """Get chat messages for a lobby."""
+    lobby = await session.get(Lobby, lobby_id)
+    if not lobby or lobby.is_deleted:
+        raise HTTPException(status_code=404, detail="Lobby not found")
+    if not lobby.is_public and lobby.owner_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Lobby is private")
+
+    query = (
+        select(ChatMessage)
+        .where(ChatMessage.lobby_id == lobby_id)
+        .order_by(ChatMessage.created_at.desc())
+        .limit(min(limit, 100))
+    )
+    if before:
+        query = query.where(ChatMessage.created_at < before)
+
+    result = await session.execute(query)
+    messages = result.scalars().all()
+
+    return {
+        "items": [
+            ChatMessageOut(
+                id=msg.id,
+                lobby_id=msg.lobby_id,
+                user_id=msg.user_id,
+                user_name=msg.user_name,
+                message_type=msg.message_type,
+                content=msg.content,
+                created_at=msg.created_at,
+            )
+            for msg in reversed(messages)  # Return oldest first for display
+        ]
+    }
+
+
+@app.post("/api/lobbies/{lobby_id}/messages", response_model=ChatMessageOut)
+async def create_lobby_message(
+    lobby_id: int,
+    payload: ChatMessageCreate,
+    current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+) -> ChatMessageOut:
+    """Create a new chat message in a lobby."""
+    lobby = await session.get(Lobby, lobby_id)
+    if not lobby or lobby.is_deleted:
+        raise HTTPException(status_code=404, detail="Lobby not found")
+    if not lobby.is_public and lobby.owner_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Lobby is private")
+
+    message = ChatMessage(
+        lobby_id=lobby_id,
+        user_id=str(current_user.id),
+        user_name=current_user.email,
+        message_type="text",
+        content=payload.content.strip(),
+    )
+    session.add(message)
+    await session.commit()
+    await session.refresh(message)
+
+    # Broadcast to WebSocket subscribers
+    await broadcast_chat_message(lobby_id, message)
+
+    return ChatMessageOut(
+        id=message.id,
+        lobby_id=message.lobby_id,
+        user_id=message.user_id,
+        user_name=message.user_name,
+        message_type=message.message_type,
+        content=message.content,
+        created_at=message.created_at,
+    )
 
 
 @app.get("/api/bots")
@@ -2140,9 +2259,131 @@ async def broadcast_lobby_status(robot: str, connected: bool) -> None:
             lobby_status_subscribers.discard(ws)
 
 
+async def broadcast_chat_message(lobby_id: int, message: "ChatMessage") -> None:
+    """Broadcast a chat message to all subscribers of a lobby."""
+    payload = {
+        "type": "chat_message",
+        "lobby_id": lobby_id,
+        "message": {
+            "id": message.id,
+            "lobby_id": message.lobby_id,
+            "user_id": message.user_id,
+            "user_name": message.user_name,
+            "message_type": message.message_type,
+            "content": message.content,
+            "created_at": message.created_at.isoformat(),
+        },
+    }
+    async with chat_lock:
+        dead = []
+        for ws in chat_subscribers.get(lobby_id, set()):
+            try:
+                await ws.send_json(payload)
+            except Exception:
+                dead.append(ws)
+        for ws in dead:
+            chat_subscribers[lobby_id].discard(ws)
+        if not chat_subscribers.get(lobby_id):
+            chat_subscribers.pop(lobby_id, None)
+
+
+async def create_system_message(lobby_id: int, content: str) -> None:
+    """Create and broadcast a system message for a lobby."""
+    async with AsyncSessionLocal() as session:
+        message = ChatMessage(
+            lobby_id=lobby_id,
+            user_id=None,
+            user_name=None,
+            message_type="system",
+            content=content,
+        )
+        session.add(message)
+        await session.commit()
+        await session.refresh(message)
+        await broadcast_chat_message(lobby_id, message)
+
+
+async def get_lobby_id_for_robot(robot_namespace: str) -> Optional[int]:
+    """Get the lobby_id for a robot by its namespace."""
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(Bot.lobby_id)
+            .where(Bot.ros_namespace == robot_namespace)
+            .where(Bot.is_deleted.is_(False))
+            .limit(1)
+        )
+        row = result.first()
+        return row[0] if row else None
+
+
+async def notify_robot_connected(robot_namespace: str) -> None:
+    """Send a system message when a robot connects."""
+    lobby_id = await get_lobby_id_for_robot(robot_namespace)
+    if lobby_id:
+        # Get bot name for a friendlier message
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                select(Bot.name)
+                .where(Bot.ros_namespace == robot_namespace)
+                .where(Bot.is_deleted.is_(False))
+                .limit(1)
+            )
+            row = result.first()
+            bot_name = row[0] if row else robot_namespace
+        await create_system_message(lobby_id, f"{bot_name} connected")
+
+
+async def notify_robot_disconnected(robot_namespace: str) -> None:
+    """Send a system message when a robot disconnects."""
+    lobby_id = await get_lobby_id_for_robot(robot_namespace)
+    if lobby_id:
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                select(Bot.name)
+                .where(Bot.ros_namespace == robot_namespace)
+                .where(Bot.is_deleted.is_(False))
+                .limit(1)
+            )
+            row = result.first()
+            bot_name = row[0] if row else robot_namespace
+        await create_system_message(lobby_id, f"{bot_name} disconnected")
+
+
+async def notify_streaming_started(robot_namespace: str, user_email: str) -> None:
+    """Send a system message when a user starts streaming a robot."""
+    lobby_id = await get_lobby_id_for_robot(robot_namespace)
+    if lobby_id:
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                select(Bot.name)
+                .where(Bot.ros_namespace == robot_namespace)
+                .where(Bot.is_deleted.is_(False))
+                .limit(1)
+            )
+            row = result.first()
+            bot_name = row[0] if row else robot_namespace
+        await create_system_message(lobby_id, f"{user_email} started streaming {bot_name}")
+
+
+async def notify_streaming_stopped(robot_namespace: str, user_email: str) -> None:
+    """Send a system message when a user stops streaming a robot."""
+    lobby_id = await get_lobby_id_for_robot(robot_namespace)
+    if lobby_id:
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                select(Bot.name)
+                .where(Bot.ros_namespace == robot_namespace)
+                .where(Bot.is_deleted.is_(False))
+                .limit(1)
+            )
+            row = result.first()
+            bot_name = row[0] if row else robot_namespace
+        await create_system_message(lobby_id, f"{user_email} stopped streaming {bot_name}")
+
+
 @app.websocket("/api/ws/lobby-status")
 async def lobby_status_ws(websocket: WebSocket) -> None:
-    """WebSocket for browser clients to receive lobby/robot status updates."""
+    """WebSocket for browser clients to receive lobby/robot status updates and chat."""
     await websocket.accept()
     async with lobby_status_lock:
         lobby_status_subscribers.add(websocket)
@@ -2150,14 +2391,45 @@ async def lobby_status_ws(websocket: WebSocket) -> None:
     await websocket.send_json({"type": "connected_lobbies", "lobby_ids": list(connected_lobby_ids)})
     connected_robots = list(robot_forwarder_pcs.keys())
     await websocket.send_json({"type": "connected_robots", "robots": connected_robots})
+    # Track which lobbies this websocket is subscribed to for chat
+    subscribed_lobbies: set[int] = set()
     try:
         while True:
-            await websocket.receive_text()  # Keep alive, ignore messages
+            text = await websocket.receive_text()
+            try:
+                data = json.loads(text)
+                msg_type = data.get("type")
+                lobby_id = data.get("lobby_id")
+
+                if msg_type == "subscribe_chat" and lobby_id:
+                    lobby_id = int(lobby_id)
+                    async with chat_lock:
+                        chat_subscribers[lobby_id].add(websocket)
+                    subscribed_lobbies.add(lobby_id)
+                    logger.debug("WS subscribed to chat for lobby %d", lobby_id)
+
+                elif msg_type == "unsubscribe_chat" and lobby_id:
+                    lobby_id = int(lobby_id)
+                    async with chat_lock:
+                        chat_subscribers[lobby_id].discard(websocket)
+                        if not chat_subscribers[lobby_id]:
+                            chat_subscribers.pop(lobby_id, None)
+                    subscribed_lobbies.discard(lobby_id)
+                    logger.debug("WS unsubscribed from chat for lobby %d", lobby_id)
+
+            except (json.JSONDecodeError, ValueError):
+                pass  # Ignore invalid messages
     except WebSocketDisconnect:
         pass
     finally:
         async with lobby_status_lock:
             lobby_status_subscribers.discard(websocket)
+        # Clean up chat subscriptions
+        async with chat_lock:
+            for lobby_id in subscribed_lobbies:
+                chat_subscribers[lobby_id].discard(websocket)
+                if not chat_subscribers[lobby_id]:
+                    chat_subscribers.pop(lobby_id, None)
 
 
 @app.websocket("/api/ws/{robot_id}")
@@ -2229,6 +2501,7 @@ async def handle_forwarder_offer(ws: WebSocket, message: dict) -> None:
     pc = RTCPeerConnection()
     robot_forwarder_pcs[robot] = pc
     asyncio.create_task(broadcast_lobby_status(robot, True))
+    asyncio.create_task(notify_robot_connected(robot))
 
     @pc.on("track")
     def on_track(track: MediaStreamTrack) -> None:
@@ -2298,6 +2571,7 @@ async def handle_forwarder_offer(ws: WebSocket, message: dict) -> None:
             robot_incoming_audio_tracks.pop(robot, None)
             robot_forwarder_pcs.pop(robot, None)
             asyncio.create_task(broadcast_lobby_status(robot, False))
+            asyncio.create_task(notify_robot_disconnected(robot))
             # Clean up browser audio relay (browser->robot direction)
             relay = browser_audio_relay_tracks.pop(robot, None)
             if relay:
@@ -2400,6 +2674,7 @@ async def start_webrtc(
     # Track active viewers and trigger stream start if first viewer
     was_empty = not active_robot_streams.get(robot_id)
     active_robot_streams[robot_id].add(current_user.email)
+    asyncio.create_task(notify_streaming_started(robot_id, current_user.email))
     if was_empty:
         await notify_bridge_stream(robot_id, True)
 
@@ -2501,6 +2776,7 @@ async def start_webrtc(
                 agg.remove_user(user_pc_key)
             # Release the streaming lock for this user immediately
             active_robot_streams[robot_id].discard(current_user.email)
+            asyncio.create_task(notify_streaming_stopped(robot_id, current_user.email))
             logger.info("SFU Hop2: released stream lock for %s (user=%s), remaining viewers=%s",
                         robot_id, current_user.email, active_robot_streams.get(robot_id))
             # Stop robot stream if no more viewers

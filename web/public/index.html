@@ -790,6 +790,96 @@
       .reauth-modal button:hover {
         background: #2563eb;
       }
+      /* Chat panel styles */
+      .chat-panel {
+        background: rgba(15,23,42,0.85);
+        border: 1px solid rgba(148,163,184,0.2);
+        border-radius: 12px;
+        margin-top: 1rem;
+        display: flex;
+        flex-direction: column;
+        max-height: 400px;
+      }
+      .chat-header {
+        padding: 0.75rem 1rem;
+        border-bottom: 1px solid rgba(148,163,184,0.2);
+        font-weight: 600;
+        font-size: 0.9rem;
+        color: #94a3b8;
+      }
+      .chat-messages {
+        flex: 1;
+        overflow-y: auto;
+        padding: 0.75rem 1rem;
+        display: flex;
+        flex-direction: column;
+        gap: 0.5rem;
+        min-height: 150px;
+        max-height: 280px;
+      }
+      .chat-message {
+        display: flex;
+        flex-direction: column;
+        gap: 0.15rem;
+      }
+      .chat-message .msg-header {
+        display: flex;
+        align-items: baseline;
+        gap: 0.5rem;
+        font-size: 0.75rem;
+      }
+      .chat-message .msg-user {
+        font-weight: 600;
+        color: #60a5fa;
+      }
+      .chat-message .msg-time {
+        color: #64748b;
+      }
+      .chat-message .msg-content {
+        color: #e2e8f0;
+        word-break: break-word;
+      }
+      .chat-message.system {
+        align-items: center;
+        padding: 0.25rem 0;
+      }
+      .chat-message.system .msg-content {
+        color: #64748b;
+        font-style: italic;
+        font-size: 0.85rem;
+      }
+      .chat-input-row {
+        display: flex;
+        gap: 0.5rem;
+        padding: 0.75rem 1rem;
+        border-top: 1px solid rgba(148,163,184,0.2);
+      }
+      .chat-input-row input {
+        flex: 1;
+        margin: 0;
+        padding: 0.5rem 0.75rem;
+        border-radius: 8px;
+        border: 1px solid rgba(148,163,184,0.3);
+        background: rgba(15,23,42,0.8);
+        color: #f8fafc;
+        font-size: 0.9rem;
+      }
+      .chat-input-row button {
+        padding: 0.5rem 1rem;
+        border-radius: 8px;
+        background: #3b82f6;
+        color: white;
+        border: none;
+        font-size: 0.9rem;
+        cursor: pointer;
+      }
+      .chat-input-row button:hover {
+        background: #2563eb;
+      }
+      .chat-input-row button:disabled {
+        background: #475569;
+        cursor: not-allowed;
+      }
     </style>
     <script src="https://cdn.jsdelivr.net/npm/nipplejs@0.10.2/dist/nipplejs.min.js"></script>
   </head>
@@ -872,6 +962,15 @@
 
           <div data-panel="lobby" class="view active">
             <div id="detail-robots" class="robot-grid"></div>
+            <!-- Lobby chat panel -->
+            <div id="lobby-chat" class="chat-panel">
+              <div class="chat-header">Chat</div>
+              <div id="chat-messages" class="chat-messages"></div>
+              <form id="chat-form" class="chat-input-row">
+                <input type="text" id="chat-input" placeholder="Type a message..." maxlength="2000" autocomplete="off">
+                <button type="submit" id="chat-send-btn">Send</button>
+              </form>
+            </div>
           </div>
           <div data-panel="teleop" class="view">
             <div id="teleop-empty" class="empty-state">Select a robot from the lobby tab to begin streaming.</div>
@@ -1080,6 +1179,11 @@
         const botVolumeLabel = document.getElementById('bot-volume-label');
         const botMessage = document.getElementById('bot-message');
         const cancelBotEditBtn = document.getElementById('cancel-bot-edit');
+        // Chat elements
+        const chatMessages = document.getElementById('chat-messages');
+        const chatForm = document.getElementById('chat-form');
+        const chatInput = document.getElementById('chat-input');
+        const chatSendBtn = document.getElementById('chat-send-btn');
 
         const apiMetaTag = document.querySelector('meta[name="robot-gateway-api-base"]');
         const metaValue = apiMetaTag ? (apiMetaTag.getAttribute('content') || '').trim() : '';
@@ -1184,6 +1288,9 @@
           connectedRobots: new Set(),
           connectedLobbies: new Set(),
           lobbyStatusWs: null,
+          // Chat state
+          chatMessages: [],
+          chatSubscribedLobbyId: null,
         };
         let lobbyFetchController = null;
 
@@ -1223,6 +1330,11 @@
                   state.connectedRobots.delete(msg.robot);
                 }
                 updateLobbyRosStatus();
+              } else if (msg.type === 'chat_message') {
+                // Handle incoming chat message
+                if (msg.lobby_id === state.chatSubscribedLobbyId && msg.message) {
+                  appendChatMessage(msg.message);
+                }
               }
             } catch (e) {
               console.warn('[lobby-ws] parse error:', e);
@@ -1364,6 +1476,7 @@
           if (view !== 'detail') {
             setLobbyTab('lobby');
             teardownTeleop();
+            cleanupChat();
           }
         }
 
@@ -1503,6 +1616,8 @@
             showView('detail');
             setLobbyTab('lobby');
             renderLobbyDetail();
+            // Initialize chat for this lobby
+            initLobbyChat(lobbyId);
           } catch (err) {
             console.error(err);
           }
@@ -1576,6 +1691,148 @@
             detailRobots.appendChild(card);
           });
         }
+
+        // ---- Chat Functions ----
+
+        function initLobbyChat(lobbyId) {
+          // Unsubscribe from previous lobby if any
+          if (state.chatSubscribedLobbyId && state.chatSubscribedLobbyId !== lobbyId) {
+            unsubscribeFromChat();
+          }
+          // Clear existing messages
+          state.chatMessages = [];
+          chatMessages.innerHTML = '';
+          // Load history and subscribe
+          loadChatHistory(lobbyId);
+          subscribeToChatUpdates(lobbyId);
+        }
+
+        function cleanupChat() {
+          unsubscribeFromChat();
+          state.chatMessages = [];
+          chatMessages.innerHTML = '';
+        }
+
+        async function loadChatHistory(lobbyId) {
+          try {
+            const resp = await fetch(`${apiBase()}/lobbies/${lobbyId}/messages?limit=50`, {
+              headers: authHeaders(),
+            });
+            if (!resp.ok) return;
+            const data = await resp.json();
+            const messages = data.items || [];
+            state.chatMessages = messages;
+            renderChatMessages();
+          } catch (err) {
+            console.error('[chat] Failed to load history:', err);
+          }
+        }
+
+        function subscribeToChatUpdates(lobbyId) {
+          state.chatSubscribedLobbyId = lobbyId;
+          const ws = state.lobbyStatusWs;
+          if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: 'subscribe_chat', lobby_id: lobbyId }));
+            console.log('[chat] Subscribed to lobby', lobbyId);
+          }
+        }
+
+        function unsubscribeFromChat() {
+          if (!state.chatSubscribedLobbyId) return;
+          const ws = state.lobbyStatusWs;
+          if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: 'unsubscribe_chat', lobby_id: state.chatSubscribedLobbyId }));
+            console.log('[chat] Unsubscribed from lobby', state.chatSubscribedLobbyId);
+          }
+          state.chatSubscribedLobbyId = null;
+        }
+
+        function renderChatMessages() {
+          chatMessages.innerHTML = '';
+          state.chatMessages.forEach(msg => {
+            const el = createChatMessageElement(msg);
+            chatMessages.appendChild(el);
+          });
+          scrollChatToBottom();
+        }
+
+        function appendChatMessage(msg) {
+          // Avoid duplicates
+          if (state.chatMessages.some(m => m.id === msg.id)) return;
+          state.chatMessages.push(msg);
+          const el = createChatMessageElement(msg);
+          chatMessages.appendChild(el);
+          scrollChatToBottom();
+        }
+
+        function createChatMessageElement(msg) {
+          const div = document.createElement('div');
+          div.className = 'chat-message' + (msg.message_type === 'system' ? ' system' : '');
+          if (msg.message_type === 'system') {
+            div.innerHTML = `<span class="msg-content">${escapeHtml(msg.content)}</span>`;
+          } else {
+            const time = formatChatTime(msg.created_at);
+            div.innerHTML = `
+              <div class="msg-header">
+                <span class="msg-user">${escapeHtml(msg.user_name || 'Anonymous')}</span>
+                <span class="msg-time">${time}</span>
+              </div>
+              <span class="msg-content">${escapeHtml(msg.content)}</span>
+            `;
+          }
+          return div;
+        }
+
+        function formatChatTime(isoStr) {
+          try {
+            const d = new Date(isoStr);
+            return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+          } catch {
+            return '';
+          }
+        }
+
+        function escapeHtml(text) {
+          const div = document.createElement('div');
+          div.textContent = text;
+          return div.innerHTML;
+        }
+
+        function scrollChatToBottom() {
+          chatMessages.scrollTop = chatMessages.scrollHeight;
+        }
+
+        async function sendChatMessage(content) {
+          const lobbyId = state.currentLobby?.id;
+          if (!lobbyId || !content.trim()) return;
+          chatSendBtn.disabled = true;
+          try {
+            const resp = await fetch(`${apiBase()}/lobbies/${lobbyId}/messages`, {
+              method: 'POST',
+              headers: {
+                ...authHeaders(),
+                'Content-Type': 'application/json',
+              },
+              body: JSON.stringify({ content: content.trim() }),
+            });
+            if (!resp.ok) throw new Error('Failed to send message');
+            // Message will arrive via WebSocket
+            chatInput.value = '';
+          } catch (err) {
+            console.error('[chat] Failed to send:', err);
+          } finally {
+            chatSendBtn.disabled = false;
+            chatInput.focus();
+          }
+        }
+
+        // Chat form handler
+        chatForm.addEventListener('submit', (e) => {
+          e.preventDefault();
+          sendChatMessage(chatInput.value);
+        });
+
+        // ---- End Chat Functions ----
 
         async function openBotEdit(bot) {
           const lobby = state.currentLobby;
