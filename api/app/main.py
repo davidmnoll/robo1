@@ -243,6 +243,10 @@ hop2_telemetry_channels: Dict[str, list[RTCDataChannel]] = defaultdict(list)  # 
 hop2_control_channels: Dict[str, list[RTCDataChannel]] = defaultdict(list)    # robot_id -> list of channels from browsers
 hop2_map_channels: Dict[str, list[RTCDataChannel]] = defaultdict(list)        # robot_id -> list of map channels to browsers
 
+# Audio routing preferences per user (key: "robot_id:user_email")
+# Value: {"to_group": bool, "to_robot": bool}
+user_audio_routing: Dict[str, dict] = {}
+
 
 class RobotAudioBroadcaster:
     """Consumes audio from Hop1 source track and broadcasts to multiple Hop2 relay tracks.
@@ -2831,7 +2835,21 @@ async def start_webrtc(
 
             @channel.on("message")
             def on_control_message(message: str) -> None:
-                """Buffer control commands for averaging with other users."""
+                """Handle control messages: joystick commands and audio routing."""
+                try:
+                    data = json.loads(message)
+                    if data.get("type") == "audio_routing":
+                        # Update audio routing preferences for this user
+                        user_audio_routing[user_pc_key] = {
+                            "to_group": data.get("to_group", False),
+                            "to_robot": data.get("to_robot", False),
+                        }
+                        logger.info("Audio routing for %s: to_group=%s, to_robot=%s",
+                                   user_pc_key, data.get("to_group"), data.get("to_robot"))
+                        return
+                except json.JSONDecodeError:
+                    pass
+                # Otherwise it's a joystick command
                 aggregator.push_command(user_pc_key, message)
 
             @channel.on("open")
@@ -3017,14 +3035,19 @@ async def _forward_browser_audio(robot_id: str, track: MediaStreamTrack, user_ke
                 except Exception:
                     pass
 
-            # Forward to robot
-            relay.push_frame(frame)
+            # Check routing preferences for this user
+            routing = user_audio_routing.get(user_key, {"to_group": False, "to_robot": False})
 
-            # Also push to group mixer for other users to hear
-            if user_key:
+            # Forward to robot if enabled
+            if routing.get("to_robot", False):
+                relay.push_frame(frame)
+
+            # Push to group mixer for other users to hear if enabled
+            if user_key and routing.get("to_group", False):
                 mixer.push_frame(user_key, frame)
     except Exception as e:
         logger.info("Browser audio forwarding ended for %s (user=%s): %s", robot_id, user_key, e)
-        # Clean up user from mixer when they disconnect
+        # Clean up user from mixer and routing when they disconnect
         if user_key:
             mixer.remove_user(user_key)
+            user_audio_routing.pop(user_key, None)

@@ -31,7 +31,7 @@ variable "api_vm_name" {
 variable "api_vm_machine_type" {
   description = "Compute Engine machine type for the API VM"
   type        = string
-  default     = "e2-small"
+  default     = "e2-medium"  # Upgraded from e2-small for better audio processing
 }
 
 variable "api_vm_disk_size_gb" {

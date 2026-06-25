@@ -979,7 +979,8 @@
               <div class="video-wrapper" id="video-wrapper">
                 <video id="robot-video" autoplay playsinline controls controlsList="nofullscreen"></video>
                 <div class="video-controls-top">
-                  <button id="mic-toggle-btn" class="ghost mic-btn muted" type="button" title="Toggle microphone">🎤</button>
+                  <button id="mic-toggle-btn" class="ghost mic-btn muted" type="button" title="Voice to other streamers">🎤</button>
+                  <button id="robot-mic-btn" class="ghost mic-btn muted" type="button" title="Voice to robot speaker">🔊</button>
                   <button id="video-back-btn" class="ghost" type="button" aria-label="Exit stream">←</button>
                 </div>
                 <button id="video-fullscreen-btn" class="ghost video-fullscreen-btn" type="button" aria-label="Toggle fullscreen">⤢</button>
@@ -1153,7 +1154,8 @@
         const angularSpeedValue = document.getElementById('angular-speed-value');
         const activeRobotLabel = document.getElementById('active-robot-label');
         const micToggleBtn = document.getElementById('mic-toggle-btn');
-        console.log('[init] micToggleBtn=', micToggleBtn);
+        const robotMicBtn = document.getElementById('robot-mic-btn');
+        console.log('[init] micToggleBtn=', micToggleBtn, 'robotMicBtn=', robotMicBtn);
         const micVolumeSlider = document.getElementById('mic-volume');
         const videoWrapper = document.getElementById('video-wrapper');
         const videoFullscreenBtn = document.getElementById('video-fullscreen-btn');
@@ -1253,7 +1255,8 @@
           linearSpeed: 0,
           angularSpeed: 0,
           // Microphone state (WebRTC-based)
-          micEnabled: false,
+          micEnabled: false,       // Voice to GROUP (other streamers)
+          robotMicEnabled: false,  // Voice to ROBOT speaker
           micVolume: 0.8,
           micStream: null,
           micTrack: null,
@@ -1660,9 +1663,9 @@
               button.textContent = 'Resume streaming';
               if (!isOffline) button.addEventListener('click', () => selectRobot(bot, false));
             } else if (otherStreaming) {
-              button.textContent = 'View stream';
+              button.textContent = 'Join stream';
               button.className = 'secondary';
-              if (!isOffline) button.addEventListener('click', () => selectRobot(bot, true));
+              if (!isOffline) button.addEventListener('click', () => selectRobot(bot, false));  // Multi-user: controls enabled
             } else {
               button.textContent = 'Stream robot';
               if (!isOffline) button.addEventListener('click', () => selectRobot(bot, false));
@@ -1993,16 +1996,35 @@
           // Hide mic controls in view-only mode
           if (state.viewOnly) {
             micToggleBtn.style.display = 'none';
+            robotMicBtn.style.display = 'none';
             micVolumeSlider.style.display = 'none';
             return;
           }
           micToggleBtn.style.display = '';
+          robotMicBtn.style.display = '';
           micVolumeSlider.style.display = '';
-          const enabled = state.micEnabled;
-          micToggleBtn.classList.toggle('muted', !enabled);
-          micToggleBtn.classList.toggle('active', enabled);
-          micToggleBtn.title = enabled ? 'Mute microphone' : 'Unmute microphone';
+          // Group mic button (voice to other streamers)
+          micToggleBtn.classList.toggle('muted', !state.micEnabled);
+          micToggleBtn.classList.toggle('active', state.micEnabled);
+          micToggleBtn.title = state.micEnabled ? 'Mute to streamers' : 'Unmute to streamers';
+          // Robot mic button (voice to robot speaker)
+          robotMicBtn.classList.toggle('muted', !state.robotMicEnabled);
+          robotMicBtn.classList.toggle('active', state.robotMicEnabled);
+          robotMicBtn.title = state.robotMicEnabled ? 'Mute to robot' : 'Unmute to robot';
           micVolumeSlider.disabled = true; // Volume control not yet implemented for WebRTC
+        }
+
+        function sendAudioRouting() {
+          // Send audio routing preferences to server via control channel
+          if (state.controlChannel && state.controlChannel.readyState === 'open') {
+            const routing = {
+              type: 'audio_routing',
+              to_group: state.micEnabled,
+              to_robot: state.robotMicEnabled,
+            };
+            state.controlChannel.send(JSON.stringify(routing));
+            console.log('[audio] sent routing:', routing);
+          }
         }
 
         async function enableMicrophone() {
@@ -2160,15 +2182,33 @@
         }
 
         function toggleMicrophone() {
+          // Toggle voice to GROUP (other streamers)
           console.log('[mic] toggleMicrophone called, state.micEnabled=', state.micEnabled);
-          if (state.micEnabled) {
-            console.log('[mic] calling disableMicrophone');
-            disableMicrophone();
-            logTelemetry('Microphone muted');
+          state.micEnabled = !state.micEnabled;
+          updateMicUI();
+          sendAudioRouting();
+          // Enable/disable actual mic capture based on either button
+          if (state.micEnabled || state.robotMicEnabled) {
+            if (!state.micTrack) enableMicrophone();
           } else {
-            console.log('[mic] calling enableMicrophone');
-            enableMicrophone();
+            disableMicrophone();
           }
+          logTelemetry(state.micEnabled ? 'Group mic on' : 'Group mic off');
+        }
+
+        function toggleRobotMic() {
+          // Toggle voice to ROBOT speaker
+          console.log('[mic] toggleRobotMic called, state.robotMicEnabled=', state.robotMicEnabled);
+          state.robotMicEnabled = !state.robotMicEnabled;
+          updateMicUI();
+          sendAudioRouting();
+          // Enable/disable actual mic capture based on either button
+          if (state.micEnabled || state.robotMicEnabled) {
+            if (!state.micTrack) enableMicrophone();
+          } else {
+            disableMicrophone();
+          }
+          logTelemetry(state.robotMicEnabled ? 'Robot mic on' : 'Robot mic off');
         }
 
         function setMicVolume(volume) {
@@ -2962,6 +3002,11 @@
         micToggleBtn.addEventListener('click', () => {
           console.log('[mic] button clicked, micEnabled=', state.micEnabled);
           toggleMicrophone();
+        });
+
+        robotMicBtn.addEventListener('click', () => {
+          console.log('[mic] robot mic button clicked, robotMicEnabled=', state.robotMicEnabled);
+          toggleRobotMic();
         });
 
         micVolumeSlider.addEventListener('input', (event) => {
