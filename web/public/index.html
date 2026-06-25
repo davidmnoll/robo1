@@ -1338,6 +1338,28 @@
                 if (msg.lobby_id === state.chatSubscribedLobbyId && msg.message) {
                   appendChatMessage(msg.message);
                 }
+              } else if (msg.type === 'virtual_player_created') {
+                // Handle new virtual player
+                if (state.currentLobby && state.currentLobby.id === msg.lobby_id && msg.player) {
+                  if (!state.currentLobby.virtual_players) {
+                    state.currentLobby.virtual_players = [];
+                  }
+                  // Avoid duplicates
+                  if (!state.currentLobby.virtual_players.some(p => p.id === msg.player.id)) {
+                    state.currentLobby.virtual_players.push(msg.player);
+                    renderLobbyRobots();
+                  }
+                }
+              } else if (msg.type === 'virtual_player_deleted') {
+                // Handle deleted virtual player
+                if (state.currentLobby && state.currentLobby.id === msg.lobby_id) {
+                  if (state.currentLobby.virtual_players) {
+                    state.currentLobby.virtual_players = state.currentLobby.virtual_players.filter(
+                      p => p.namespace !== msg.namespace
+                    );
+                    renderLobbyRobots();
+                  }
+                }
               }
             } catch (e) {
               console.warn('[lobby-ws] parse error:', e);
@@ -1639,13 +1661,23 @@
         function renderLobbyRobots() {
           const lobby = state.currentLobby;
           detailRobots.innerHTML = '';
-          if (!lobby || !lobby.bots?.length) {
+
+          const hasBots = lobby?.bots?.length > 0;
+          const hasVirtualPlayers = lobby?.virtual_players?.length > 0;
+
+          if (!lobby || (!hasBots && !hasVirtualPlayers)) {
             const empty = document.createElement('div');
             empty.className = 'empty-state';
             empty.textContent = 'No robots registered in this lobby.';
             detailRobots.appendChild(empty);
+            // Add virtual player button even when empty
+            if (lobby) {
+              renderAddVirtualPlayerButton(detailRobots);
+            }
             return;
           }
+
+          // Render physical robots
           lobby.bots.forEach((bot) => {
             if (bot.is_deleted) return;
             const card = document.createElement('div');
@@ -1693,6 +1725,103 @@
             card.appendChild(actions);
             detailRobots.appendChild(card);
           });
+
+          // Render virtual players
+          (lobby.virtual_players || []).forEach((player) => {
+            if (player.is_deleted) return;
+            const card = document.createElement('div');
+            card.className = 'robot-card';
+            card.style.borderLeft = `4px solid ${player.color}`;
+            card.innerHTML = `
+              <h4>${escapeHtml(player.name)}</h4>
+              <p class="robot-status" style="color: ${player.color};">Virtual Player</p>
+              <p class="hint" style="margin:0;font-size:0.75rem;">${player.namespace}</p>
+            `;
+            const actions = document.createElement('div');
+            actions.style.cssText = 'display:flex;gap:0.5rem;align-items:center;';
+            const streamBtn = document.createElement('button');
+            streamBtn.textContent = 'Stream';
+            streamBtn.addEventListener('click', () => selectVirtualPlayer(player));
+            actions.appendChild(streamBtn);
+            if (lobby.is_owner) {
+              const deleteBtn = document.createElement('button');
+              deleteBtn.className = 'ghost';
+              deleteBtn.textContent = '🗑️';
+              deleteBtn.title = 'Delete virtual player';
+              deleteBtn.style.cssText = 'padding:0.25rem 0.5rem;font-size:1rem;';
+              deleteBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                deleteVirtualPlayer(player.namespace);
+              });
+              actions.appendChild(deleteBtn);
+            }
+            card.appendChild(actions);
+            detailRobots.appendChild(card);
+          });
+
+          // Add "Add Virtual Player" button
+          renderAddVirtualPlayerButton(detailRobots);
+        }
+
+        function renderAddVirtualPlayerButton(container) {
+          const addCard = document.createElement('div');
+          addCard.className = 'robot-card';
+          addCard.style.cssText = 'border:2px dashed rgba(148,163,184,0.4);background:transparent;cursor:pointer;display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100px;';
+          addCard.innerHTML = `
+            <span style="font-size:2rem;color:#64748b;">+</span>
+            <span style="color:#94a3b8;font-size:0.9rem;">Add Virtual Player</span>
+          `;
+          addCard.addEventListener('click', () => createVirtualPlayer());
+          container.appendChild(addCard);
+        }
+
+        function createVirtualPlayer() {
+          const lobby = state.currentLobby;
+          if (!lobby) return;
+
+          const name = prompt('Enter name for virtual player:', `Player ${(lobby.virtual_players?.length || 0) + 1}`);
+          if (!name) return;
+
+          const colors = ['#3b82f6', '#ef4444', '#22c55e', '#f59e0b', '#8b5cf6', '#ec4899'];
+          const color = colors[Math.floor(Math.random() * colors.length)];
+
+          // Send request via WebSocket
+          const ws = state.lobbyStatusWs;
+          if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({
+              type: 'request_virtual_player',
+              lobby_id: lobby.id,
+              name,
+              color,
+            }));
+            console.log('[virtual-player] Requested new player via WebSocket');
+          } else {
+            alert('Not connected to server. Please refresh the page.');
+          }
+          // Player will be added via WebSocket event (virtual_player_created)
+        }
+
+        function deleteVirtualPlayer(namespace) {
+          if (!confirm('Delete this virtual player?')) return;
+
+          // Send request via WebSocket
+          const ws = state.lobbyStatusWs;
+          if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({
+              type: 'delete_virtual_player',
+              namespace,
+            }));
+            console.log('[virtual-player] Requested delete via WebSocket');
+          } else {
+            alert('Not connected to server. Please refresh the page.');
+          }
+          // Player will be removed via WebSocket event (virtual_player_deleted)
+        }
+
+        function selectVirtualPlayer(player) {
+          // For now, virtual players can only be viewed when Tauri host is streaming
+          // TODO: Connect to Tauri host's video stream for this virtual player
+          alert(`Virtual player "${player.name}" is ready.\n\nTo see the view, run the Virtual Lobby desktop app and connect with the lobby key.`);
         }
 
         // ---- Chat Functions ----

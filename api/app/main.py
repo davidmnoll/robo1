@@ -129,6 +129,8 @@ class Lobby(Base):
     owner = relationship("User", back_populates="lobbies")
     bots = relationship("Bot", back_populates="lobby", cascade="all, delete-orphan")
     chat_messages = relationship("ChatMessage", back_populates="lobby", cascade="all, delete-orphan")
+    virtual_elements = relationship("VirtualWorldElement", back_populates="lobby", cascade="all, delete-orphan")
+    virtual_players = relationship("VirtualPlayer", back_populates="lobby", cascade="all, delete-orphan")
 
 
 class Bot(Base):
@@ -177,6 +179,46 @@ class ChatMessage(Base):
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
 
     lobby = relationship("Lobby", back_populates="chat_messages")
+
+
+class VirtualWorldElement(Base):
+    """Static elements in the virtual world: walls, fruits, notes, etc."""
+    __tablename__ = "virtual_world_elements"
+
+    id = Column(Integer, primary_key=True, index=True)
+    lobby_id = Column(Integer, ForeignKey("lobbies.id"), nullable=False, index=True)
+    element_type = Column(String(32), nullable=False)  # "wall", "fruit", "note"
+    x = Column(Float, nullable=False)
+    y = Column(Float, nullable=False)
+    z = Column(Float, nullable=False, default=0.0)
+    width = Column(Float, nullable=True)
+    height = Column(Float, nullable=True)
+    depth = Column(Float, nullable=True)
+    rotation = Column(Float, nullable=False, default=0.0)
+    data = Column(Text, nullable=True)  # JSON for element-specific data
+    created_at = Column(DateTime, default=datetime.utcnow)
+    created_by = Column(String(255), nullable=True)
+
+    lobby = relationship("Lobby", back_populates="virtual_elements")
+
+
+class VirtualPlayer(Base):
+    """Virtual players (cubes) that can be spawned and controlled in the virtual world."""
+    __tablename__ = "virtual_players"
+
+    id = Column(Integer, primary_key=True, index=True)
+    lobby_id = Column(Integer, ForeignKey("lobbies.id"), nullable=False, index=True)
+    namespace = Column(String(255), nullable=False, unique=True, index=True)
+    name = Column(String(255), nullable=False)
+    x = Column(Float, nullable=False, default=0.0)
+    y = Column(Float, nullable=False, default=0.0)
+    z = Column(Float, nullable=False, default=0.5)
+    yaw = Column(Float, nullable=False, default=0.0)
+    color = Column(String(7), nullable=False, default="#3b82f6")
+    created_at = Column(DateTime, default=datetime.utcnow)
+    is_deleted = Column(Boolean, nullable=False, default=False)
+
+    lobby = relationship("Lobby", back_populates="virtual_players")
 
 
 async def get_session() -> AsyncSession:
@@ -1174,6 +1216,7 @@ class BotOut(BaseModel):
 
 class LobbyDetailOut(LobbyOut):
     bots: list[BotOut]
+    virtual_players: list[VirtualPlayerOut] = []
 
 
 class RobotCommandOut(BaseModel):
@@ -1214,6 +1257,62 @@ class ChatMessageOut(BaseModel):
     message_type: str
     content: str
     created_at: datetime
+
+
+class VirtualWorldElementCreate(BaseModel):
+    element_type: constr(min_length=1, max_length=32)
+    x: float
+    y: float
+    z: float = 0.0
+    width: Optional[float] = None
+    height: Optional[float] = None
+    depth: Optional[float] = None
+    rotation: float = 0.0
+    data: Optional[str] = None
+
+
+class VirtualWorldElementOut(BaseModel):
+    id: int
+    lobby_id: int
+    element_type: str
+    x: float
+    y: float
+    z: float
+    width: Optional[float]
+    height: Optional[float]
+    depth: Optional[float]
+    rotation: float
+    data: Optional[str]
+    created_at: datetime
+    created_by: Optional[str]
+
+
+class VirtualPlayerCreate(BaseModel):
+    name: constr(min_length=1, max_length=255)
+    x: float = 0.0
+    y: float = 0.0
+    z: float = 0.5
+    yaw: float = 0.0
+    color: str = "#3b82f6"
+
+
+class VirtualPlayerOut(BaseModel):
+    id: int
+    lobby_id: int
+    namespace: str
+    name: str
+    x: float
+    y: float
+    z: float
+    yaw: float
+    color: str
+    created_at: datetime
+    is_deleted: bool
+
+
+class VirtualWorldOut(BaseModel):
+    elements: list[VirtualWorldElementOut]
+    players: list[VirtualPlayerOut]
 
 
 async def get_current_user(
@@ -1325,7 +1424,11 @@ async def get_lobby_detail(
 ) -> LobbyDetailOut:
     stmt = (
         select(Lobby)
-        .options(selectinload(Lobby.owner), selectinload(Lobby.bots).selectinload(Bot.lobby))
+        .options(
+            selectinload(Lobby.owner),
+            selectinload(Lobby.bots).selectinload(Bot.lobby),
+            selectinload(Lobby.virtual_players),
+        )
         .where(Lobby.id == lobby_id)
     )
     result = await session.execute(stmt)
@@ -1465,6 +1568,343 @@ async def create_lobby_message(
         content=message.content,
         created_at=message.created_at,
     )
+
+
+async def create_virtual_player_ws(lobby_id: int, name: str, color: str) -> Optional[VirtualPlayer]:
+    """Create a virtual player via WebSocket request."""
+    try:
+        async with AsyncSessionLocal() as session:
+            # Verify lobby exists
+            lobby = await session.get(Lobby, lobby_id)
+            if not lobby or lobby.is_deleted:
+                return None
+
+            # Generate unique namespace
+            namespace = f"virtual_{secrets.token_hex(8)}"
+
+            player = VirtualPlayer(
+                lobby_id=lobby_id,
+                namespace=namespace,
+                name=name.strip() if name else "Player",
+                x=0.0,
+                y=0.0,
+                z=0.5,
+                yaw=0.0,
+                color=color if color else "#3b82f6",
+            )
+            session.add(player)
+            await session.commit()
+            await session.refresh(player)
+            return player
+    except Exception as e:
+        logger.error("Failed to create virtual player: %s", e)
+        return None
+
+
+async def delete_virtual_player_ws(namespace: str) -> Optional[int]:
+    """Delete a virtual player via WebSocket request. Returns lobby_id if successful."""
+    try:
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                select(VirtualPlayer)
+                .where(VirtualPlayer.namespace == namespace)
+                .where(VirtualPlayer.is_deleted.is_(False))
+            )
+            player = result.scalar_one_or_none()
+            if not player:
+                return None
+
+            lobby_id = player.lobby_id
+            player.is_deleted = True
+            await session.commit()
+            return lobby_id
+    except Exception as e:
+        logger.error("Failed to delete virtual player: %s", e)
+        return None
+
+
+async def notify_virtual_player_created(lobby_id: int, player: VirtualPlayer) -> None:
+    """Notify connected Tauri hosts about a new virtual player."""
+    message = {
+        "type": "virtual_player_created",
+        "lobby_id": lobby_id,
+        "player": {
+            "id": player.id,
+            "namespace": player.namespace,
+            "name": player.name,
+            "x": player.x,
+            "y": player.y,
+            "z": player.z,
+            "yaw": player.yaw,
+            "color": player.color,
+        },
+    }
+    async with lobby_status_lock:
+        dead = []
+        for ws in lobby_status_subscribers:
+            try:
+                await ws.send_json(message)
+            except Exception:
+                dead.append(ws)
+        for ws in dead:
+            lobby_status_subscribers.discard(ws)
+
+
+async def notify_virtual_player_deleted(lobby_id: int, namespace: str) -> None:
+    """Notify connected Tauri hosts about a deleted virtual player."""
+    message = {
+        "type": "virtual_player_deleted",
+        "lobby_id": lobby_id,
+        "namespace": namespace,
+    }
+    async with lobby_status_lock:
+        dead = []
+        for ws in lobby_status_subscribers:
+            try:
+                await ws.send_json(message)
+            except Exception:
+                dead.append(ws)
+        for ws in dead:
+            lobby_status_subscribers.discard(ws)
+
+
+# -----------------------------------------------------------------------------
+# Virtual World WebSocket Helper Functions
+# -----------------------------------------------------------------------------
+
+
+async def send_world_state(websocket: WebSocket, lobby_id: int) -> None:
+    """Send full world state to a client."""
+    async with AsyncSessionLocal() as session:
+        elements_result = await session.execute(
+            select(VirtualWorldElement)
+            .where(VirtualWorldElement.lobby_id == lobby_id)
+            .order_by(VirtualWorldElement.created_at)
+        )
+        elements = elements_result.scalars().all()
+
+        players_result = await session.execute(
+            select(VirtualPlayer)
+            .where(VirtualPlayer.lobby_id == lobby_id)
+            .where(VirtualPlayer.is_deleted.is_(False))
+            .order_by(VirtualPlayer.created_at)
+        )
+        players = players_result.scalars().all()
+
+    message = {
+        "type": "world_state",
+        "lobby_id": lobby_id,
+        "elements": [
+            {
+                "id": e.id,
+                "element_type": e.element_type,
+                "x": e.x,
+                "y": e.y,
+                "z": e.z,
+                "width": e.width,
+                "height": e.height,
+                "depth": e.depth,
+                "rotation": e.rotation,
+                "data": e.data,
+            }
+            for e in elements
+        ],
+        "players": [
+            {
+                "id": p.id,
+                "namespace": p.namespace,
+                "name": p.name,
+                "x": p.x,
+                "y": p.y,
+                "z": p.z,
+                "yaw": p.yaw,
+                "color": p.color,
+            }
+            for p in players
+        ],
+    }
+    await websocket.send_json(message)
+
+
+async def create_virtual_element(lobby_id: int, message: dict) -> Optional[VirtualWorldElement]:
+    """Create a new virtual world element from WebSocket message."""
+    try:
+        async with AsyncSessionLocal() as session:
+            element = VirtualWorldElement(
+                lobby_id=lobby_id,
+                element_type=message.get("element_type", "wall"),
+                x=float(message.get("x", 0)),
+                y=float(message.get("y", 0)),
+                z=float(message.get("z", 0)),
+                width=message.get("width"),
+                height=message.get("height"),
+                depth=message.get("depth"),
+                rotation=float(message.get("rotation", 0)),
+                data=message.get("data"),
+                created_by=message.get("created_by"),
+            )
+            session.add(element)
+            await session.commit()
+            await session.refresh(element)
+            return element
+    except Exception as e:
+        logger.error("Failed to create virtual element: %s", e)
+        return None
+
+
+async def update_virtual_element(lobby_id: int, message: dict) -> Optional[VirtualWorldElement]:
+    """Update an existing virtual world element."""
+    element_id = message.get("element_id")
+    if not element_id:
+        return None
+
+    try:
+        async with AsyncSessionLocal() as session:
+            element = await session.get(VirtualWorldElement, element_id)
+            if not element or element.lobby_id != lobby_id:
+                return None
+
+            if "x" in message:
+                element.x = float(message["x"])
+            if "y" in message:
+                element.y = float(message["y"])
+            if "z" in message:
+                element.z = float(message["z"])
+            if "width" in message:
+                element.width = message["width"]
+            if "height" in message:
+                element.height = message["height"]
+            if "depth" in message:
+                element.depth = message["depth"]
+            if "rotation" in message:
+                element.rotation = float(message["rotation"])
+            if "data" in message:
+                element.data = message["data"]
+
+            await session.commit()
+            await session.refresh(element)
+            return element
+    except Exception as e:
+        logger.error("Failed to update virtual element: %s", e)
+        return None
+
+
+async def remove_virtual_element(lobby_id: int, element_id: int) -> bool:
+    """Remove a virtual world element."""
+    if not element_id:
+        return False
+
+    try:
+        async with AsyncSessionLocal() as session:
+            element = await session.get(VirtualWorldElement, element_id)
+            if not element or element.lobby_id != lobby_id:
+                return False
+
+            await session.delete(element)
+            await session.commit()
+            return True
+    except Exception as e:
+        logger.error("Failed to remove virtual element: %s", e)
+        return False
+
+
+async def broadcast_world_element_change(lobby_id: int, change_type: str, element: VirtualWorldElement) -> None:
+    """Broadcast element change to all lobby subscribers."""
+    message = {
+        "type": change_type,
+        "lobby_id": lobby_id,
+        "element": {
+            "id": element.id,
+            "element_type": element.element_type,
+            "x": element.x,
+            "y": element.y,
+            "z": element.z,
+            "width": element.width,
+            "height": element.height,
+            "depth": element.depth,
+            "rotation": element.rotation,
+            "data": element.data,
+        },
+    }
+    async with lobby_status_lock:
+        dead = []
+        for ws in lobby_status_subscribers:
+            try:
+                await ws.send_json(message)
+            except Exception:
+                dead.append(ws)
+        for ws in dead:
+            lobby_status_subscribers.discard(ws)
+
+
+async def broadcast_world_element_removed(lobby_id: int, element_id: int) -> None:
+    """Broadcast element removal to all lobby subscribers."""
+    message = {
+        "type": "element_removed",
+        "lobby_id": lobby_id,
+        "element_id": element_id,
+    }
+    async with lobby_status_lock:
+        dead = []
+        for ws in lobby_status_subscribers:
+            try:
+                await ws.send_json(message)
+            except Exception:
+                dead.append(ws)
+        for ws in dead:
+            lobby_status_subscribers.discard(ws)
+
+
+async def update_virtual_player_state(lobby_id: int, message: dict) -> None:
+    """Update virtual player position and broadcast to subscribers."""
+    namespace = message.get("namespace")
+    if not namespace:
+        return
+
+    try:
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                select(VirtualPlayer)
+                .where(VirtualPlayer.namespace == namespace)
+                .where(VirtualPlayer.lobby_id == lobby_id)
+                .where(VirtualPlayer.is_deleted.is_(False))
+            )
+            player = result.scalar_one_or_none()
+            if not player:
+                return
+
+            if "x" in message:
+                player.x = float(message["x"])
+            if "y" in message:
+                player.y = float(message["y"])
+            if "z" in message:
+                player.z = float(message["z"])
+            if "yaw" in message:
+                player.yaw = float(message["yaw"])
+
+            await session.commit()
+
+        # Broadcast player state to lobby subscribers
+        state_message = {
+            "type": "player_state",
+            "lobby_id": lobby_id,
+            "namespace": namespace,
+            "x": message.get("x"),
+            "y": message.get("y"),
+            "z": message.get("z"),
+            "yaw": message.get("yaw"),
+        }
+        async with lobby_status_lock:
+            dead = []
+            for ws in lobby_status_subscribers:
+                try:
+                    await ws.send_json(state_message)
+                except Exception:
+                    dead.append(ws)
+            for ws in dead:
+                lobby_status_subscribers.discard(ws)
+    except Exception as e:
+        logger.error("Failed to update virtual player state: %s", e)
 
 
 @app.get("/api/bots")
@@ -1656,9 +2096,49 @@ def lobby_to_out(lobby: Lobby, current_user: User) -> LobbyOut:
 def lobby_detail_to_out(lobby: Lobby, current_user: User) -> LobbyDetailOut:
     base = lobby_to_out(lobby, current_user)
     bots = [bot_to_out(bot) for bot in getattr(lobby, "bots", []) if not bot.is_deleted]
+    virtual_players = [
+        virtual_player_to_out(vp)
+        for vp in getattr(lobby, "virtual_players", [])
+        if not vp.is_deleted
+    ]
     data = base.model_dump()
     data["bots"] = bots
+    data["virtual_players"] = virtual_players
     return LobbyDetailOut(**data)
+
+
+def virtual_player_to_out(player: VirtualPlayer) -> VirtualPlayerOut:
+    return VirtualPlayerOut(
+        id=player.id,
+        lobby_id=player.lobby_id,
+        namespace=player.namespace,
+        name=player.name,
+        x=player.x,
+        y=player.y,
+        z=player.z,
+        yaw=player.yaw,
+        color=player.color,
+        created_at=player.created_at,
+        is_deleted=bool(player.is_deleted),
+    )
+
+
+def virtual_element_to_out(element: VirtualWorldElement) -> VirtualWorldElementOut:
+    return VirtualWorldElementOut(
+        id=element.id,
+        lobby_id=element.lobby_id,
+        element_type=element.element_type,
+        x=element.x,
+        y=element.y,
+        z=element.z,
+        width=element.width,
+        height=element.height,
+        depth=element.depth,
+        rotation=element.rotation,
+        data=element.data,
+        created_at=element.created_at,
+        created_by=element.created_by,
+    )
 
 
 def bot_to_out(bot: Bot) -> BotOut:
@@ -2322,6 +2802,76 @@ async def robot_command_bridge(websocket: WebSocket) -> None:
             elif msg_type == "webrtc_offer":
                 # Forwarder is sending us its Hop 1 offer
                 await handle_forwarder_offer(websocket, message)
+            # Virtual World message handlers
+            elif msg_type == "register_virtual_players":
+                # Tauri host registering virtual players (auto-create like robots)
+                players_data = message.get("players", [])
+                created_players = []
+                async with AsyncSessionLocal() as session:
+                    for p_data in players_data:
+                        namespace = p_data.get("namespace", f"virtual_{secrets.token_hex(8)}")
+                        name = p_data.get("name", namespace)
+                        color = p_data.get("color", "#3b82f6")
+                        # Check if already exists
+                        existing = await session.execute(
+                            select(VirtualPlayer.id).where(
+                                VirtualPlayer.namespace == namespace,
+                                VirtualPlayer.lobby_id == lobby_id,
+                            )
+                        )
+                        if existing.scalar_one_or_none() is None:
+                            player = VirtualPlayer(
+                                lobby_id=lobby_id,
+                                namespace=namespace,
+                                name=name,
+                                color=color,
+                            )
+                            session.add(player)
+                            await session.flush()
+                            await session.refresh(player)
+                            created_players.append(player)
+                            logger.info("Auto-created virtual player '%s' in lobby %s", namespace, lobby_id)
+                        else:
+                            # Un-delete if previously soft-deleted
+                            await session.execute(
+                                VirtualPlayer.__table__.update()
+                                .where(VirtualPlayer.namespace == namespace)
+                                .where(VirtualPlayer.lobby_id == lobby_id)
+                                .values(is_deleted=False)
+                            )
+                    await session.commit()
+                # Notify about created players
+                for player in created_players:
+                    await notify_virtual_player_created(lobby_id, player)
+                await websocket.send_json({"type": "registered", "virtual_players": [p.namespace for p in created_players]})
+            elif msg_type == "get_world_state":
+                # Send full world state to the requesting client
+                await send_world_state(websocket, lobby_id)
+            elif msg_type == "add_element":
+                # Tauri host adding a world element
+                element = await create_virtual_element(lobby_id, message)
+                if element:
+                    await broadcast_world_element_change(lobby_id, "element_added", element)
+                    await websocket.send_json({"type": "ack", "msg_type": "add_element", "element_id": element.id})
+            elif msg_type == "update_element":
+                # Tauri host updating a world element
+                element = await update_virtual_element(lobby_id, message)
+                if element:
+                    await broadcast_world_element_change(lobby_id, "element_updated", element)
+                    await websocket.send_json({"type": "ack", "msg_type": "update_element", "element_id": element.id})
+                else:
+                    await websocket.send_json({"type": "error", "error": "element not found"})
+            elif msg_type == "remove_element":
+                # Tauri host removing a world element
+                element_id = message.get("element_id")
+                if await remove_virtual_element(lobby_id, element_id):
+                    await broadcast_world_element_removed(lobby_id, element_id)
+                    await websocket.send_json({"type": "ack", "msg_type": "remove_element", "element_id": element_id})
+                else:
+                    await websocket.send_json({"type": "error", "error": "element not found"})
+            elif msg_type == "player_state":
+                # Virtual player position/state updates from Tauri host
+                await update_virtual_player_state(lobby_id, message)
             else:
                 await websocket.send_json({"type": "error", "error": "unknown message", "payload": message})
     except WebSocketDisconnect:
@@ -2517,6 +3067,29 @@ async def lobby_status_ws(websocket: WebSocket) -> None:
                             chat_subscribers.pop(lobby_id, None)
                     subscribed_lobbies.discard(lobby_id)
                     logger.debug("WS unsubscribed from chat for lobby %d", lobby_id)
+
+                elif msg_type == "request_virtual_player" and lobby_id:
+                    # Browser requesting a new virtual player
+                    lobby_id = int(lobby_id)
+                    name = data.get("name", "Player")
+                    color = data.get("color", "#3b82f6")
+                    player = await create_virtual_player_ws(lobby_id, name, color)
+                    if player:
+                        await notify_virtual_player_created(lobby_id, player)
+                        logger.info("Created virtual player %s in lobby %d", player.namespace, lobby_id)
+                    else:
+                        await websocket.send_json({"type": "error", "error": "Failed to create virtual player"})
+
+                elif msg_type == "delete_virtual_player":
+                    # Browser requesting to delete a virtual player
+                    namespace = data.get("namespace")
+                    if namespace:
+                        lobby_id = await delete_virtual_player_ws(namespace)
+                        if lobby_id:
+                            await notify_virtual_player_deleted(lobby_id, namespace)
+                            logger.info("Deleted virtual player %s", namespace)
+                        else:
+                            await websocket.send_json({"type": "error", "error": "Virtual player not found"})
 
             except (json.JSONDecodeError, ValueError):
                 pass  # Ignore invalid messages
