@@ -4,6 +4,17 @@ variable "project_id" {
   default     = "robo1-489405"
 }
 
+variable "environment" {
+  description = "Deployment environment (prod or dev)"
+  type        = string
+  default     = "prod"
+
+  validation {
+    condition     = contains(["prod", "dev"], var.environment)
+    error_message = "Environment must be 'prod' or 'dev'."
+  }
+}
+
 variable "region" {
   description = "Primary region for Compute Engine and Cloud SQL"
   type        = string

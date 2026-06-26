@@ -33,7 +33,11 @@ locals {
     "iap.googleapis.com"
   ]
 
-  cloud_sql_instance_name   = coalesce(var.cloud_sql_instance_name, "${var.project_id}-api-db")
+  # Environment-aware naming
+  is_dev                    = var.environment == "dev"
+  env_suffix                = local.is_dev ? "-dev" : ""
+  vm_name                   = "${var.api_vm_name}${local.env_suffix}"
+  cloud_sql_instance_name   = coalesce(var.cloud_sql_instance_name, "${var.project_id}-api-db${local.env_suffix}")
   cloud_sql_connection_name = "${var.project_id}:${var.region}:${local.cloud_sql_instance_name}"
   db_name                   = coalesce(var.db_name, "robotarena")
   db_user                   = coalesce(var.db_user, "robot")
@@ -112,7 +116,7 @@ resource "google_sql_user" "app" {
 }
 
 resource "google_compute_address" "api_ip" {
-  name    = "${var.api_vm_name}-ip"
+  name    = "${local.vm_name}-ip"
   region  = var.region
   project = var.project_id
 }
@@ -175,7 +179,7 @@ resource "google_project_iam_member" "ci_compute_viewer" {
 
 # Allow SSH from IAP (Google's IAP IP range only, not public internet)
 resource "google_compute_firewall" "iap_ssh" {
-  name    = "${var.api_vm_name}-iap-ssh"
+  name    = "${local.vm_name}-iap-ssh"
   network = "default"
   allow {
     protocol = "tcp"
@@ -186,18 +190,18 @@ resource "google_compute_firewall" "iap_ssh" {
 }
 
 resource "google_compute_firewall" "api_http" {
-  name    = "${var.api_vm_name}-http"
+  name    = "${local.vm_name}-http"
   network = "default"
   allow {
     protocol = "tcp"
-    ports    = ["80", "443"]
+    ports    = local.is_dev ? ["80", "443", "8080"] : ["80", "443"]  # Dev: expose 8080 directly
   }
   target_tags   = var.api_vm_network_tags
   source_ranges = ["0.0.0.0/0"]
 }
 
 resource "google_compute_firewall" "api_udp" {
-  name    = "${var.api_vm_name}-udp"
+  name    = "${local.vm_name}-udp"
   network = "default"
   allow {
     protocol = "udp"
@@ -208,7 +212,7 @@ resource "google_compute_firewall" "api_udp" {
 }
 
 resource "google_compute_instance" "api_vm" {
-  name         = var.api_vm_name
+  name         = local.vm_name
   machine_type = var.api_vm_machine_type
   zone         = var.zone
   tags         = var.api_vm_network_tags
@@ -243,6 +247,7 @@ resource "google_compute_instance" "api_vm" {
     api_domain  = "${google_compute_address.api_ip.address}.sslip.io"
     env_content = local.api_env_content
     acme_email  = var.tls_contact_email
+    environment = var.environment
   })
 
   service_account {
@@ -256,4 +261,33 @@ resource "google_compute_instance" "api_vm" {
     google_project_iam_member.api_vm_artifact_reader,
     google_project_iam_member.api_vm_storage_viewer
   ]
+}
+
+# GCS bucket for dev frontend hosting (only created in dev environment)
+resource "google_storage_bucket" "frontend" {
+  count    = local.is_dev ? 1 : 0
+  name     = "${var.project_id}-dev-frontend"
+  location = "US"
+  project  = var.project_id
+
+  uniform_bucket_level_access = true
+
+  website {
+    main_page_suffix = "index.html"
+    not_found_page   = "index.html"
+  }
+
+  cors {
+    origin          = ["*"]
+    method          = ["GET", "HEAD"]
+    response_header = ["*"]
+    max_age_seconds = 3600
+  }
+}
+
+resource "google_storage_bucket_iam_member" "frontend_public" {
+  count  = local.is_dev ? 1 : 0
+  bucket = google_storage_bucket.frontend[0].name
+  role   = "roles/storage.objectViewer"
+  member = "allUsers"
 }

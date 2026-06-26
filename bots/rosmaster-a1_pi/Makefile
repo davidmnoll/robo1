@@ -67,3 +67,28 @@ ssh:
 
 shell:
 	ssh -t $(PI_HOST) "docker exec -it rosmaster bash"
+
+# =============================================================================
+# Dev Environment Commands
+# =============================================================================
+.PHONY: dev-ros-bridge dev-deploy
+
+# Dev API IP - set this after dev environment is deployed
+# Get it with: make -C ../.. dev-ip
+DEV_API_IP ?=
+DEV_API_URL = http://$(DEV_API_IP):8080
+
+dev-ros-bridge:
+	@if [ -z "$(DEV_API_IP)" ]; then \
+		echo "Error: DEV_API_IP not set. Get it with: make -C ../.. dev-ip"; \
+		echo "Then run: make dev-ros-bridge DEV_API_IP=<ip>"; \
+		exit 1; \
+	fi
+	@echo "Starting ros-bridge connected to DEV API at $(DEV_API_URL)..."
+	GATEWAY_URL=$(DEV_API_URL) python3 ../../ros-bridge/camera_forwarder.py
+
+dev-deploy: deploy
+	@echo ""
+	@echo "Robot code deployed. To connect to dev API:"
+	@echo "  1. Get dev IP: make -C ../.. dev-ip"
+	@echo "  2. Run: make dev-ros-bridge DEV_API_IP=<ip>"

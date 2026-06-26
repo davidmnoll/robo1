@@ -1,6 +1,6 @@
 output "api_url" {
-  description = "Public URL for the API endpoint (fronted by Caddy + sslip.io)"
-  value       = "https://${google_compute_address.api_ip.address}.sslip.io"
+  description = "Public URL for the API endpoint"
+  value       = var.environment == "dev" ? "http://${google_compute_address.api_ip.address}:8080" : "https://${google_compute_address.api_ip.address}.sslip.io"
 }
 
 output "api_vm_ip" {
@@ -10,7 +10,12 @@ output "api_vm_ip" {
 
 output "api_vm_name" {
   description = "Name of the Compute Engine VM hosting the API"
-  value       = var.api_vm_name
+  value       = local.vm_name
+}
+
+output "frontend_url" {
+  description = "URL for the frontend (GCS bucket in dev, empty in prod)"
+  value       = var.environment == "dev" ? "https://storage.googleapis.com/${google_storage_bucket.frontend[0].name}" : ""
 }
 
 output "api_vm_zone" {

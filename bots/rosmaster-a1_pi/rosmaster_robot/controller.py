@@ -160,6 +160,8 @@ class RosmasterController(Node):
         # Current camera servo angles
         self.camera_pan = self.SERVO_CENTER
         self.camera_tilt = self.SERVO_CENTER
+        self.last_ptz_time = 0.0  # Rate limiting for PTZ commands
+        self.PTZ_MIN_INTERVAL = 0.1  # Minimum 100ms between PTZ servo updates
 
         # Collision avoidance state
         self.min_front_distance = float('inf')
@@ -230,36 +232,51 @@ class RosmasterController(Node):
 
         self.last_joy_time = time.time()
 
-        # Log occasionally to avoid flooding (every 20th message = ~1Hz at 20Hz input)
+        # Log every message to debug control issues
         if not hasattr(self, '_joy_msg_count'):
             self._joy_msg_count = 0
         self._joy_msg_count += 1
-        if self._joy_msg_count % 20 == 1:
+        # Log more frequently: every 10th message
+        if self._joy_msg_count % 10 == 1:
             self.get_logger().info(
                 f"Joy #{self._joy_msg_count}: fwd={fwd_back:.2f}, turn={turn:.2f} -> "
-                f"lin={self.target_linear_x:.2f}, steer={self.current_steering:.2f}"
+                f"target_lin={self.target_linear_x:.2f}, current_lin={self.current_linear_x:.2f}"
             )
 
     def ptz_callback(self, msg: Int32MultiArray) -> None:
         """Handle incoming camera pan/tilt command messages.
 
         Expects Int32MultiArray with data = [pan, tilt] in degrees (0-180).
+        Rate-limited to avoid flooding the serial bus.
         """
         if len(msg.data) < 2:
             self.get_logger().warning(f"Invalid camera_ptz message: expected [pan, tilt], got {msg.data}")
             return
 
+        # Rate limit PTZ commands to avoid serial buffer overrun
+        now = time.time()
+        if now - self.last_ptz_time < self.PTZ_MIN_INTERVAL:
+            return  # Skip this update, too soon
+
         pan = max(self.SERVO_MIN_ANGLE, min(self.SERVO_MAX_ANGLE, msg.data[0]))
         tilt = max(self.SERVO_MIN_ANGLE, min(self.SERVO_MAX_ANGLE, msg.data[1]))
 
-        if pan != self.camera_pan:
+        # Only send if values actually changed
+        pan_changed = pan != self.camera_pan
+        tilt_changed = tilt != self.camera_tilt
+
+        if not pan_changed and not tilt_changed:
+            return  # No change, skip
+
+        if pan_changed:
             self.camera_pan = pan
             self._set_camera_servo(self.SERVO_PAN, pan)
 
-        if tilt != self.camera_tilt:
+        if tilt_changed:
             self.camera_tilt = tilt
             self._set_camera_servo(self.SERVO_TILT, tilt)
 
+        self.last_ptz_time = now
         self.get_logger().debug(f"Camera PTZ: pan={pan}, tilt={tilt}")
 
     def _scan_callback(self, msg: LaserScan) -> None:
@@ -354,6 +371,10 @@ class RosmasterController(Node):
 
         # Check for joy timeout - if no joy messages, stop
         if self.last_joy_time > 0 and current_time - self.last_joy_time > self.CMD_TIMEOUT:
+            if self.target_linear_x != 0.0 or self.current_steering != 0.0:
+                self.get_logger().info(
+                    f"Joy TIMEOUT: was target={self.target_linear_x:.2f}, steer={self.current_steering:.2f}"
+                )
             self.target_linear_x = 0.0
             self.current_steering = 0.0
 
