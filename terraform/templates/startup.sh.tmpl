@@ -2,6 +2,7 @@
 set -euo pipefail
 
 ACME_EMAIL="${acme_email}"
+ENVIRONMENT="${environment}"
 
 mkdir -p /etc/sudoers.d
 cat >/etc/sudoers.d/runner-nopasswd <<'EOF_SUDO'
@@ -57,6 +58,12 @@ EOF_SCRIPT
 chmod +x /usr/local/bin/deploy_api.sh
 
 /usr/local/bin/deploy_api.sh ${api_image}
+
+# Skip Caddy/TLS setup in dev environment (access API directly on port 8080)
+if [[ "$${ENVIRONMENT}" == "dev" ]]; then
+  echo "Dev environment: Skipping Caddy setup. API accessible on http://<ip>:${api_port}"
+  exit 0
+fi
 
 if [[ -n "$${ACME_EMAIL}" ]]; then
   cat >/etc/caddy/Caddyfile <<EOF_CADDY

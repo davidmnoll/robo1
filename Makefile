@@ -268,3 +268,80 @@ mic-to-bot:
 
 bot-to-speaker:
 	source /opt/ros/$(ROS_DISTRO)/setup.bash && export ROS_DOMAIN_ID=$(ROS_DOMAIN_ID) && python3 scripts/robot_to_speaker.py
+
+# =============================================================================
+# Dev Environment Deployment Commands
+# =============================================================================
+.PHONY: dev-deploy dev-logs dev-ssh dev-status dev-web dev-ip
+
+DEV_VM_NAME ?= robot-gateway-api-dev
+DEV_PROJECT_ID ?= robo1-489405
+DEV_ZONE ?= us-central1-a
+DEV_FRONTEND_BUCKET ?= robo1-489405-dev-frontend
+
+dev-deploy:
+	@echo "Pushing to dev branch to trigger deployment..."
+	git push origin dev
+
+dev-ip:
+	@gcloud compute instances describe $(DEV_VM_NAME) \
+		--project=$(DEV_PROJECT_ID) \
+		--zone=$(DEV_ZONE) \
+		--format='get(networkInterfaces[0].accessConfigs[0].natIP)' 2>/dev/null || \
+		echo "Dev VM not found. Run deployment first."
+
+dev-logs:
+	gcloud compute ssh $(DEV_VM_NAME) \
+		--project=$(DEV_PROJECT_ID) \
+		--zone=$(DEV_ZONE) \
+		--tunnel-through-iap \
+		--command="sudo docker logs robot-gateway -f --tail=100"
+
+dev-ssh:
+	gcloud compute ssh $(DEV_VM_NAME) \
+		--project=$(DEV_PROJECT_ID) \
+		--zone=$(DEV_ZONE) \
+		--tunnel-through-iap
+
+dev-status:
+	@echo "=== Dev VM Status ==="
+	@gcloud compute ssh $(DEV_VM_NAME) \
+		--project=$(DEV_PROJECT_ID) \
+		--zone=$(DEV_ZONE) \
+		--tunnel-through-iap \
+		--command="echo '--- Docker containers ---' && sudo docker ps && echo '' && echo '--- API Health ---' && curl -s localhost:8080/api/health | head -c 200"
+
+dev-web:
+	@echo "Dev frontend: https://storage.googleapis.com/$(DEV_FRONTEND_BUCKET)/index.html"
+	@xdg-open "https://storage.googleapis.com/$(DEV_FRONTEND_BUCKET)/index.html" 2>/dev/null || \
+		open "https://storage.googleapis.com/$(DEV_FRONTEND_BUCKET)/index.html" 2>/dev/null || \
+		echo "Open the URL manually in your browser"
+
+# Run local dashboard against dev API
+dev-cloud-web:
+	@DEV_IP=$$($(MAKE) -s dev-ip); \
+	if [ -z "$$DEV_IP" ] || [ "$$DEV_IP" = "Dev VM not found. Run deployment first." ]; then \
+		echo "Error: Could not get dev VM IP. Is the dev environment deployed?"; \
+		exit 1; \
+	fi; \
+	echo "Starting Vite dev server pointing to dev API at http://$$DEV_IP:8080..."; \
+	VITE_API_BASE_URL="http://$$DEV_IP:8080/api" ./web/run.sh
+
+# Run ros-bridge connected to dev API
+dev-cloud-ros:
+	@DEV_IP=$$($(MAKE) -s dev-ip); \
+	if [ -z "$$DEV_IP" ] || [ "$$DEV_IP" = "Dev VM not found. Run deployment first." ]; then \
+		echo "Error: Could not get dev VM IP. Is the dev environment deployed?"; \
+		exit 1; \
+	fi; \
+	if ! docker image inspect ros-bridge-humble >/dev/null 2>&1; then \
+		echo "Building ros-bridge-humble image..."; \
+		$(MAKE) dev-ros-build; \
+	fi; \
+	echo "Starting ros-bridge connected to dev API at http://$$DEV_IP:8080..."; \
+	docker run --rm --net=host \
+		-v $(CURDIR)/ros-bridge:/ros-bridge \
+		-e ROS_DOMAIN_ID=$(ROS_DOMAIN_ID) \
+		-e API_BASE_URL="http://$$DEV_IP:8080/api" \
+		-e LOBBY_KEY=dev-lobby-key \
+		ros-bridge-humble
