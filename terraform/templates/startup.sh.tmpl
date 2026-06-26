@@ -59,12 +59,6 @@ chmod +x /usr/local/bin/deploy_api.sh
 
 /usr/local/bin/deploy_api.sh ${api_image}
 
-# Skip Caddy/TLS setup in dev environment (access API directly on port 8080)
-if [[ "$${ENVIRONMENT}" == "dev" ]]; then
-  echo "Dev environment: Skipping Caddy setup. API accessible on http://<ip>:${api_port}"
-  exit 0
-fi
-
 if [[ -n "$${ACME_EMAIL}" ]]; then
   cat >/etc/caddy/Caddyfile <<EOF_CADDY
 ${api_domain} {
