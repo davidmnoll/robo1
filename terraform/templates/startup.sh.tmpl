@@ -52,6 +52,7 @@ fi
 /usr/bin/docker pull "$${IMAGE}"
 /usr/bin/docker rm -f robot-gateway >/dev/null 2>&1 || true
 /usr/bin/docker run -d --name robot-gateway --network host --restart=always \
+  --memory=2560m --memory-swap=2560m \
   --env-file /etc/robot-gateway/env \
   "$${IMAGE}"
 EOF_SCRIPT

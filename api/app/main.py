@@ -2112,6 +2112,69 @@ async def startup_event() -> None:
 
     app.state.stun_cleanup_task = asyncio.create_task(_cleanup_loop())
 
+    # Periodic cleanup of stale WebRTC connections and data structures
+    async def _webrtc_cleanup_loop() -> None:
+        while True:
+            await asyncio.sleep(60)  # Check every minute
+            try:
+                cleaned = 0
+                # Clean up closed browser peer connections
+                for robot_id in list(robot_browser_pcs.keys()):
+                    pcs = robot_browser_pcs.get(robot_id, [])
+                    alive = []
+                    for pc in pcs:
+                        if pc.connectionState in ("connected", "connecting", "new"):
+                            alive.append(pc)
+                        else:
+                            cleaned += 1
+                            try:
+                                await pc.close()
+                            except:
+                                pass
+                    if alive:
+                        robot_browser_pcs[robot_id] = alive
+                    else:
+                        robot_browser_pcs.pop(robot_id, None)
+
+                # Clean up closed hop2 data channels
+                for robot_id in list(hop2_telemetry_channels.keys()):
+                    channels = hop2_telemetry_channels.get(robot_id, [])
+                    alive = [c for c in channels if c.readyState == "open"]
+                    if alive:
+                        hop2_telemetry_channels[robot_id] = alive
+                    else:
+                        hop2_telemetry_channels.pop(robot_id, None)
+
+                for robot_id in list(hop2_control_channels.keys()):
+                    channels = hop2_control_channels.get(robot_id, [])
+                    alive = [c for c in channels if c.readyState == "open"]
+                    if alive:
+                        hop2_control_channels[robot_id] = alive
+                    else:
+                        hop2_control_channels.pop(robot_id, None)
+
+                for robot_id in list(hop2_map_channels.keys()):
+                    channels = hop2_map_channels.get(robot_id, [])
+                    alive = [c for c in channels if c.readyState == "open"]
+                    if alive:
+                        hop2_map_channels[robot_id] = alive
+                    else:
+                        hop2_map_channels.pop(robot_id, None)
+
+                # Clean up stale browser_user_pcs
+                for key in list(browser_user_pcs.keys()):
+                    pc = browser_user_pcs.get(key)
+                    if pc and pc.connectionState not in ("connected", "connecting", "new"):
+                        browser_user_pcs.pop(key, None)
+                        cleaned += 1
+
+                if cleaned > 0:
+                    logger.info("WebRTC cleanup: removed %d stale connections", cleaned)
+            except Exception as e:
+                logger.warning("WebRTC cleanup error: %s", e)
+
+    app.state.webrtc_cleanup_task = asyncio.create_task(_webrtc_cleanup_loop())
+
 
 @app.on_event("shutdown")
 async def shutdown_event() -> None:
@@ -2120,6 +2183,8 @@ async def shutdown_event() -> None:
         app.state.stun_transport.close()
     if hasattr(app.state, "stun_cleanup_task"):
         app.state.stun_cleanup_task.cancel()
+    if hasattr(app.state, "webrtc_cleanup_task"):
+        app.state.webrtc_cleanup_task.cancel()
     # Close all SFU peer connections
     for pc in robot_forwarder_pcs.values():
         await pc.close()
@@ -2143,6 +2208,61 @@ async def health() -> dict[str, Any]:
         "gateway": settings.gateway_name,
         "active_robots": active,
     }
+
+
+@app.get("/api/debug/memory")
+async def debug_memory() -> dict[str, Any]:
+    """Debug endpoint to track memory usage and data structure sizes."""
+    import gc
+    import sys
+
+    # Force garbage collection
+    gc.collect()
+
+    # Get sizes of global data structures
+    structures = {
+        "robot_heartbeats": len(robot_heartbeats),
+        "robot_incoming_tracks": len(robot_incoming_tracks),
+        "robot_incoming_audio_tracks": len(robot_incoming_audio_tracks),
+        "robot_forwarder_pcs": len(robot_forwarder_pcs),
+        "robot_browser_pcs": {k: len(v) for k, v in robot_browser_pcs.items()},
+        "robot_track_ready": len(robot_track_ready),
+        "websocket_robot_map": {k: len(v) for k, v in websocket_robot_map.items()},
+        "telemetry_subscribers": {k: len(v) for k, v in telemetry_subscribers.items()},
+        "latest_telemetry": len(latest_telemetry),
+        "chat_subscribers": {k: len(v) for k, v in chat_subscribers.items()},
+        "browser_audio_relay_tracks": len(browser_audio_relay_tracks),
+        "browser_audio_forward_tasks": len(browser_audio_forward_tasks),
+        "browser_user_pcs": len(browser_user_pcs),
+        "robot_audio_broadcasters": len(robot_audio_broadcasters),
+        "hop1_telemetry_channels": len(hop1_telemetry_channels),
+        "hop1_control_channels": len(hop1_control_channels),
+        "hop1_map_channels": len(hop1_map_channels),
+        "hop2_telemetry_channels": {k: len(v) for k, v in hop2_telemetry_channels.items()},
+        "hop2_control_channels": {k: len(v) for k, v in hop2_control_channels.items()},
+        "hop2_map_channels": {k: len(v) for k, v in hop2_map_channels.items()},
+        "group_audio_mixers": len(group_audio_mixers),
+        "control_aggregators": len(control_aggregators),
+        "active_robot_streams": {k: len(v) for k, v in active_robot_streams.items()},
+        "connected_lobby_ids": len(connected_lobby_ids),
+        "lobby_status_subscribers": len(lobby_status_subscribers),
+        "command_subscribers": {k: len(v) for k, v in command_subscribers.items()},
+    }
+
+    # Get process memory info
+    try:
+        import resource
+        rusage = resource.getrusage(resource.RUSAGE_SELF)
+        memory_mb = rusage.ru_maxrss / 1024  # Convert KB to MB on Linux
+    except:
+        memory_mb = 0
+
+    return {
+        "memory_mb": round(memory_mb, 2),
+        "gc_counts": gc.get_count(),
+        "structures": structures,
+    }
+
 
 def _get_ice_servers() -> dict[str, Any]:
     """Return ICE server config pointing to our own STUN server."""
