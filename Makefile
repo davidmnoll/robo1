@@ -272,7 +272,7 @@ bot-to-speaker:
 # =============================================================================
 # Dev Environment Deployment Commands
 # =============================================================================
-.PHONY: dev-deploy dev-logs dev-ssh dev-status dev-web dev-ip
+.PHONY: dev-deploy dev-logs dev-ssh dev-status dev-web dev-url dev-ip
 
 DEV_VM_NAME ?= robot-gateway-api-dev
 DEV_PROJECT_ID ?= robo1-489405
@@ -311,6 +311,9 @@ dev-status:
 		--tunnel-through-iap \
 		--command="echo '--- Docker containers ---' && sudo docker ps && echo '' && echo '--- API Health ---' && curl -s localhost:8080/api/health | head -c 200"
 
+dev-url:
+	@echo "https://storage.googleapis.com/$(DEV_FRONTEND_BUCKET)/index.html"
+
 dev-web:
 	@echo "Dev frontend: https://storage.googleapis.com/$(DEV_FRONTEND_BUCKET)/index.html"
 	@xdg-open "https://storage.googleapis.com/$(DEV_FRONTEND_BUCKET)/index.html" 2>/dev/null || \
@@ -324,8 +327,8 @@ dev-cloud-web:
 		echo "Error: Could not get dev VM IP. Is the dev environment deployed?"; \
 		exit 1; \
 	fi; \
-	echo "Starting Vite dev server pointing to dev API at http://$$DEV_IP:8080..."; \
-	VITE_API_BASE_URL="http://$$DEV_IP:8080/api" ./web/run.sh
+	echo "Starting Vite dev server pointing to dev API at https://$$DEV_IP.sslip.io..."; \
+	VITE_API_BASE_URL="https://$$DEV_IP.sslip.io/api" ./web/run.sh
 
 # Run ros-bridge connected to dev API
 dev-cloud-ros:
@@ -338,10 +341,10 @@ dev-cloud-ros:
 		echo "Building ros-bridge-humble image..."; \
 		$(MAKE) dev-ros-build; \
 	fi; \
-	echo "Starting ros-bridge connected to dev API at http://$$DEV_IP:8080..."; \
+	echo "Starting ros-bridge connected to dev API at https://$$DEV_IP.sslip.io..."; \
 	docker run --rm --net=host \
 		-v $(CURDIR)/ros-bridge:/ros-bridge \
 		-e ROS_DOMAIN_ID=$(ROS_DOMAIN_ID) \
-		-e API_BASE_URL="http://$$DEV_IP:8080/api" \
-		-e LOBBY_KEY=dev-lobby-key \
+		-e API_BASE_URL="https://$$DEV_IP.sslip.io/api" \
+		-e LOBBY_KEY=G-lV6Jrg0DW-m78AClMySQ \
 		ros-bridge-humble

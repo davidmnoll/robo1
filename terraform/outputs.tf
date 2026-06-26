@@ -1,6 +1,6 @@
 output "api_url" {
   description = "Public URL for the API endpoint"
-  value       = var.environment == "dev" ? "http://${google_compute_address.api_ip.address}:8080" : "https://${google_compute_address.api_ip.address}.sslip.io"
+  value       = "https://${google_compute_address.api_ip.address}.sslip.io"
 }
 
 output "api_vm_ip" {
