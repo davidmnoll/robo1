@@ -2145,14 +2145,16 @@
 
         function sendAudioRouting() {
           // Send audio routing preferences to server via control channel
+          const routing = {
+            type: 'audio_routing',
+            to_group: state.micEnabled,
+            to_robot: state.robotMicEnabled,
+          };
           if (state.controlChannel && state.controlChannel.readyState === 'open') {
-            const routing = {
-              type: 'audio_routing',
-              to_group: state.micEnabled,
-              to_robot: state.robotMicEnabled,
-            };
             state.controlChannel.send(JSON.stringify(routing));
             console.log('[audio] sent routing:', routing);
+          } else {
+            console.log('[audio] routing not sent (channel not ready), state:', routing);
           }
         }
 
@@ -2162,9 +2164,8 @@
           if (state.micTrack) {
             console.log('[mic] reusing existing track');
             state.micTrack.enabled = true;
-            state.micEnabled = true;
-            updateMicUI();
-            logTelemetry('Microphone enabled (WebRTC)');
+            // Don't set micEnabled - that's for group routing now
+            logTelemetry('Microphone capture enabled');
             return;
           }
 
@@ -2238,10 +2239,7 @@
             const answer = await resp.json();
             await state.pc.setRemoteDescription(new RTCSessionDescription(answer));
             console.info('[mic] renegotiation complete');
-
-            state.micEnabled = true;
-            updateMicUI();
-            logTelemetry('Microphone enabled (WebRTC)');
+            logTelemetry('Microphone capture enabled');
           } catch (err) {
             console.error('[mic] failed to enable microphone:', err);
             logTelemetry(`Mic error: ${err.message}`);
@@ -2254,9 +2252,9 @@
           if (state.micTrack) {
             state.micTrack.enabled = false;
           }
-          state.micEnabled = false;
+          // Don't reset micEnabled/robotMicEnabled - those are routing states
           micToggleBtn.classList.remove('speaking');
-          updateMicUI();
+          robotMicBtn.classList.remove('speaking');
         }
 
         function stopMicrophone() {
@@ -2278,8 +2276,11 @@
             state.micAudioContext = null;
           }
           micToggleBtn.classList.remove('speaking');
+          robotMicBtn.classList.remove('speaking');
           state.micTrack = null;
+          // Reset routing states when stopping completely
           state.micEnabled = false;
+          state.robotMicEnabled = false;
           updateMicUI();
         }
 
@@ -2556,6 +2557,8 @@
             controlChannel.onopen = () => {
               console.info('[data] control channel open');
               logTelemetry('Control data channel connected');
+              // Send current audio routing state in case buttons were clicked before channel opened
+              sendAudioRouting();
             };
             controlChannel.onclose = () => {
               console.info('[data] control channel closed');

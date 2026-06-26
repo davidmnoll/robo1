@@ -910,9 +910,24 @@ class ControlAggregator:
         logger.info("ControlAggregator stopped for %s", self.robot_id)
 
     def push_command(self, user_key: str, message: str) -> None:
-        """Store a control command from a user."""
+        """Store a control command from a user.
+
+        Joy commands are stored for averaging. Other commands (like camera_ptz)
+        are forwarded immediately since they shouldn't be averaged.
+        """
         try:
             cmd = json.loads(message)
+
+            # Non-joy commands (camera_ptz, etc.) should be forwarded immediately
+            if cmd.get("type") != "joy":
+                channel = hop1_control_channels.get(self.robot_id)
+                if channel and channel.readyState == "open":
+                    channel.send(message)
+                    logger.debug("ControlAggregator: forwarded %s command for %s",
+                                cmd.get("type"), self.robot_id)
+                return
+
+            # Store joy commands for averaging
             self._user_commands[user_key] = (_time.time(), cmd)
         except json.JSONDecodeError:
             logger.warning("ControlAggregator: invalid JSON from %s", user_key)
