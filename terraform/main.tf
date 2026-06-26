@@ -130,8 +130,8 @@ resource "null_resource" "vm_recreate_trigger" {
 
 
 resource "google_service_account" "api_vm" {
-  account_id   = "robot-gateway-vm"
-  display_name = "Robot gateway VM"
+  account_id   = local.is_dev ? "robot-gateway-vm-dev" : "robot-gateway-vm"
+  display_name = "Robot gateway VM${local.env_suffix}"
   project      = var.project_id
 }
 
