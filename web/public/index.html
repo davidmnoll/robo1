@@ -522,38 +522,26 @@
         color: #22c55e;
         box-shadow: 0 0 12px rgba(34,197,94,0.5);
       }
-      /* Speaker button with voting states */
-      .speaker-btn {
-        width: 42px;
-        height: 42px;
-        border-radius: 50%;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        font-size: 1.2rem;
-        flex-shrink: 0;
-        pointer-events: auto;
-        transition: background 0.2s, border-color 0.2s, color 0.2s;
+      /* Speaker vote button states */
+      .speaker-vote.vote-none {
+        background: rgba(239,68,68,0.2) !important;
+        border-color: rgba(239,68,68,0.4) !important;
+        color: #ef4444 !important;
       }
-      .speaker-btn.vote-none {
-        background: rgba(239,68,68,0.2);
-        border-color: rgba(239,68,68,0.4);
-        color: #ef4444;
+      .speaker-vote.vote-partial {
+        background: rgba(249,115,22,0.2) !important;
+        border-color: rgba(249,115,22,0.4) !important;
+        color: #f97316 !important;
       }
-      .speaker-btn.vote-partial {
-        background: rgba(249,115,22,0.2);
-        border-color: rgba(249,115,22,0.4);
-        color: #f97316;
+      .speaker-vote.vote-pending {
+        background: rgba(234,179,8,0.2) !important;
+        border-color: rgba(234,179,8,0.4) !important;
+        color: #eab308 !important;
       }
-      .speaker-btn.vote-pending {
-        background: rgba(234,179,8,0.2);
-        border-color: rgba(234,179,8,0.4);
-        color: #eab308;
-      }
-      .speaker-btn.vote-enabled {
-        background: rgba(34,197,94,0.3);
-        border-color: rgba(34,197,94,0.5);
-        color: #22c55e;
+      .speaker-vote.vote-enabled {
+        background: rgba(34,197,94,0.3) !important;
+        border-color: rgba(34,197,94,0.5) !important;
+        color: #22c55e !important;
       }
       .volume-slider {
         flex: 1;
@@ -1105,9 +1093,8 @@
               <div class="video-wrapper" id="video-wrapper">
                 <video id="robot-video" autoplay playsinline controls controlsList="nofullscreen"></video>
                 <div class="video-controls-top">
-                  <button id="speaker-btn" class="ghost speaker-btn vote-none" type="button" title="Vote to enable robot audio (requires unanimous vote)">🔈</button>
                   <button id="mic-toggle-btn" class="ghost mic-btn muted" type="button" title="Voice to other streamers">🎤</button>
-                  <button id="robot-mic-btn" class="ghost mic-btn muted" type="button" title="Voice to robot speaker">🔊</button>
+                  <button id="robot-mic-btn" class="ghost mic-btn speaker-vote vote-none" type="button" title="Voice to robot speaker">🔊</button>
                   <button id="video-back-btn" class="ghost" type="button" aria-label="Exit stream">←</button>
                 </div>
                 <button id="video-fullscreen-btn" class="ghost video-fullscreen-btn" type="button" aria-label="Toggle fullscreen">⤢</button>
@@ -1118,6 +1105,8 @@
                 </div>
                 <div class="touch-joystick-zone right" id="joystick-zone-right">
                   <div class="joystick-indicator"></div>
+                  <span class="joystick-label">Look</span>
+                </div>
                 <!-- Ghost joysticks for other users' inputs -->
                 <div class="ghost-joystick left" id="ghost-move-joystick">
                   <div class="ghost-knob" id="ghost-move-knob"></div>
@@ -1149,8 +1138,6 @@
                     </div>
                     <span class="key-group-label">Camera</span>
                   </div>
-                </div>
-                  <span class="joystick-label">Look</span>
                 </div>
                 <div class="hud-overlay">
                   <div class="hud-row" style="justify-content:space-between;">
@@ -1315,8 +1302,7 @@
         const activeRobotLabel = document.getElementById('active-robot-label');
         const micToggleBtn = document.getElementById('mic-toggle-btn');
         const robotMicBtn = document.getElementById('robot-mic-btn');
-        const speakerBtn = document.getElementById('speaker-btn');
-        console.log('[init] micToggleBtn=', micToggleBtn, 'robotMicBtn=', robotMicBtn, 'speakerBtn=', speakerBtn);
+        console.log('[init] micToggleBtn=', micToggleBtn, 'robotMicBtn=', robotMicBtn);
         const micVolumeSlider = document.getElementById('mic-volume');
         const videoWrapper = document.getElementById('video-wrapper');
         const videoFullscreenBtn = document.getElementById('video-fullscreen-btn');
@@ -2175,10 +2161,7 @@
           micToggleBtn.classList.toggle('muted', !state.micEnabled);
           micToggleBtn.classList.toggle('active', state.micEnabled);
           micToggleBtn.title = state.micEnabled ? 'Mute to streamers' : 'Unmute to streamers';
-          // Robot mic button (voice to robot speaker)
-          robotMicBtn.classList.toggle('muted', !state.robotMicEnabled);
-          robotMicBtn.classList.toggle('active', state.robotMicEnabled);
-          robotMicBtn.title = state.robotMicEnabled ? 'Mute to robot' : 'Unmute to robot';
+          // Robot mic button styling is handled by updateSpeakerButton (vote colors)
           micVolumeSlider.disabled = true; // Volume control not yet implemented for WebRTC
         }
 
@@ -2230,34 +2213,30 @@
         }
 
         function updateSpeakerButton() {
-          if (!speakerBtn) return;
+          if (!robotMicBtn) return;
           const { total, votes, enabled, voters } = state.speakerState;
           const userKey = `${state.activeRobot?.ros_namespace}:${state.user?.email}`;
           const userVoted = voters.includes(userKey) || state.speakerVoted;
 
           // Remove all vote classes
-          speakerBtn.classList.remove('vote-none', 'vote-partial', 'vote-pending', 'vote-enabled');
+          robotMicBtn.classList.remove('vote-none', 'vote-partial', 'vote-pending', 'vote-enabled', 'muted', 'active');
 
           if (enabled) {
             // Green: everyone has voted yes
-            speakerBtn.classList.add('vote-enabled');
-            speakerBtn.textContent = '🔊';
-            speakerBtn.title = `Speaker enabled (${votes}/${total} votes)`;
+            robotMicBtn.classList.add('vote-enabled');
+            robotMicBtn.title = `Speaker enabled (${votes}/${total} votes)`;
           } else if (votes === 0) {
             // Red: nobody has voted
-            speakerBtn.classList.add('vote-none');
-            speakerBtn.textContent = '🔇';
-            speakerBtn.title = `Vote to enable speaker (0/${total} votes)`;
+            robotMicBtn.classList.add('vote-none');
+            robotMicBtn.title = `Vote to enable speaker (0/${total} votes)`;
           } else if (userVoted) {
             // Yellow: current user voted but not everyone
-            speakerBtn.classList.add('vote-pending');
-            speakerBtn.textContent = '🔈';
-            speakerBtn.title = `Waiting for others (${votes}/${total} votes)`;
+            robotMicBtn.classList.add('vote-pending');
+            robotMicBtn.title = `Waiting for others (${votes}/${total} votes)`;
           } else {
             // Orange: some people voted but not current user
-            speakerBtn.classList.add('vote-partial');
-            speakerBtn.textContent = '🔈';
-            speakerBtn.title = `Others want speaker (${votes}/${total} votes) - click to vote`;
+            robotMicBtn.classList.add('vote-partial');
+            robotMicBtn.title = `Others want speaker (${votes}/${total} votes) - click to vote`;
           }
         }
 
@@ -2287,16 +2266,23 @@
 
           try {
             logTelemetry('Requesting microphone access...');
-            const micStream = await navigator.mediaDevices.getUserMedia({
-              audio: {
-                echoCancellation: true,
-                noiseSuppression: true,
-                autoGainControl: true,
-                sampleRate: 48000,
-              },
-            });
+            // Try with constraints first, fall back to simple audio:true for iOS compatibility
+            let micStream;
+            try {
+              micStream = await navigator.mediaDevices.getUserMedia({
+                audio: {
+                  echoCancellation: true,
+                  noiseSuppression: true,
+                  autoGainControl: true,
+                },
+              });
+            } catch (constraintErr) {
+              console.warn('[mic] constraint getUserMedia failed, trying simple audio:', constraintErr);
+              micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            }
             state.micStream = micStream;
             const micTrack = micStream.getAudioTracks()[0];
+            console.info('[mic] got track:', micTrack.label, 'enabled:', micTrack.enabled, 'muted:', micTrack.muted);
             state.micTrack = micTrack;
 
             // Set up audio level detection for visual feedback
@@ -2347,8 +2333,17 @@
             }
 
             const answer = await resp.json();
+            console.info('[mic] got answer, setting remote description');
             await state.pc.setRemoteDescription(new RTCSessionDescription(answer));
-            console.info('[mic] renegotiation complete');
+            console.info('[mic] renegotiation complete, senders:', state.pc.getSenders().map(s => s.track?.kind));
+
+            // Verify the track was added
+            const audioSenders = state.pc.getSenders().filter(s => s.track?.kind === 'audio');
+            if (audioSenders.length === 0) {
+              console.warn('[mic] No audio senders after renegotiation!');
+            } else {
+              console.info('[mic] Audio sender active:', audioSenders[0].track?.enabled, audioSenders[0].track?.muted);
+            }
             logTelemetry('Microphone capture enabled');
           } catch (err) {
             console.error('[mic] failed to enable microphone:', err);
@@ -2680,11 +2675,14 @@
               console.warn('[data] control channel error:', event);
             };
             controlChannel.onmessage = (event) => {
-              // Handle incoming messages from server (speaker state, etc.)
+              // Handle incoming messages from server (speaker state, aggregated control, etc.)
               try {
                 const data = JSON.parse(event.data);
                 if (data.type === 'speaker_state') {
                   handleSpeakerState(data);
+                } else if (data.type === 'aggregated_control') {
+                  // Update ghost joysticks to show other users' inputs
+                  updateGhostJoysticks(data.axes, data.users);
                 }
               } catch (err) {
                 console.warn('[data] control channel message parse error:', err);
@@ -3362,12 +3360,9 @@
         });
 
         robotMicBtn.addEventListener('click', () => {
-          console.log('[mic] robot mic button clicked, robotMicEnabled=', state.robotMicEnabled);
+          console.log('[speaker] robot mic/speaker button clicked, robotMicEnabled=', state.robotMicEnabled, 'speakerVoted=', state.speakerVoted);
+          // Toggle both: voice to robot AND speaker vote
           toggleRobotMic();
-        });
-
-        speakerBtn.addEventListener('click', () => {
-          console.log('[speaker] button clicked, speakerVoted=', state.speakerVoted);
           toggleSpeakerVote();
         });
 

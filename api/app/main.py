@@ -973,6 +973,20 @@ class ControlAggregator:
             except Exception as e:
                 logger.warning("ControlAggregator send error: %s", e)
 
+        # Broadcast aggregated state to all browsers (for ghost joystick display)
+        if num_users > 1:
+            broadcast_msg = json.dumps({
+                "type": "aggregated_control",
+                "axes": averaged_axes,
+                "users": num_users,
+            })
+            for browser_channel in hop2_control_channels.get(self.robot_id, []):
+                try:
+                    if browser_channel.readyState == "open":
+                        browser_channel.send(broadcast_msg)
+                except Exception:
+                    pass
+
 
 # Control aggregators per robot
 control_aggregators: Dict[str, ControlAggregator] = {}
