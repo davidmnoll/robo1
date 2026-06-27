@@ -126,6 +126,7 @@ jobs:
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: 1.7.5
+          terraform_wrapper: false
 
       - name: Terraform Init (Dev backend)
         working-directory: ${{ env.TF_WORKING_DIR }}
@@ -178,6 +179,9 @@ jobs:
           VM_NAME=$(terraform output -raw api_vm_name)
           VM_ZONE=$(terraform output -raw api_vm_zone)
           FRONTEND_URL=$(terraform output -raw frontend_url || echo "")
+          echo "Captured API URL: ${API_URL}"
+          echo "Captured VM Name: ${VM_NAME}"
+          echo "Captured VM Zone: ${VM_ZONE}"
           echo "api_url=${API_URL}" >> "${GITHUB_OUTPUT}"
           echo "api_vm_name=${VM_NAME}" >> "${GITHUB_OUTPUT}"
           echo "api_vm_zone=${VM_ZONE}" >> "${GITHUB_OUTPUT}"
@@ -197,7 +201,7 @@ jobs:
                 --project="${PROJECT_ID}" \
                 --zone="${API_VM_ZONE}" \
                 --tunnel-through-iap \
-                --command="sudo docker pull ${IMAGE} && sudo docker rm -f robot-gateway 2>/dev/null || true && sudo docker run -d --name robot-gateway --network host --restart=always --env-file /etc/robot-gateway/env ${IMAGE}"; then
+                --command="sudo docker pull ${IMAGE} && sudo docker rm -f robot-gateway 2>/dev/null || true && sudo docker run -d --name robot-gateway --network host --restart=always --memory=2560m --memory-swap=2560m --env-file /etc/robot-gateway/env ${IMAGE}"; then
               echo "Deploy succeeded on attempt ${i}"
               exit 0
             fi
@@ -254,6 +258,7 @@ jobs:
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: 1.7.5
+          terraform_wrapper: false
 
       - name: Fetch API URL
         id: fetch_url
@@ -263,12 +268,17 @@ jobs:
         run: |
           set -euo pipefail
           if [ -n "${TERRAFORM_OUTPUT_URL}" ]; then
+            echo "Using API URL from terraform job: ${TERRAFORM_OUTPUT_URL}"
             echo "GATEWAY_URL=${TERRAFORM_OUTPUT_URL}" >> "${GITHUB_ENV}"
+            echo "gateway_url=${TERRAFORM_OUTPUT_URL}" >> "${GITHUB_OUTPUT}"
             exit 0
           fi
+          echo "Terraform job was skipped, fetching URL from state..."
           terraform init -input=false -reconfigure -backend-config="prefix=env/dev" >/dev/null
           GATEWAY_URL=$(terraform output -raw api_url)
+          echo "Fetched API URL from state: ${GATEWAY_URL}"
           echo "GATEWAY_URL=${GATEWAY_URL}" >> "${GITHUB_ENV}"
+          echo "gateway_url=${GATEWAY_URL}" >> "${GITHUB_OUTPUT}"
 
       - name: Install dashboard dependencies
         working-directory: web
@@ -277,16 +287,20 @@ jobs:
       - name: Build dashboard for GCS
         working-directory: web
         env:
-          GATEWAY_URL: ${{ env.GATEWAY_URL }}
+          GATEWAY_URL: ${{ steps.fetch_url.outputs.gateway_url }}
         run: |
           set -euo pipefail
           if [ -z "${GATEWAY_URL:-}" ]; then
             echo "Gateway URL missing; cannot build dashboard" >&2
             exit 1
           fi
+          # Validate URL format
+          if [[ "${GATEWAY_URL}" != https://*.sslip.io ]]; then
+            echo "Warning: Gateway URL doesn't match expected format (https://*.sslip.io)"
+            echo "Got: ${GATEWAY_URL}"
+          fi
           API_BASE="${GATEWAY_URL%/}/api"
-          # No base path needed for GCS static hosting
-          echo "Building dashboard with API base ${API_BASE}"
+          echo "Building dashboard with API base: ${API_BASE}"
           VITE_API_BASE_URL="${API_BASE}" npm run build
 
       - name: Upload to GCS bucket

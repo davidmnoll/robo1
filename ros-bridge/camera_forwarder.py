@@ -227,6 +227,8 @@ class RobotBridgeNode(Node):
         self.telemetry_subscriptions: Dict[str, Subscription] = {}
         self.joy_publishers: Dict[str, Publisher] = {}
         self.ptz_publishers: Dict[str, Publisher] = {}
+        # Current camera position per robot (for delta-based control)
+        self.camera_positions: Dict[str, Dict[str, int]] = {}
 
         # Audio handling
         self.audio_subscriptions: Dict[str, Subscription] = {}
@@ -366,9 +368,35 @@ class RobotBridgeNode(Node):
         )
         self.get_logger().info(f"Started streaming {topic} + {audio_topic} + {map_topic}")
 
+    def _send_reset_commands(self, robot: str) -> None:
+        """Send reset commands to stop robot movement and center camera when streaming stops."""
+        # Send zero joy command to stop movement
+        joy_pub = self.joy_publishers.get(robot)
+        if joy_pub:
+            joy_msg = Joy()
+            joy_msg.header.stamp = self.get_clock().now().to_msg()
+            joy_msg.axes = [0.0] * 6  # All axes to zero
+            joy_msg.buttons = [0] * 12  # All buttons released
+            joy_pub.publish(joy_msg)
+            self.get_logger().info(f"Sent reset joy command for {robot}")
+
+        # Send center PTZ command and reset internal tracking
+        ptz_pub = self.ptz_publishers.get(robot)
+        if ptz_pub:
+            ptz_msg = Int32MultiArray()
+            ptz_msg.data = [90, 90]  # Center position
+            ptz_pub.publish(ptz_msg)
+            # Reset internal position tracking
+            self.camera_positions[robot] = {"pan": 90, "tilt": 90}
+            self.get_logger().info(f"Sent reset PTZ command for {robot}")
+
     def _stop_streaming(self, robot: str) -> None:
         if robot not in self.streaming_robots:
             return
+
+        # Send reset commands to stop the robot when all streams stop
+        self._send_reset_commands(robot)
+
         sub = self.camera_subscriptions.pop(robot, None)
         if sub:
             self.destroy_subscription(sub)
@@ -721,9 +749,36 @@ class RobotBridgeNode(Node):
                     self.get_logger().warning(f"No ptz publisher for {robot_id}")
                     return
 
+                # Initialize camera position if not exists
+                if robot_id not in self.camera_positions:
+                    self.camera_positions[robot_id] = {"pan": 90, "tilt": 90}
+                pos = self.camera_positions[robot_id]
+
+                # Debug: log what keys we received
+                if not hasattr(self, "_ptz_debug_count"):
+                    self._ptz_debug_count = {}
+                self._ptz_debug_count[robot_id] = self._ptz_debug_count.get(robot_id, 0) + 1
+                if self._ptz_debug_count[robot_id] % 50 == 1:
+                    self.get_logger().info(f"PTZ data keys for {robot_id}: {list(data.keys())}")
+
+                # Apply deltas if provided (new delta-based control)
+                if "pan_delta" in data or "tilt_delta" in data:
+                    pan_delta = int(data.get("pan_delta", 0))
+                    tilt_delta = int(data.get("tilt_delta", 0))
+                    if pan_delta != 0 or tilt_delta != 0:
+                        self.get_logger().info(
+                            f"PTZ deltas for {robot_id}: pan_delta={pan_delta}, tilt_delta={tilt_delta}"
+                        )
+                    pos["pan"] = max(0, min(180, pos["pan"] + pan_delta))
+                    pos["tilt"] = max(0, min(180, pos["tilt"] + tilt_delta))
+                else:
+                    # Legacy absolute position (backward compatibility)
+                    pos["pan"] = int(data.get("pan", pos["pan"]))
+                    pos["tilt"] = int(data.get("tilt", pos["tilt"]))
+
                 # Create and publish Int32MultiArray message [pan, tilt]
                 ptz_msg = Int32MultiArray()
-                ptz_msg.data = [int(data.get("pan", 90)), int(data.get("tilt", 90))]
+                ptz_msg.data = [pos["pan"], pos["tilt"]]
                 publisher.publish(ptz_msg)
 
                 # Log occasionally

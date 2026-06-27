@@ -14,14 +14,19 @@ attach:
 help:
 	@echo "Arena stack commands"
 	@echo ""
-	@echo "  make tmux-stack - Launch ros-core, sim, api, web in tmux (preferred)"
-	@echo "  make dev        - Launch api, ros-bridge, web (no simulator)"
-	@echo "  make dev-local  - Launch api, web only (no ros-bridge)"
-	@echo "  make cloud-ros  - Run ros-bridge connected to cloud API"
-	@echo "  make cloud-web  - Run local dashboard against cloud API"
+	@echo "  make dev        - Launch ros-bridge + web pointing to DEV servers"
+	@echo "  make dev-local  - Launch local api + ros-bridge + web (fully local)"
+	@echo "  make tmux-stack - Launch ros-core, sim, api, web in tmux"
+	@echo "  make cloud-ros  - Run ros-bridge connected to PROD cloud API"
+	@echo "  make cloud-web  - Run local dashboard against PROD cloud API"
 	@echo "  make all        - Alias for make tmux-stack"
 	@echo "  make attach     - Attach to tmux session (arena)"
 	@echo "  make db-shell   - Open psql shell inside the db container"
+	@echo ""
+	@echo "Robot commands (Rosmaster A1 Pi):"
+	@echo "  make robot-push    - Push code to robot, build, and restart"
+	@echo "  make robot-pull    - Pull code/configs from robot"
+	@echo "  make robot-restart - Restart robot service"
 	@echo ""
 	@echo "Simulation commands:"
 	@echo "  make cloud-sim  - Headless container-based simulation"
@@ -89,8 +94,25 @@ teleop:
 tmux-stack:
 	./scripts/run_stack_tmux.sh
 
-# Run api + ros-bridge + web (no simulator)
+# Run ros-bridge + web pointing to DEV cloud servers
 dev:
+	@if ! command -v tmux >/dev/null 2>&1; then \
+		echo "tmux required. Install with: sudo apt install tmux"; exit 1; \
+	fi
+	@DEV_IP=$$($(MAKE) -s dev-ip); \
+	if [ -z "$$DEV_IP" ] || [ "$$DEV_IP" = "Dev VM not found. Run deployment first." ]; then \
+		echo "Error: Could not get dev VM IP. Is the dev environment deployed?"; \
+		exit 1; \
+	fi; \
+	tmux kill-session -t dev 2>/dev/null || true; \
+	tmux new-session -d -s dev -n ros-bridge "cd $(CURDIR) && $(MAKE) dev-cloud-ros; read"; \
+	tmux new-window -t dev -n web "cd $(CURDIR) && VITE_API_BASE_URL=https://$$DEV_IP.sslip.io/api ./web/run.sh; read"; \
+	echo "Started tmux session 'dev' with [ros-bridge -> dev] [web -> dev]"; \
+	echo "Dev API: https://$$DEV_IP.sslip.io/api"; \
+	tmux attach -t dev
+
+# Run local api + ros-bridge + web (fully local stack)
+dev-local:
 	@if ! command -v tmux >/dev/null 2>&1; then \
 		echo "tmux required. Install with: sudo apt install tmux"; exit 1; \
 	fi
@@ -98,18 +120,7 @@ dev:
 	@tmux new-session -d -s dev -n api "cd $(CURDIR) && ./api/run.sh; read"
 	@tmux new-window -t dev -n ros-bridge "cd $(CURDIR) && $(MAKE) dev-ros; read"
 	@tmux new-window -t dev -n web "cd $(CURDIR) && ./web/run.sh; read"
-	@echo "Started tmux session 'dev' with [api] [ros-bridge (Humble)] [web]"
-	@tmux attach -t dev
-
-# Run api + web only (no ros-bridge)
-dev-local:
-	@if ! command -v tmux >/dev/null 2>&1; then \
-		echo "tmux required. Install with: sudo apt install tmux"; exit 1; \
-	fi
-	@tmux kill-session -t dev 2>/dev/null || true
-	@tmux new-session -d -s dev -n api "cd $(CURDIR) && ./api/run.sh; read"
-	@tmux new-window -t dev -n web "cd $(CURDIR) && ./web/run.sh; read"
-	@echo "Started tmux session 'dev' with [api] [web]"
+	@echo "Started tmux session 'dev' with [api] [ros-bridge] [web] (all local)"
 	@tmux attach -t dev
 
 # Build ros-bridge Humble container
@@ -272,7 +283,7 @@ bot-to-speaker:
 # =============================================================================
 # Dev Environment Deployment Commands
 # =============================================================================
-.PHONY: dev-deploy dev-logs dev-ssh dev-status dev-web dev-url dev-ip
+.PHONY: dev-deploy dev-logs dev-ssh dev-status dev-url dev-ip
 
 DEV_VM_NAME ?= robot-gateway-api-dev
 DEV_PROJECT_ID ?= robo1-489405
@@ -314,12 +325,6 @@ dev-status:
 dev-url:
 	@echo "https://storage.googleapis.com/$(DEV_FRONTEND_BUCKET)/index.html"
 
-dev-web:
-	@echo "Dev frontend: https://storage.googleapis.com/$(DEV_FRONTEND_BUCKET)/index.html"
-	@xdg-open "https://storage.googleapis.com/$(DEV_FRONTEND_BUCKET)/index.html" 2>/dev/null || \
-		open "https://storage.googleapis.com/$(DEV_FRONTEND_BUCKET)/index.html" 2>/dev/null || \
-		echo "Open the URL manually in your browser"
-
 # Run local dashboard against dev API
 dev-cloud-web:
 	@DEV_IP=$$($(MAKE) -s dev-ip); \
@@ -348,3 +353,18 @@ dev-cloud-ros:
 		-e API_BASE_URL="https://$$DEV_IP.sslip.io/api" \
 		-e LOBBY_KEY=G-lV6Jrg0DW-m78AClMySQ \
 		ros-bridge-humble
+
+# =============================================================================
+# Robot Commands (Rosmaster A1 Pi)
+# =============================================================================
+.PHONY: robot-push robot-pull robot-restart
+
+robot-push:
+	$(MAKE) -C bots/rosmaster-a1_pi deploy
+
+robot-pull:
+	@echo "Pulling code/configs from robot..."
+	rsync -avz --filter=':- .gitignore' pi@raspberrypi.local:/home/pi/share/rosmaster/ bots/rosmaster-a1_pi/
+
+robot-restart:
+	$(MAKE) -C bots/rosmaster-a1_pi restart

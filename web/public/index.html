@@ -372,8 +372,15 @@
         padding: 1rem;
         display: flex;
         flex-direction: column;
-        justify-content: flex-start;
+        justify-content: center; /* Center vertically */
         pointer-events: none;
+      }
+      .hud-left-column {
+        display: flex;
+        flex-direction: column;
+        gap: 0.5rem;
+        align-items: flex-start;
+        padding-left: 2.5rem; /* Space for back button */
       }
       .hud-row {
         display: flex;
@@ -400,6 +407,10 @@
         .hud-overlay {
           padding: 0.5rem;
         }
+        .hud-left-column {
+          gap: 0.4rem;
+          padding-left: 2rem;
+        }
         .hud-row {
           gap: 0.4rem;
           padding-right: 100px;
@@ -414,6 +425,9 @@
         }
       }
       @media (max-width: 400px) {
+        .hud-left-column {
+          padding-left: 1.5rem;
+        }
         .hud-panel {
           padding: 0.25rem 0.4rem;
           min-width: 55px;
@@ -434,24 +448,36 @@
         margin: 0;
         border: none;
       }
-      .video-controls-top {
+      .video-controls-top-left {
         position: absolute;
         top: 0.75rem;
-        right: 0.75rem;
+        left: 0.75rem;
         z-index: 5;
         display: flex;
         gap: 0.5rem;
         pointer-events: auto;
       }
-      .video-controls-top button {
-        pointer-events: auto;
-      }
-      .video-fullscreen-btn {
+      .video-controls-top-right {
         position: absolute;
-        bottom: 50px;
+        top: 0.75rem;
         right: 0.75rem;
         z-index: 5;
+        display: flex;
+        flex-direction: column;
+        align-items: flex-end;
+        gap: 0.5rem;
         pointer-events: auto;
+      }
+      .top-right-buttons {
+        display: flex;
+        gap: 0.5rem;
+      }
+      .video-controls-top-left button,
+      .video-controls-top-right button {
+        pointer-events: auto;
+      }
+      .video-controls-top-right .hud-minimap {
+        margin-top: 0.25rem;
       }
       pre {
         background: rgba(2,6,23,0.9);
@@ -522,6 +548,27 @@
         color: #22c55e;
         box-shadow: 0 0 12px rgba(34,197,94,0.5);
       }
+      /* Speaker vote button states */
+      .speaker-vote.vote-none {
+        background: rgba(239,68,68,0.2) !important;
+        border-color: rgba(239,68,68,0.4) !important;
+        color: #ef4444 !important;
+      }
+      .speaker-vote.vote-partial {
+        background: rgba(249,115,22,0.2) !important;
+        border-color: rgba(249,115,22,0.4) !important;
+        color: #f97316 !important;
+      }
+      .speaker-vote.vote-pending {
+        background: rgba(234,179,8,0.2) !important;
+        border-color: rgba(234,179,8,0.4) !important;
+        color: #eab308 !important;
+      }
+      .speaker-vote.vote-enabled {
+        background: rgba(34,197,94,0.3) !important;
+        border-color: rgba(34,197,94,0.5) !important;
+        color: #22c55e !important;
+      }
       .volume-slider {
         flex: 1;
         min-width: 100px;
@@ -569,16 +616,12 @@
 
       /* SLAM Minimap HUD */
       .hud-minimap {
-        position: absolute;
-        bottom: 60px;
-        right: 10px;
         width: 150px;
         height: 150px;
         background: rgba(0,0,0,0.7);
         border: 1px solid rgba(148,163,184,0.5);
         border-radius: 8px;
         pointer-events: none;
-        z-index: 10;
       }
       #minimap-canvas {
         width: 100%;
@@ -589,8 +632,6 @@
         .hud-minimap {
           width: 100px;
           height: 100px;
-          bottom: 50px;
-          right: 5px;
         }
       }
 
@@ -648,6 +689,37 @@
         display: none;
       }
 
+      /* Ghost joystick - positioned inside touch zones, centered via absolute positioning */
+      .ghost-joystick {
+        position: absolute;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        width: 100px;
+        height: 100px;
+        border: 2px solid rgba(34, 197, 94, 0.25);
+        border-radius: 50%;
+        pointer-events: none;
+        z-index: 15;
+        opacity: 0;
+        transition: opacity 0.2s ease;
+      }
+      .ghost-joystick.visible {
+        opacity: 0.7;
+      }
+      .ghost-joystick .ghost-knob {
+        position: absolute;
+        width: 40px;
+        height: 40px;
+        background: rgba(34, 197, 94, 0.35);
+        border-radius: 50%;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        transition: transform 0.15s ease-out;
+      }
+
+
       /* Mobile fullscreen teleop mode */
       @media (max-width: 768px) and (orientation: landscape) {
         body.mobile-teleop {
@@ -697,7 +769,8 @@
         body.mobile-teleop #video-meta {
           display: none;
         }
-        body.mobile-teleop .video-controls-top {
+        body.mobile-teleop .video-controls-top-left,
+        body.mobile-teleop .video-controls-top-right {
           display: none;
         }
         /* Show touch joysticks on mobile */
@@ -710,9 +783,13 @@
         }
       }
 
-      /* Hide touch indicators on very small screens or non-touch */
+      /* On desktop: hide touch indicators but keep zone for ghost joysticks */
       @media (hover: hover) and (pointer: fine) {
         .touch-joystick-zone {
+          pointer-events: none;
+        }
+        .touch-joystick-zone .joystick-indicator,
+        .touch-joystick-zone .joystick-label {
           display: none;
         }
       }
@@ -978,40 +1055,48 @@
               <!-- full-width video with HUD overlay -->
               <div class="video-wrapper" id="video-wrapper">
                 <video id="robot-video" autoplay playsinline controls controlsList="nofullscreen"></video>
-                <div class="video-controls-top">
-                  <button id="mic-toggle-btn" class="ghost mic-btn muted" type="button" title="Voice to other streamers">🎤</button>
-                  <button id="robot-mic-btn" class="ghost mic-btn muted" type="button" title="Voice to robot speaker">🔊</button>
+                <div class="video-controls-top-left">
                   <button id="video-back-btn" class="ghost" type="button" aria-label="Exit stream">←</button>
                 </div>
-                <button id="video-fullscreen-btn" class="ghost video-fullscreen-btn" type="button" aria-label="Toggle fullscreen">⤢</button>
+                <div class="video-controls-top-right">
+                  <div class="top-right-buttons">
+                    <button id="mic-toggle-btn" class="ghost mic-btn muted" type="button" title="Voice to other streamers">🎤</button>
+                    <button id="robot-mic-btn" class="ghost mic-btn speaker-vote vote-none" type="button" title="Voice to robot speaker">🔊</button>
+                    <button id="video-fullscreen-btn" class="ghost" type="button" aria-label="Toggle fullscreen">⤢</button>
+                  </div>
+                  <div class="hud-minimap" id="hud-minimap">
+                    <canvas id="minimap-canvas" width="150" height="150"></canvas>
+                  </div>
+                </div>
                 <button class="mobile-exit-btn" id="mobile-exit-btn" type="button">✕ Exit</button>
                 <div class="touch-joystick-zone left" id="joystick-zone-left">
                   <div class="joystick-indicator"></div>
+                  <div class="ghost-joystick" id="ghost-move-joystick">
+                    <div class="ghost-knob" id="ghost-move-knob"></div>
+                  </div>
                   <span class="joystick-label">Move</span>
                 </div>
                 <div class="touch-joystick-zone right" id="joystick-zone-right">
                   <div class="joystick-indicator"></div>
+                  <div class="ghost-joystick" id="ghost-camera-joystick">
+                    <div class="ghost-knob" id="ghost-camera-knob"></div>
+                  </div>
                   <span class="joystick-label">Look</span>
                 </div>
                 <div class="hud-overlay">
-                  <div class="hud-row" style="justify-content:space-between;">
-                    <div style="display:flex;gap:0.5rem;align-items:center;">
-                      <div class="hud-panel hud-robot-name" id="hud-robot-name">
-                        <strong>Robot</strong>
-                      </div>
-                      <div class="hud-panel">
-                        <strong id="linear-speed-value">0.00</strong>
-                      </div>
-                      <div class="hud-panel">
-                        <strong id="angular-speed-value">0.00</strong>
-                      </div>
-                      <div class="hud-panel">
-                        <strong id="front-distance-value">--</strong>
-                      </div>
+                  <div class="hud-left-column">
+                    <div class="hud-panel hud-robot-name" id="hud-robot-name">
+                      <strong>Robot</strong>
                     </div>
-                  </div>
-                  <div class="hud-minimap" id="hud-minimap">
-                    <canvas id="minimap-canvas" width="150" height="150"></canvas>
+                    <div class="hud-panel">
+                      <strong id="linear-speed-value">0.00</strong>
+                    </div>
+                    <div class="hud-panel">
+                      <strong id="angular-speed-value">0.00</strong>
+                    </div>
+                    <div class="hud-panel">
+                      <strong id="front-distance-value">--</strong>
+                    </div>
                   </div>
                 </div>
               </div>
@@ -1045,7 +1130,7 @@
               <button type="button" id="copy-key-btn" class="secondary">Copy</button>
             </div>
             <div class="lobby-actions">
-              <button type="submit" id="save-lobby-btn">Save lobby</button>
+              <button type="submit" id="create-lobby-btn">Create lobby</button>
               <button type="button" id="delete-lobby-btn" class="secondary">Delete lobby</button>
             </div>
             <p id="lobby-message" class="hint"></p>
@@ -1072,6 +1157,7 @@
                 <div style="flex:1;">
                   <label for="bot-volume">Volume</label>
                   <div style="display:flex;align-items:center;gap:0.5rem;">
+                    <button type="button" id="bot-mute-btn" class="ghost" title="Mute robot">🔊</button>
                     <input type="range" id="bot-volume" min="0" max="100" value="100" style="flex:1;">
                     <span id="bot-volume-label" style="min-width:3ch;">100</span>%
                   </div>
@@ -1179,7 +1265,9 @@
         const botDescInput = document.getElementById('bot-desc');
         const botVolumeInput = document.getElementById('bot-volume');
         const botVolumeLabel = document.getElementById('bot-volume-label');
+        const botMuteBtn = document.getElementById('bot-mute-btn');
         const botMessage = document.getElementById('bot-message');
+        let botPreviousVolume = 100;  // Store volume before muting
         const cancelBotEditBtn = document.getElementById('cancel-bot-edit');
         // Chat elements
         const chatMessages = document.getElementById('chat-messages');
@@ -1208,9 +1296,7 @@
             return cachedIceServers;
           }
           try {
-            const resp = await fetch(`${apiBase()}/ice-servers`, {
-              headers: authHeaders(),
-            });
+            const resp = await authFetch(`${apiBase()}/ice-servers`);
             if (resp.ok) {
               const data = await resp.json();
               if (data.iceServers && data.iceServers.length) {
@@ -1235,9 +1321,13 @@
         const initialToken = localStorage.getItem('arenaToken') || sessionStorage.getItem('arenaToken') || '';
         const initialEmail = localStorage.getItem('arenaUserEmail') || sessionStorage.getItem('arenaUserEmail') || '';
 
+        // Generate unique client ID for this browser session (allows same user on multiple devices)
+        const clientId = crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+
         const state = {
           authToken: initialToken,
           userEmail: initialEmail,
+          clientId: clientId,
           lobbies: [],
           offlineLobbies: [],
           offlineCollapsed: true,
@@ -1262,6 +1352,8 @@
           micTrack: null,
           // Audio playback state (robot -> browser)
           speakerEnabled: false,
+          speakerVoted: false,  // Has current user voted to enable speaker
+          speakerState: { total: 0, votes: 0, enabled: false, voters: [] },  // Server state
           playbackContext: null,
           playbackQueue: [],
           playbackPlaying: false,
@@ -1393,6 +1485,17 @@
           return state.authToken ? { 'Authorization': 'Bearer ' + state.authToken } : {};
         }
 
+        // Wrapper for fetch that automatically handles 401 (expired token)
+        async function authFetch(url, options = {}) {
+          // Merge auth headers
+          options.headers = { ...authHeaders(), ...options.headers };
+          const resp = await fetch(url, options);
+          if (resp.status === 401) {
+            showReauthOverlay();
+          }
+          return resp;
+        }
+
         function showReauthOverlay() {
           reauthEmailInput.value = state.userEmail || '';
           reauthPasswordInput.value = '';
@@ -1516,14 +1619,10 @@
           cancelLobbyFetch();
           lobbyFetchController = new AbortController();
           try {
-            const resp = await fetch(`${apiBase()}/lobbies`, {
-              headers: authHeaders(),
+            const resp = await authFetch(`${apiBase()}/lobbies`, {
               signal: lobbyFetchController.signal,
             });
-            if (resp.status === 401) {
-              showReauthOverlay();
-              return;
-            }
+            if (resp.status === 401) return;
             if (!resp.ok) throw new Error('Failed to load lobbies');
             const data = await resp.json();
             const items = Array.isArray(data.items) ? data.items : [];
@@ -1634,7 +1733,8 @@
         async function openLobbyDetail(lobbyId) {
           if (!state.authToken) return;
           try {
-            const resp = await fetch(`${apiBase()}/lobbies/${lobbyId}`, { headers: authHeaders() });
+            const resp = await authFetch(`${apiBase()}/lobbies/${lobbyId}`);
+            if (resp.status === 401) return;
             if (!resp.ok) throw new Error(await resp.text());
             const data = await resp.json();
             state.currentLobby = data;
@@ -1847,10 +1947,8 @@
 
         async function loadChatHistory(lobbyId) {
           try {
-            const resp = await fetch(`${apiBase()}/lobbies/${lobbyId}/messages?limit=50`, {
-              headers: authHeaders(),
-            });
-            if (!resp.ok) return;
+            const resp = await authFetch(`${apiBase()}/lobbies/${lobbyId}/messages?limit=50`);
+            if (resp.status === 401 || !resp.ok) return;
             const data = await resp.json();
             const messages = data.items || [];
             state.chatMessages = messages;
@@ -1939,12 +2037,9 @@
           if (!lobbyId || !content.trim()) return;
           chatSendBtn.disabled = true;
           try {
-            const resp = await fetch(`${apiBase()}/lobbies/${lobbyId}/messages`, {
+            const resp = await authFetch(`${apiBase()}/lobbies/${lobbyId}/messages`, {
               method: 'POST',
-              headers: {
-                ...authHeaders(),
-                'Content-Type': 'application/json',
-              },
+              headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ content: content.trim() }),
             });
             if (!resp.ok) throw new Error('Failed to send message');
@@ -2020,7 +2115,7 @@
           activeRobotLabel.textContent = `${bot.name}${viewOnly ? ' (viewing)' : ''}`;
           hudRobotName.querySelector('strong').textContent = bot.name;
           setTeleopAvailability(true);
-          resetJoy();
+          resetJoy(false);  // Don't send commands on join - let robot keep its state
           setLobbyTab('teleop');
           teleopEmpty.hidden = true;
           teleopPane.hidden = false;
@@ -2073,10 +2168,13 @@
           stopIdleTimeout();
           state.activeRobot = null;
           state.viewOnly = false;
+          state.speakerVoted = false;
+          state.speakerState = { total: 0, votes: 0, enabled: false, voters: [] };
           activeRobotLabel.textContent = '';
           setTeleopAvailability(false);
           resetJoy();
           stopMicrophone();
+          updateSpeakerButton();
           stopGamepadPolling();
           destroyTouchJoysticks();
           teleopPane.hidden = true;
@@ -2136,10 +2234,7 @@
           micToggleBtn.classList.toggle('muted', !state.micEnabled);
           micToggleBtn.classList.toggle('active', state.micEnabled);
           micToggleBtn.title = state.micEnabled ? 'Mute to streamers' : 'Unmute to streamers';
-          // Robot mic button (voice to robot speaker)
-          robotMicBtn.classList.toggle('muted', !state.robotMicEnabled);
-          robotMicBtn.classList.toggle('active', state.robotMicEnabled);
-          robotMicBtn.title = state.robotMicEnabled ? 'Mute to robot' : 'Unmute to robot';
+          // Robot mic button styling is handled by updateSpeakerButton (vote colors)
           micVolumeSlider.disabled = true; // Volume control not yet implemented for WebRTC
         }
 
@@ -2152,10 +2247,80 @@
           };
           if (state.controlChannel && state.controlChannel.readyState === 'open') {
             state.controlChannel.send(JSON.stringify(routing));
-            console.log('[audio] sent routing:', routing);
+            console.info('[audio] SENT routing:', routing);
           } else {
-            console.log('[audio] routing not sent (channel not ready), state:', routing);
+            console.warn('[audio] routing NOT sent (channel not ready):', routing);
           }
+        }
+
+        function sendSpeakerVote() {
+          // Send speaker vote to server via control channel
+          const vote = {
+            type: 'speaker_vote',
+            vote: state.speakerVoted,
+          };
+          if (state.controlChannel && state.controlChannel.readyState === 'open') {
+            state.controlChannel.send(JSON.stringify(vote));
+            console.info('[speaker] SENT vote:', vote);
+          } else {
+            console.warn('[speaker] vote NOT sent (channel not ready):', vote);
+          }
+        }
+
+        function handleSpeakerState(data) {
+          // Update local speaker state from server
+          state.speakerState = {
+            total: data.total_streamers || 0,
+            votes: data.votes || 0,
+            enabled: data.enabled || false,
+            voters: data.voters || [],
+          };
+          console.info('[speaker] state update:', state.speakerState);
+          updateSpeakerButton();
+          // NOTE: Don't mute video based on speaker vote - that would also mute group audio
+          // The speaker vote is advisory; audio routing controls what actually gets sent
+          // to the robot. The video element should always be unmuted to receive audio.
+          const videoElement = document.getElementById('robot-video');
+          if (videoElement && videoElement.muted) {
+            // Unmute on first interaction (autoplay policy workaround)
+            videoElement.muted = false;
+            console.info('[speaker] video unmuted for audio');
+          }
+        }
+
+        function updateSpeakerButton() {
+          if (!robotMicBtn) return;
+          const { total, votes, enabled, voters } = state.speakerState;
+          const userKey = `${state.activeRobot?.ros_namespace}:${state.user?.email}`;
+          const userVoted = voters.includes(userKey) || state.speakerVoted;
+
+          // Remove all vote classes
+          robotMicBtn.classList.remove('vote-none', 'vote-partial', 'vote-pending', 'vote-enabled', 'muted', 'active');
+
+          if (enabled) {
+            // Green: everyone has voted yes
+            robotMicBtn.classList.add('vote-enabled');
+            robotMicBtn.title = `Speaker enabled (${votes}/${total} votes)`;
+          } else if (votes === 0) {
+            // Red: nobody has voted
+            robotMicBtn.classList.add('vote-none');
+            robotMicBtn.title = `Vote to enable speaker (0/${total} votes)`;
+          } else if (userVoted) {
+            // Yellow: current user voted but not everyone
+            robotMicBtn.classList.add('vote-pending');
+            robotMicBtn.title = `Waiting for others (${votes}/${total} votes)`;
+          } else {
+            // Orange: some people voted but not current user
+            robotMicBtn.classList.add('vote-partial');
+            robotMicBtn.title = `Others want speaker (${votes}/${total} votes) - click to vote`;
+          }
+        }
+
+        function toggleSpeakerVote() {
+          state.speakerVoted = !state.speakerVoted;
+          sendSpeakerVote();
+          updateSpeakerButton();
+          logTelemetry(state.speakerVoted ? 'Voted for speaker' : 'Removed speaker vote');
         }
 
         async function enableMicrophone() {
@@ -2177,17 +2342,38 @@
 
           try {
             logTelemetry('Requesting microphone access...');
-            const micStream = await navigator.mediaDevices.getUserMedia({
-              audio: {
-                echoCancellation: true,
-                noiseSuppression: true,
-                autoGainControl: true,
-                sampleRate: 48000,
-              },
-            });
+            // Try with constraints first, fall back to simple audio:true for iOS compatibility
+            let micStream;
+            try {
+              micStream = await navigator.mediaDevices.getUserMedia({
+                audio: {
+                  echoCancellation: true,
+                  noiseSuppression: true,
+                  autoGainControl: true,
+                },
+              });
+            } catch (constraintErr) {
+              console.warn('[mic] constraint getUserMedia failed, trying simple audio:', constraintErr);
+              micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            }
             state.micStream = micStream;
             const micTrack = micStream.getAudioTracks()[0];
+            console.info('[mic] got track:', micTrack.label, 'enabled:', micTrack.enabled, 'muted:', micTrack.muted, 'readyState:', micTrack.readyState);
+            console.info('[mic] track settings:', JSON.stringify(micTrack.getSettings()));
+
+            // Explicitly enable track (iOS sometimes starts disabled)
+            micTrack.enabled = true;
+            console.info('[mic] track after enable:', 'enabled:', micTrack.enabled, 'muted:', micTrack.muted);
+
             state.micTrack = micTrack;
+
+            // Monitor track state changes (useful for iOS debugging)
+            micTrack.onmute = () => {
+              console.warn('[mic] track MUTED - re-enabling');
+              micTrack.enabled = true;
+            };
+            micTrack.onunmute = () => console.info('[mic] track unmuted');
+            micTrack.onended = () => console.warn('[mic] track ENDED');
 
             // Set up audio level detection for visual feedback
             setupMicLevelDetection(micStream);
@@ -2218,27 +2404,49 @@
             });
 
             // Send renegotiation offer to API (same endpoint as initial offer)
+            // Retry logic for 409 Conflict (server doing its own renegotiation)
             const namespace = state.activeRobot?.ros_namespace;
             console.log('[mic] sending renegotiation to', `${apiBase()}/robots/${encodeURIComponent(namespace)}/webrtc`);
-            const resp = await fetch(`${apiBase()}/robots/${encodeURIComponent(namespace)}/webrtc`, {
-              method: 'POST',
-              headers: {
-                'Content-Type': 'application/json',
-                ...authHeaders(),
-              },
-              body: JSON.stringify({
-                sdp: state.pc.localDescription.sdp,
-                type: state.pc.localDescription.type,
-              }),
-            });
 
-            if (!resp.ok) {
-              throw new Error(`Renegotiation failed: ${resp.status}`);
+            let answer = null;
+            for (let attempt = 1; attempt <= 5; attempt++) {
+              const resp = await authFetch(`${apiBase()}/robots/${encodeURIComponent(namespace)}/webrtc`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  sdp: state.pc.localDescription.sdp,
+                  type: state.pc.localDescription.type,
+                  client_id: state.clientId,
+                }),
+              });
+
+              if (resp.ok) {
+                answer = await resp.json();
+                break;
+              } else if (resp.status === 409 && attempt < 5) {
+                // Server is doing its own renegotiation, wait and retry
+                console.warn(`[mic] renegotiation conflict (attempt ${attempt}/5), retrying in 500ms...`);
+                await new Promise(r => setTimeout(r, 500));
+                continue;
+              } else {
+                throw new Error(`Renegotiation failed: ${resp.status}`);
+              }
             }
 
-            const answer = await resp.json();
+            if (!answer) {
+              throw new Error('Renegotiation failed after 5 attempts');
+            }
+            console.info('[mic] got answer, setting remote description');
             await state.pc.setRemoteDescription(new RTCSessionDescription(answer));
-            console.info('[mic] renegotiation complete');
+            console.info('[mic] renegotiation complete, senders:', state.pc.getSenders().map(s => s.track?.kind));
+
+            // Verify the track was added
+            const audioSenders = state.pc.getSenders().filter(s => s.track?.kind === 'audio');
+            if (audioSenders.length === 0) {
+              console.warn('[mic] No audio senders after renegotiation!');
+            } else {
+              console.info('[mic] Audio sender active:', audioSenders[0].track?.enabled, audioSenders[0].track?.muted);
+            }
             logTelemetry('Microphone capture enabled');
           } catch (err) {
             console.error('[mic] failed to enable microphone:', err);
@@ -2284,9 +2492,16 @@
           updateMicUI();
         }
 
-        function setupMicLevelDetection(stream) {
+        async function setupMicLevelDetection(stream) {
           try {
             const audioContext = new AudioContext();
+            // iOS requires explicit resume after user interaction
+            if (audioContext.state === 'suspended') {
+              console.info('[mic] AudioContext suspended, resuming...');
+              await audioContext.resume();
+            }
+            console.info('[mic] AudioContext state:', audioContext.state, 'sampleRate:', audioContext.sampleRate);
+
             const analyser = audioContext.createAnalyser();
             const source = audioContext.createMediaStreamSource(stream);
             source.connect(analyser);
@@ -2296,7 +2511,7 @@
 
             // Check audio levels periodically
             state.micLevelInterval = setInterval(() => {
-              if (!state.micEnabled) {
+              if (!state.micEnabled && !state.robotMicEnabled) {
                 micToggleBtn.classList.remove('speaking');
                 return;
               }
@@ -2305,6 +2520,12 @@
               // Threshold for "speaking" - adjust as needed
               const isSpeaking = average > 15;
               micToggleBtn.classList.toggle('speaking', isSpeaking);
+              // Log every 50 intervals (~5 sec) for debugging
+              if (state._micLevelCount === undefined) state._micLevelCount = 0;
+              state._micLevelCount++;
+              if (state._micLevelCount % 50 === 1) {
+                console.info('[mic] level check:', average.toFixed(1), 'speaking:', isSpeaking);
+              }
             }, 100);
           } catch (err) {
             console.warn('[mic] Could not set up level detection:', err);
@@ -2463,6 +2684,9 @@
           // Update display
           updateJoyIndicators();
           sendJoy();
+
+          // Update ghost move joystick to show local WASD inputs
+          updateLocalMoveGhost();
         }
 
         function updateJoyIndicators() {
@@ -2491,25 +2715,35 @@
           state.pc = pc;
           const inboundStream = new MediaStream();
           pc.addEventListener('track', (event) => {
-            console.info('[video] received track:', event.track.kind);
+            const audioTracks = inboundStream.getAudioTracks();
+            const videoTracks = inboundStream.getVideoTracks();
+            console.info('[video] received track:', event.track.kind, 'id:', event.track.id,
+                         'existing audio:', audioTracks.length, 'existing video:', videoTracks.length);
             inboundStream.addTrack(event.track);
             videoElement.srcObject = inboundStream;
-            // Ensure audio plays
+            // Handle audio track - start unmuted so group audio can be heard
+            // (speaker vote only controls what gets sent TO the robot, not what you hear)
             if (event.track.kind === 'audio') {
-              console.info('[video] audio track received, enabling playback');
+              console.info('[video] audio track received, enabling audio playback');
               videoElement.muted = false;
               videoElement.volume = 1.0;
-              // Try to play - if blocked, user will need to click
+              // Try to play - if blocked by autoplay policy, start muted then unmute on click
               videoElement.play().then(() => {
-                console.info('[video] audio playback started');
+                console.info('[video] playback started with audio');
               }).catch(e => {
-                console.warn('[video] autoplay blocked, click video to enable audio:', e);
-                // Add click handler to enable audio
-                videoElement.onclick = () => {
-                  videoElement.muted = false;
-                  videoElement.play();
-                  videoElement.onclick = null;
-                };
+                console.warn('[video] autoplay blocked, starting muted:', e);
+                videoElement.muted = true;
+                videoElement.play().then(() => {
+                  console.info('[video] muted playback started, click to unmute');
+                  // Add click handler to unmute
+                  videoElement.onclick = () => {
+                    videoElement.muted = false;
+                    console.info('[video] unmuted after click');
+                    videoElement.onclick = null;
+                  };
+                }).catch(e2 => {
+                  console.error('[video] playback failed even muted:', e2);
+                });
               });
             }
           });
@@ -2559,6 +2793,8 @@
               logTelemetry('Control data channel connected');
               // Send current audio routing state in case buttons were clicked before channel opened
               sendAudioRouting();
+              // Send current speaker vote state
+              sendSpeakerVote();
             };
             controlChannel.onclose = () => {
               console.info('[data] control channel closed');
@@ -2566,6 +2802,44 @@
             };
             controlChannel.onerror = (event) => {
               console.warn('[data] control channel error:', event);
+            };
+            controlChannel.onmessage = async (event) => {
+              // Handle incoming messages from server (speaker state, aggregated control, renegotiation, etc.)
+              try {
+                const data = JSON.parse(event.data);
+                if (data.type === 'speaker_state') {
+                  handleSpeakerState(data);
+                } else if (data.type === 'aggregated_control') {
+                  // Update ghost joysticks to show other users' inputs
+                  updateGhostJoysticks(data.axes, data.users);
+                } else if (data.type === 'camera_control') {
+                  // Update ghost camera joystick for other users' camera inputs
+                  updateGhostCameraJoystick(data.pan_delta, data.tilt_delta, data.user);
+                } else if (data.type === 'renegotiation_offer') {
+                  // Server is adding new tracks (e.g., new user joined)
+                  console.info('[reneg] received renegotiation offer from server');
+                  try {
+                    await state.pc.setRemoteDescription(new RTCSessionDescription({
+                      sdp: data.sdp,
+                      type: data.sdp_type || 'offer',
+                    }));
+                    console.info('[reneg] set remote description, creating answer');
+                    const answer = await state.pc.createAnswer();
+                    await state.pc.setLocalDescription(answer);
+                    console.info('[reneg] sending answer back to server');
+                    controlChannel.send(JSON.stringify({
+                      type: 'renegotiation_answer',
+                      sdp: state.pc.localDescription.sdp,
+                      sdp_type: state.pc.localDescription.type,
+                    }));
+                    console.info('[reneg] renegotiation complete');
+                  } catch (reneg_err) {
+                    console.error('[reneg] renegotiation failed:', reneg_err);
+                  }
+                }
+              } catch (err) {
+                console.warn('[data] control channel message parse error:', err);
+              }
             };
           }
 
@@ -2601,10 +2875,10 @@
             })
             .then((offer) => {
               console.info('[video] sending offer to gateway');
-              return fetch(`${apiBase()}/robots/${encodeURIComponent(namespace)}/webrtc`, {
+              return authFetch(`${apiBase()}/robots/${encodeURIComponent(namespace)}/webrtc`, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json', ...authHeaders() },
-                body: JSON.stringify({ sdp: offer.sdp, type: offer.type }),
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ sdp: offer.sdp, type: offer.type, client_id: state.clientId }),
               });
             })
             .then((resp) => {
@@ -2833,10 +3107,13 @@
           }
         }
 
-        // Camera pan/tilt control (IJKL keys)
-        const CAMERA_STEP = 2;  // Degrees per update (slower for smoother control)
+        // Camera pan/tilt control (IJKL keys) - uses DELTAS for multi-user compatibility
+        const CAMERA_STEP = 5;  // Degrees per update (keyboard)
         const CAMERA_MIN = 0;
         const CAMERA_MAX = 180;
+        // Track deltas accumulated since last send (for delta-based control)
+        let cameraPanDelta = 0;
+        let cameraTiltDelta = 0;
 
         function startCameraPtz() {
           if (state.cameraPtzInterval) return;
@@ -2857,27 +3134,30 @@
 
           // I = tilt up, K = tilt down
           if (keys['i']) {
-            state.cameraTilt = Math.min(CAMERA_MAX, state.cameraTilt + CAMERA_STEP);
+            cameraTiltDelta += CAMERA_STEP;
             changed = true;
           }
           if (keys['k']) {
-            state.cameraTilt = Math.max(CAMERA_MIN, state.cameraTilt - CAMERA_STEP);
+            cameraTiltDelta -= CAMERA_STEP;
             changed = true;
           }
 
           // J = pan left, L = pan right
           if (keys['j']) {
-            state.cameraPan = Math.min(CAMERA_MAX, state.cameraPan + CAMERA_STEP);
+            cameraPanDelta += CAMERA_STEP;
             changed = true;
           }
           if (keys['l']) {
-            state.cameraPan = Math.max(CAMERA_MIN, state.cameraPan - CAMERA_STEP);
+            cameraPanDelta -= CAMERA_STEP;
             changed = true;
           }
 
           if (changed) {
             sendCameraPtz();
           }
+
+          // Update ghost camera joystick to show local IJKL inputs
+          updateLocalCameraGhost();
         }
 
         function sendCameraPtz() {
@@ -2885,12 +3165,20 @@
           if (!state.controlChannel || state.controlChannel.readyState !== 'open') {
             return;
           }
+          // Only send if there's actually a delta to send
+          if (cameraPanDelta === 0 && cameraTiltDelta === 0) {
+            return;
+          }
           const payload = {
             type: 'camera_ptz',
-            pan: Math.round(state.cameraPan),
-            tilt: Math.round(state.cameraTilt),
+            pan_delta: Math.round(cameraPanDelta),
+            tilt_delta: Math.round(cameraTiltDelta),
             timestamp: Date.now(),
           };
+          console.log('[camera] sending ptz:', payload.pan_delta, payload.tilt_delta);
+          // Reset deltas after sending
+          cameraPanDelta = 0;
+          cameraTiltDelta = 0;
           resetIdleTimeout();
           try {
             state.controlChannel.send(JSON.stringify(payload));
@@ -2899,18 +3187,21 @@
           }
         }
 
-        function resetJoy() {
+        function resetJoy(sendCommands = true) {
           stopKeySending();
           stopCameraPtz();
           state.joyAxes = [0, 0, 0, 0, 0, 0];
           state.joyButtons = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
           state.keysPressed = {};
-          // Reset camera to center
-          state.cameraPan = 90;
-          state.cameraTilt = 90;
+          // Clear any pending camera deltas
+          cameraPanDelta = 0;
+          cameraTiltDelta = 0;
           updateJoyIndicators();
-          sendJoy();
-          sendCameraPtz();
+          // Only send commands if requested (don't send when joining - let robot keep its state)
+          if (sendCommands) {
+            sendJoy();
+            // Note: don't send camera reset - we're using deltas now, robot maintains its own state
+          }
         }
 
         // Gamepad support
@@ -3082,13 +3373,11 @@
 
           cameraJoystick.on('move', (evt, data) => {
             const force = Math.min(data.force, 1);
-            // Adjust pan/tilt based on joystick position
+            // Accumulate pan/tilt deltas based on joystick position
             // x: left = pan left (+), right = pan right (-)
             // y: up = tilt up (+), down = tilt down (-)
-            const panDelta = -data.vector.x * force * 3;
-            const tiltDelta = data.vector.y * force * 3;
-            state.cameraPan = Math.max(CAMERA_MIN, Math.min(CAMERA_MAX, state.cameraPan + panDelta));
-            state.cameraTilt = Math.max(CAMERA_MIN, Math.min(CAMERA_MAX, state.cameraTilt + tiltDelta));
+            cameraPanDelta += -data.vector.x * force * 1;
+            cameraTiltDelta += data.vector.y * force * 1;
           });
 
           cameraJoystick.on('end', () => {
@@ -3131,14 +3420,198 @@
         window.addEventListener('keydown', (event) => handleKey(event, true));
         window.addEventListener('keyup', (event) => handleKey(event, false));
 
+        // ── Ghost Joystick for Other Users' Inputs ──────────────────────
+        const ghostMoveJoystick = document.getElementById('ghost-move-joystick');
+        const ghostMoveKnob = document.getElementById('ghost-move-knob');
+        const ghostCameraJoystick = document.getElementById('ghost-camera-joystick');
+        const ghostCameraKnob = document.getElementById('ghost-camera-knob');
+        let ghostFadeTimeout = null;
+
+        function updateGhostJoysticks(aggregatedAxes, userCount) {
+          // This handles OTHER users' inputs - skip if local control is active
+          const hasLocalMoveInput = !!state.keySendInterval;
+          const hasLocalCameraInput = !!state.cameraPtzInterval;
+
+          // Only show ghost if there are other users controlling
+          if (userCount <= 1 || !aggregatedAxes) {
+            // Don't hide if local input is active (local handler controls visibility)
+            if (!hasLocalMoveInput) ghostMoveJoystick?.classList.remove('visible');
+            if (!hasLocalCameraInput) ghostCameraJoystick?.classList.remove('visible');
+            return;
+          }
+
+          // Move joystick: axes[1] = forward/back, axes[3] = turn
+          // Skip if local move control is active (local handler takes priority)
+          if (!hasLocalMoveInput) {
+            const moveX = aggregatedAxes[3] || 0;  // turn
+            const moveY = -(aggregatedAxes[1] || 0);  // forward (inverted for display)
+            const moveMagnitude = Math.sqrt(moveX * moveX + moveY * moveY);
+
+            if (moveMagnitude > 0.1 && ghostMoveKnob) {
+              ghostMoveJoystick.classList.add('visible');
+              const maxOffset = 30;  // pixels from center
+              ghostMoveKnob.style.transform = `translate(calc(-50% + ${moveX * maxOffset}px), calc(-50% + ${moveY * maxOffset}px))`;
+            } else {
+              ghostMoveJoystick?.classList.remove('visible');
+            }
+          }
+
+          // Camera joystick: axes[4] = camera tilt
+          // Skip if local camera control is active (local handler takes priority)
+          if (!hasLocalCameraInput) {
+            const cameraY = -(aggregatedAxes[4] || 0);
+            const cameraMagnitude = Math.abs(cameraY);
+
+            if (cameraMagnitude > 0.1 && ghostCameraKnob) {
+              ghostCameraJoystick.classList.add('visible');
+              const maxOffset = 30;
+              ghostCameraKnob.style.transform = `translate(-50%, calc(-50% + ${cameraY * maxOffset}px))`;
+            } else {
+              ghostCameraJoystick?.classList.remove('visible');
+            }
+          }
+
+          // Auto-hide after inactivity (only for remote inputs, not local)
+          if (ghostFadeTimeout) clearTimeout(ghostFadeTimeout);
+          ghostFadeTimeout = setTimeout(() => {
+            if (!state.keySendInterval) ghostMoveJoystick?.classList.remove('visible');
+            if (!state.cameraPtzInterval) ghostCameraJoystick?.classList.remove('visible');
+          }, 500);
+        }
+
+        // Track camera ghost timeout separately
+        let ghostCameraFadeTimeout = null;
+
+        function updateGhostCameraJoystick(panDelta, tiltDelta, user) {
+          // Show ghost camera joystick for OTHER users' camera control inputs
+          // Skip if local camera control is active (local handler takes priority)
+          if (state.cameraPtzInterval) return;
+
+          // Also skip if this is our own echoed input
+          const ourKey = `${state.activeRobot?.ros_namespace}:${state.user?.email}`;
+          if (user === ourKey) return;
+
+          // Convert deltas to joystick position (-1 to 1 range)
+          // panDelta: positive = left, negative = right
+          // tiltDelta: positive = up, negative = down
+          const panNorm = Math.max(-1, Math.min(1, panDelta / 10));
+          const tiltNorm = Math.max(-1, Math.min(1, -tiltDelta / 10));  // Invert for display
+          const magnitude = Math.sqrt(panNorm * panNorm + tiltNorm * tiltNorm);
+
+          if (magnitude > 0.1 && ghostCameraKnob) {
+            ghostCameraJoystick.classList.add('visible');
+            const maxOffset = 30;  // pixels from center
+            // Negate panNorm: positive panDelta = left = knob should move left (negative X)
+            ghostCameraKnob.style.transform = `translate(calc(-50% + ${-panNorm * maxOffset}px), calc(-50% + ${tiltNorm * maxOffset}px))`;
+          }
+
+          // Auto-hide after inactivity
+          if (ghostCameraFadeTimeout) clearTimeout(ghostCameraFadeTimeout);
+          ghostCameraFadeTimeout = setTimeout(() => {
+            ghostCameraJoystick?.classList.remove('visible');
+          }, 300);
+        }
+
+        // Also show ghost camera joystick for local IJKL inputs
+        function updateLocalCameraGhost() {
+          const keys = state.keysPressed;
+          const hasI = keys['i'];
+          const hasK = keys['k'];
+          const hasJ = keys['j'];
+          const hasL = keys['l'];
+
+          if (!hasI && !hasK && !hasJ && !hasL) {
+            // No camera keys pressed, hide after timeout
+            if (ghostCameraFadeTimeout) clearTimeout(ghostCameraFadeTimeout);
+            ghostCameraFadeTimeout = setTimeout(() => {
+              ghostCameraJoystick?.classList.remove('visible');
+              // Reset knob to center when hiding
+              if (ghostCameraKnob) {
+                ghostCameraKnob.style.transform = 'translate(-50%, -50%)';
+              }
+            }, 150);
+            return;
+          }
+
+          // Keys are pressed - clear any pending timeout and show at edge
+          if (ghostCameraFadeTimeout) {
+            clearTimeout(ghostCameraFadeTimeout);
+            ghostCameraFadeTimeout = null;
+          }
+
+          // Calculate direction from keys
+          let panDir = 0;
+          let tiltDir = 0;
+          if (hasJ) panDir += 1;  // left
+          if (hasL) panDir -= 1;  // right
+          if (hasI) tiltDir += 1;  // up
+          if (hasK) tiltDir -= 1;  // down
+
+          if (ghostCameraKnob && (panDir !== 0 || tiltDir !== 0)) {
+            ghostCameraJoystick.classList.add('visible');
+            const maxOffset = 30;
+            // Negate panDir: J = left = knob should move left (negative X)
+            ghostCameraKnob.style.transform = `translate(calc(-50% + ${-panDir * maxOffset}px), calc(-50% + ${-tiltDir * maxOffset}px))`;
+          }
+        }
+
+        // Track move ghost timeout separately
+        let ghostMoveFadeTimeout = null;
+
+        // Show ghost move joystick for local WASD/arrow inputs
+        function updateLocalMoveGhost() {
+          const keys = state.keysPressed;
+          const hasW = keys['w'] || keys['arrowup'];
+          const hasS = keys['s'] || keys['arrowdown'];
+          const hasA = keys['a'] || keys['arrowleft'];
+          const hasD = keys['d'] || keys['arrowright'];
+
+          if (!hasW && !hasS && !hasA && !hasD) {
+            // No move keys pressed, hide after timeout
+            if (ghostMoveFadeTimeout) clearTimeout(ghostMoveFadeTimeout);
+            ghostMoveFadeTimeout = setTimeout(() => {
+              ghostMoveJoystick?.classList.remove('visible');
+              // Reset knob to center when hiding
+              if (ghostMoveKnob) {
+                ghostMoveKnob.style.transform = 'translate(-50%, -50%)';
+              }
+            }, 150);
+            return;
+          }
+
+          // Keys are pressed - clear any pending timeout and show at edge
+          if (ghostMoveFadeTimeout) {
+            clearTimeout(ghostMoveFadeTimeout);
+            ghostMoveFadeTimeout = null;
+          }
+
+          // Calculate direction from keys
+          // X: A/left = -1, D/right = +1
+          // Y: W/up = -1 (forward), S/down = +1 (backward) - inverted for display
+          let moveX = 0;
+          let moveY = 0;
+          if (hasA) moveX -= 1;
+          if (hasD) moveX += 1;
+          if (hasW) moveY -= 1;  // Forward = up on joystick
+          if (hasS) moveY += 1;  // Backward = down on joystick
+
+          if (ghostMoveKnob && (moveX !== 0 || moveY !== 0)) {
+            ghostMoveJoystick.classList.add('visible');
+            const maxOffset = 30;
+            ghostMoveKnob.style.transform = `translate(calc(-50% + ${moveX * maxOffset}px), calc(-50% + ${moveY * maxOffset}px))`;
+          }
+        }
+
         micToggleBtn.addEventListener('click', () => {
           console.log('[mic] button clicked, micEnabled=', state.micEnabled);
           toggleMicrophone();
         });
 
         robotMicBtn.addEventListener('click', () => {
-          console.log('[mic] robot mic button clicked, robotMicEnabled=', state.robotMicEnabled);
+          console.log('[speaker] robot mic/speaker button clicked, robotMicEnabled=', state.robotMicEnabled, 'speakerVoted=', state.speakerVoted);
+          // Toggle both: voice to robot AND speaker vote
           toggleRobotMic();
+          toggleSpeakerVote();
         });
 
         micVolumeSlider.addEventListener('input', (event) => {
@@ -3197,7 +3670,8 @@
         }
 
         async function fetchLobbyDetail(lobbyId) {
-          const resp = await fetch(`${apiBase()}/lobbies/${lobbyId}`, { headers: authHeaders() });
+          const resp = await authFetch(`${apiBase()}/lobbies/${lobbyId}`);
+          if (resp.status === 401) return null;
           if (!resp.ok) throw new Error(await resp.text());
           return resp.json();
         }
@@ -3213,6 +3687,9 @@
           } else {
             keyRow.hidden = true;
           }
+          // Show create button only for new lobbies, delete button only for existing
+          const createLobbyBtn = document.getElementById('create-lobby-btn');
+          createLobbyBtn.style.display = lobby ? 'none' : 'inline-flex';
           deleteLobbyBtn.style.display = lobby ? 'inline-flex' : 'none';
         }
 
@@ -3260,6 +3737,15 @@
           const vol = Math.round((bot.volume ?? 1.0) * 100);
           botVolumeInput.value = vol;
           botVolumeLabel.textContent = vol;
+          botPreviousVolume = vol > 0 ? vol : 100;  // Store for unmute
+          // Update mute button icon
+          if (vol === 0) {
+            botMuteBtn.textContent = '🔇';
+            botMuteBtn.title = 'Unmute robot';
+          } else {
+            botMuteBtn.textContent = '🔊';
+            botMuteBtn.title = 'Mute robot';
+          }
           botMessage.textContent = `Editing ${bot.name}`;
         }
 
@@ -3270,12 +3756,15 @@
           botDescInput.value = '';
           botVolumeInput.value = 100;
           botVolumeLabel.textContent = '100';
+          botMuteBtn.textContent = '🔊';
+          botMuteBtn.title = 'Mute robot';
+          botPreviousVolume = 100;
           botMessage.textContent = '';
         }
 
-        lobbyForm.addEventListener('submit', async (event) => {
-          event.preventDefault();
-          if (!state.authToken) return;
+        // Auto-save lobby fields on change
+        async function autoSaveLobby() {
+          if (!state.authToken || !state.manageLobby) return;
           lobbyMessage.textContent = 'Saving...';
           const body = {
             name: lobbyNameInput.value,
@@ -3283,41 +3772,75 @@
             is_public: lobbyVisibilityInput.value === 'public',
           };
           try {
-            if (state.manageLobby) {
-              const resp = await fetch(`${apiBase()}/lobbies/${state.manageLobby.id}`, {
-                method: 'PATCH',
-                headers: { 'Content-Type': 'application/json', ...authHeaders() },
-                body: JSON.stringify(body),
-              });
-              if (!resp.ok) throw new Error(await resp.text());
-              lobbyMessage.textContent = 'Lobby updated.';
-              const updated = await fetchLobbyDetail(state.manageLobby.id);
-              state.manageLobby = updated;
-              if (state.currentLobby?.id === updated.id) {
-                state.currentLobby = updated;
-                renderLobbyDetail();
-              }
-              keyRow.hidden = !updated.access_key;
-              lobbyKeyEl.textContent = updated.access_key || '';
-            } else {
-              const resp = await fetch(`${apiBase()}/lobbies`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', ...authHeaders() },
-                body: JSON.stringify(body),
-              });
-              if (!resp.ok) throw new Error(await resp.text());
-              const created = await resp.json();
-              lobbyMessage.textContent = 'Lobby created. Key copied to clipboard.';
-              copyText(created.access_key, 'Lobby key copied');
-              const detail = await fetchLobbyDetail(created.id);
-              state.manageLobby = detail;
-              populateLobbyForm(detail);
-              renderManageRobots();
+            const resp = await authFetch(`${apiBase()}/lobbies/${state.manageLobby.id}`, {
+              method: 'PATCH',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(body),
+            });
+            if (!resp.ok) throw new Error(await resp.text());
+            lobbyMessage.textContent = 'Saved';
+            setTimeout(() => { if (lobbyMessage.textContent === 'Saved') lobbyMessage.textContent = ''; }, 1500);
+            const updated = await fetchLobbyDetail(state.manageLobby.id);
+            state.manageLobby = updated;
+            if (state.currentLobby?.id === updated.id) {
+              state.currentLobby = updated;
+              renderLobbyDetail();
             }
+            keyRow.hidden = !updated.access_key;
+            lobbyKeyEl.textContent = updated.access_key || '';
             fetchLobbies();
           } catch (err) {
             console.error(err);
-            lobbyMessage.textContent = 'Failed to save lobby.';
+            lobbyMessage.textContent = 'Failed to save';
+          }
+        }
+
+        // Debounce auto-save for text inputs
+        let lobbySaveTimeout = null;
+        function debouncedLobbyAutoSave() {
+          if (lobbySaveTimeout) clearTimeout(lobbySaveTimeout);
+          lobbySaveTimeout = setTimeout(autoSaveLobby, 500);
+        }
+
+        // Auto-save on field changes (only for existing lobbies)
+        lobbyNameInput.addEventListener('blur', () => { if (state.manageLobby) autoSaveLobby(); });
+        lobbyDescInput.addEventListener('blur', () => { if (state.manageLobby) autoSaveLobby(); });
+        lobbyVisibilityInput.addEventListener('change', () => { if (state.manageLobby) autoSaveLobby(); });
+
+        // For new lobbies, create on first field blur if name is filled
+        lobbyForm.addEventListener('submit', async (event) => {
+          event.preventDefault();
+          // Only used for creating new lobbies now
+          if (state.manageLobby) return;  // Already exists, auto-save handles updates
+          if (!state.authToken) return;
+          if (!lobbyNameInput.value.trim()) {
+            lobbyMessage.textContent = 'Enter a lobby name';
+            return;
+          }
+          lobbyMessage.textContent = 'Creating...';
+          const body = {
+            name: lobbyNameInput.value,
+            description: lobbyDescInput.value || null,
+            is_public: lobbyVisibilityInput.value === 'public',
+          };
+          try {
+            const resp = await authFetch(`${apiBase()}/lobbies`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(body),
+            });
+            if (!resp.ok) throw new Error(await resp.text());
+            const created = await resp.json();
+            lobbyMessage.textContent = 'Lobby created. Key copied to clipboard.';
+            copyText(created.access_key, 'Lobby key copied');
+            const detail = await fetchLobbyDetail(created.id);
+            state.manageLobby = detail;
+            populateLobbyForm(detail);
+            renderManageRobots();
+            fetchLobbies();
+          } catch (err) {
+            console.error(err);
+            lobbyMessage.textContent = 'Failed to create lobby.';
           }
         });
 
@@ -3325,9 +3848,8 @@
           if (!state.manageLobby) return;
           if (!confirm('Delete this lobby?')) return;
           try {
-            const resp = await fetch(`${apiBase()}/lobbies/${state.manageLobby.id}`, {
+            const resp = await authFetch(`${apiBase()}/lobbies/${state.manageLobby.id}`, {
               method: 'DELETE',
-              headers: authHeaders(),
             });
             if (!resp.ok) throw new Error(await resp.text());
             lobbyMessage.textContent = 'Lobby deleted.';
@@ -3365,18 +3887,18 @@
           };
           try {
             if (botForm.dataset.editingId) {
-              const resp = await fetch(`${apiBase()}/bots/${botForm.dataset.editingId}`, {
+              const resp = await authFetch(`${apiBase()}/bots/${botForm.dataset.editingId}`, {
                 method: 'PATCH',
-                headers: { 'Content-Type': 'application/json', ...authHeaders() },
+                headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(payload),
               });
               if (!resp.ok) throw new Error(await resp.text());
               botMessage.textContent = 'Robot updated.';
             } else {
               payload.lobby_id = state.manageLobby.id;
-              const resp = await fetch(`${apiBase()}/bots`, {
+              const resp = await authFetch(`${apiBase()}/bots`, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json', ...authHeaders() },
+                headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(payload),
               });
               if (!resp.ok) throw new Error(await resp.text());
@@ -3401,17 +3923,85 @@
           resetBotForm();
         });
 
+        // Volume slider - update label and auto-save for existing robots
         botVolumeInput.addEventListener('input', () => {
-          botVolumeLabel.textContent = botVolumeInput.value;
+          const vol = parseInt(botVolumeInput.value, 10);
+          botVolumeLabel.textContent = vol;
+          updateMuteButtonIcon(vol);
+        });
+
+        // Auto-save volume when slider is released (for existing robots)
+        botVolumeInput.addEventListener('change', async () => {
+          if (!botForm.dataset.editingId) return;  // Only auto-save for existing robots
+          const vol = parseInt(botVolumeInput.value, 10) / 100;
+          try {
+            const resp = await authFetch(`${apiBase()}/bots/${botForm.dataset.editingId}`, {
+              method: 'PATCH',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ volume: vol }),
+            });
+            if (resp.status === 401) return;
+            if (!resp.ok) throw new Error(await resp.text());
+            botMessage.textContent = 'Volume saved';
+            setTimeout(() => { if (botMessage.textContent === 'Volume saved') botMessage.textContent = ''; }, 1500);
+          } catch (err) {
+            console.error(err);
+            botMessage.textContent = 'Failed to save volume';
+          }
+        });
+
+        // Mute button
+        function updateMuteButtonIcon(vol) {
+          if (vol === 0) {
+            botMuteBtn.textContent = '🔇';
+            botMuteBtn.title = 'Unmute robot';
+          } else {
+            botMuteBtn.textContent = '🔊';
+            botMuteBtn.title = 'Mute robot';
+          }
+        }
+
+        botMuteBtn.addEventListener('click', async () => {
+          const currentVol = parseInt(botVolumeInput.value, 10);
+          let newVol;
+          if (currentVol > 0) {
+            // Mute: save current volume and set to 0
+            botPreviousVolume = currentVol;
+            newVol = 0;
+          } else {
+            // Unmute: restore previous volume
+            newVol = botPreviousVolume || 100;
+          }
+          botVolumeInput.value = newVol;
+          botVolumeLabel.textContent = newVol;
+          updateMuteButtonIcon(newVol);
+
+          // Auto-save if editing existing robot
+          if (botForm.dataset.editingId) {
+            try {
+              const resp = await authFetch(`${apiBase()}/bots/${botForm.dataset.editingId}`, {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ volume: newVol / 100 }),
+              });
+              if (resp.status === 401) return;
+              if (!resp.ok) throw new Error(await resp.text());
+              botMessage.textContent = newVol === 0 ? 'Muted' : 'Unmuted';
+              setTimeout(() => { if (botMessage.textContent === 'Muted' || botMessage.textContent === 'Unmuted') botMessage.textContent = ''; }, 1500);
+            } catch (err) {
+              console.error(err);
+              botMessage.textContent = 'Failed to save';
+            }
+          }
         });
 
         async function deleteBot(botId) {
           if (!confirm('Archive this robot?')) return;
           try {
-            const resp = await fetch(`${apiBase()}/bots/${botId}`, {
+            const resp = await authFetch(`${apiBase()}/bots/${botId}`, {
               method: 'DELETE',
-              headers: authHeaders(),
             });
+            if (resp.status === 401) return;
             if (!resp.ok) throw new Error(await resp.text());
             const detail = await fetchLobbyDetail(state.manageLobby.id);
             state.manageLobby = detail;
