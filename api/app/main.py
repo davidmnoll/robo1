@@ -511,8 +511,11 @@ class BrowserAudioRelayTrack(AudioStreamTrack):
                 logger.info("BrowserAudioRelay push_frame %d for %s: shape=%s, dtype=%s, rms=%.1f, min=%d, max=%d, frame.samples=%d",
                             self._push_count, self.robot_id, arr.shape, arr.dtype, rms, arr.min(), arr.max(), frame.samples)
 
-            # Handle different stereo formats
-            if arr.shape[0] > 1:
+            # Handle different audio formats
+            if len(arr.shape) == 1:
+                # Already 1D mono audio
+                samples = arr.astype(np.int16)
+            elif arr.shape[0] > 1:
                 # Planar stereo (2, N): take left channel
                 samples = arr[0].astype(np.int16)
             elif arr.shape[1] > frame.samples:
@@ -610,9 +613,15 @@ class GroupAudioMixer:
         try:
             arr = frame.to_ndarray()
             # Convert to mono if needed
-            if arr.shape[0] > 1:
+            # Handle 1D array (already mono/flattened) vs 2D (channels, samples)
+            if len(arr.shape) == 1:
+                # Already 1D mono audio
+                samples = arr.astype(np.int16)
+            elif arr.shape[0] > 1:
+                # Multiple channels - take first channel
                 samples = arr[0].astype(np.int16)
-            elif len(arr.shape) > 1 and arr.shape[1] > frame.samples:
+            elif arr.shape[1] > frame.samples:
+                # Interleaved stereo - take every other sample
                 samples = arr.flatten()[::2].astype(np.int16)
             else:
                 samples = arr.flatten().astype(np.int16)
@@ -625,9 +634,11 @@ class GroupAudioMixer:
 
             self._push_count += 1
             if self._push_count % 100 == 1:
-                logger.info("GroupAudioMixer %s: push %d from %s, active_users=%d, buffer_sizes=%s",
+                # Log RMS of pushed audio to debug silent audio issues
+                rms = np.sqrt(np.mean(samples.astype(np.float32)**2))
+                logger.info("GroupAudioMixer %s: push %d from %s, active_users=%d, rms=%.1f, samples=%d, buffer_sizes=%s",
                            self.robot_id, self._push_count, user_key, len(self._user_buffers),
-                           {k: len(v) for k, v in self._user_buffers.items()})
+                           rms, len(samples), {k: len(v) for k, v in self._user_buffers.items()})
         except Exception as e:
             logger.warning("GroupAudioMixer push error for %s: %s", self.robot_id, e)
 
@@ -774,7 +785,11 @@ class MixedAudioTrack(AudioStreamTrack):
             robot_frame = await self.robot_track.recv()
             robot_arr = robot_frame.to_ndarray()
             # Convert to mono if stereo
-            if robot_arr.shape[0] > 1:
+            if len(robot_arr.shape) == 1:
+                # Already 1D mono audio
+                robot_samples = robot_arr.astype(np.float32)
+            elif robot_arr.shape[0] > 1:
+                # Planar stereo (2, N): take left channel
                 robot_samples = robot_arr[0].astype(np.float32)
             else:
                 robot_samples = robot_arr.flatten().astype(np.float32)
@@ -822,8 +837,14 @@ class MixedAudioTrack(AudioStreamTrack):
         if self._recv_count % 100 == 1:
             has_group = self.mixer.has_audio(exclude_user=self.user_key)
             active_users = list(self.mixer._user_buffers.keys())
-            logger.info("MixedAudioTrack recv %d for %s: robot_rms=%.1f, group_rms=%.1f, has_group=%s, active_users=%s",
-                       self._recv_count, self.user_key, robot_rms, group_rms, has_group, active_users)
+            # Log RMS per user in buffer to debug silent audio
+            user_rms = {}
+            for uk, frames in self.mixer._user_buffers.items():
+                if frames:
+                    u_rms = np.sqrt(np.mean(frames[-1].astype(np.float32)**2))
+                    user_rms[uk] = f"{u_rms:.1f}"
+            logger.info("MixedAudioTrack recv %d for %s: robot_rms=%.1f, group_rms=%.1f, has_group=%s, active_users=%s, user_rms=%s, exclude=%s",
+                       self._recv_count, self.user_key, robot_rms, group_rms, has_group, active_users, user_rms, self.user_key)
 
         return frame
 

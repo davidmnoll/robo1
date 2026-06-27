@@ -26,6 +26,7 @@ help:
 	@echo "Robot commands (Rosmaster A1 Pi):"
 	@echo "  make robot-push    - Push code to robot, build, and restart"
 	@echo "  make robot-pull    - Pull code/configs from robot"
+	@echo "  make robot-restart - Restart robot service"
 	@echo ""
 	@echo "Simulation commands:"
 	@echo "  make cloud-sim  - Headless container-based simulation"
@@ -356,7 +357,7 @@ dev-cloud-ros:
 # =============================================================================
 # Robot Commands (Rosmaster A1 Pi)
 # =============================================================================
-.PHONY: robot-push robot-pull
+.PHONY: robot-push robot-pull robot-restart
 
 robot-push:
 	$(MAKE) -C bots/rosmaster-a1_pi deploy
@@ -364,3 +365,6 @@ robot-push:
 robot-pull:
 	@echo "Pulling code/configs from robot..."
 	rsync -avz --filter=':- .gitignore' pi@raspberrypi.local:/home/pi/share/rosmaster/ bots/rosmaster-a1_pi/
+
+robot-restart:
+	$(MAKE) -C bots/rosmaster-a1_pi restart
