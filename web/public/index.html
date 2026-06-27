@@ -1891,7 +1891,7 @@
           activeRobotLabel.textContent = `${bot.name}${viewOnly ? ' (viewing)' : ''}`;
           hudRobotName.querySelector('strong').textContent = bot.name;
           setTeleopAvailability(true);
-          resetJoy();
+          resetJoy(false);  // Don't send commands on join - let robot keep its state
           setLobbyTab('teleop');
           teleopEmpty.hidden = true;
           teleopPane.hidden = false;
@@ -2705,7 +2705,7 @@
         }
 
         // Camera pan/tilt control (IJKL keys)
-        const CAMERA_STEP = 2;  // Degrees per update (slower for smoother control)
+        const CAMERA_STEP = 5;  // Degrees per update
         const CAMERA_MIN = 0;
         const CAMERA_MAX = 180;
 
@@ -2770,7 +2770,7 @@
           }
         }
 
-        function resetJoy() {
+        function resetJoy(sendCommands = true) {
           stopKeySending();
           stopCameraPtz();
           state.joyAxes = [0, 0, 0, 0, 0, 0];
@@ -2780,8 +2780,11 @@
           state.cameraPan = 90;
           state.cameraTilt = 90;
           updateJoyIndicators();
-          sendJoy();
-          sendCameraPtz();
+          // Only send commands if requested (don't send when joining - let robot keep its state)
+          if (sendCommands) {
+            sendJoy();
+            sendCameraPtz();
+          }
         }
 
         // Gamepad support
@@ -2956,8 +2959,8 @@
             // Adjust pan/tilt based on joystick position
             // x: left = pan left (+), right = pan right (-)
             // y: up = tilt up (+), down = tilt down (-)
-            const panDelta = -data.vector.x * force * 3;
-            const tiltDelta = data.vector.y * force * 3;
+            const panDelta = -data.vector.x * force * 1;
+            const tiltDelta = data.vector.y * force * 1;
             state.cameraPan = Math.max(CAMERA_MIN, Math.min(CAMERA_MAX, state.cameraPan + panDelta));
             state.cameraTilt = Math.max(CAMERA_MIN, Math.min(CAMERA_MAX, state.cameraTilt + tiltDelta));
           });

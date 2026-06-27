@@ -366,9 +366,33 @@ class RobotBridgeNode(Node):
         )
         self.get_logger().info(f"Started streaming {topic} + {audio_topic} + {map_topic}")
 
+    def _send_reset_commands(self, robot: str) -> None:
+        """Send reset commands to stop robot movement and center camera when streaming stops."""
+        # Send zero joy command to stop movement
+        joy_pub = self.joy_publishers.get(robot)
+        if joy_pub:
+            joy_msg = Joy()
+            joy_msg.header.stamp = self.get_clock().now().to_msg()
+            joy_msg.axes = [0.0] * 6  # All axes to zero
+            joy_msg.buttons = [0] * 12  # All buttons released
+            joy_pub.publish(joy_msg)
+            self.get_logger().info(f"Sent reset joy command for {robot}")
+
+        # Send center PTZ command
+        ptz_pub = self.ptz_publishers.get(robot)
+        if ptz_pub:
+            ptz_msg = Int32MultiArray()
+            ptz_msg.data = [90, 90]  # Center position
+            ptz_pub.publish(ptz_msg)
+            self.get_logger().info(f"Sent reset PTZ command for {robot}")
+
     def _stop_streaming(self, robot: str) -> None:
         if robot not in self.streaming_robots:
             return
+
+        # Send reset commands to stop the robot when all streams stop
+        self._send_reset_commands(robot)
+
         sub = self.camera_subscriptions.pop(robot, None)
         if sub:
             self.destroy_subscription(sub)
