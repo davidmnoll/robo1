@@ -852,6 +852,12 @@ async def add_user_audio_track_and_renegotiate(
                       target_user_key, pc.connectionState if pc else "none")
         return False
 
+    # Check signaling state - can only create offer in stable state
+    if pc.signalingState != "stable":
+        logger.warning("Cannot renegotiate with %s: signaling state=%s (not stable)",
+                      target_user_key, pc.signalingState)
+        return False
+
     if not control_channel or control_channel.readyState != "open":
         logger.warning("Cannot renegotiate with %s: control channel not open",
                       target_user_key)
@@ -904,7 +910,10 @@ async def add_user_audio_track_and_renegotiate(
             logger.info("Renegotiation complete for %s", target_user_key)
             return True
         except asyncio.TimeoutError:
-            logger.warning("Renegotiation answer timeout for %s", target_user_key)
+            logger.warning("Renegotiation answer timeout for %s, PC left in signaling state=%s",
+                          target_user_key, pc.signalingState)
+            # Note: PC is now stuck in "have-local-offer" state.
+            # Browser-initiated renegotiation will get 409 and retry later.
             return False
         finally:
             pending_renegotiations.pop(target_user_key, None)
@@ -939,6 +948,33 @@ async def notify_existing_users_of_new_user(robot_id: str, new_user_key: str) ->
         success_count = sum(1 for r in results if r is True)
         logger.info("Renegotiation results for new user %s: %d/%d successful",
                    new_user_key, success_count, len(results))
+
+
+async def add_existing_users_audio_to_new_user(robot_id: str, new_user_key: str) -> None:
+    """When a new user joins, add existing users' audio tracks to the new user via renegotiation."""
+    # Get all other users' broadcasters
+    other_broadcasters = get_other_user_broadcasters(robot_id, new_user_key)
+
+    if not other_broadcasters:
+        logger.info("No existing users to add audio for new user %s", new_user_key)
+        return
+
+    logger.info("Adding %d existing users' audio to new user %s",
+               len(other_broadcasters), new_user_key)
+
+    # Add each existing user's audio track to the new user (sequentially to avoid conflicts)
+    success_count = 0
+    for broadcaster in other_broadcasters:
+        try:
+            result = await add_user_audio_track_and_renegotiate(new_user_key, broadcaster)
+            if result:
+                success_count += 1
+        except Exception as e:
+            logger.error("Failed to add %s audio to new user %s: %s",
+                        broadcaster.user_key, new_user_key, e)
+
+    logger.info("Added %d/%d existing users' audio to new user %s",
+               success_count, len(other_broadcasters), new_user_key)
 
 
 class GroupAudioRelayTrack(AudioStreamTrack):
@@ -3230,15 +3266,35 @@ async def start_webrtc(
                 robot_id, current_user.email, existing_pc is not None,
                 existing_pc.connectionState if existing_pc else "none")
 
-    # Only renegotiate if PC is fully connected (not disconnected/connecting)
+    # Only renegotiate if PC is fully connected and in stable signaling state
     if existing_pc and existing_pc.connectionState == "connected":
+        # Check signaling state - can only accept offer in "stable" state
+        # If in "have-local-offer", we're doing server-initiated renegotiation
+        if existing_pc.signalingState != "stable":
+            logger.warning("SFU Hop2: cannot renegotiate for %s, signaling state=%s (waiting for server renegotiation to complete)",
+                          user_pc_key, existing_pc.signalingState)
+            raise HTTPException(status_code=409, detail="Renegotiation in progress, try again")
+
         # Renegotiation: reuse existing PC
         logger.info("SFU Hop2: renegotiating for %s (user=%s)", robot_id, current_user.email)
         pc = existing_pc
-        await pc.setRemoteDescription(RTCSessionDescription(sdp=offer.sdp, type=offer.type))
-        answer = await pc.createAnswer()
-        await pc.setLocalDescription(answer)
-        return {"sdp": pc.localDescription.sdp, "type": pc.localDescription.type}
+        try:
+            await pc.setRemoteDescription(RTCSessionDescription(sdp=offer.sdp, type=offer.type))
+            answer = await pc.createAnswer()
+            await pc.setLocalDescription(answer)
+            return {"sdp": pc.localDescription.sdp, "type": pc.localDescription.type}
+        except Exception as e:
+            logger.error("SFU Hop2: renegotiation failed for %s: %s", user_pc_key, e)
+            # If renegotiation fails, close the stale PC and let client reconnect
+            browser_user_pcs.pop(user_pc_key, None)
+            pcs = robot_browser_pcs.get(robot_id, [])
+            if existing_pc in pcs:
+                pcs.remove(existing_pc)
+            try:
+                await existing_pc.close()
+            except Exception:
+                pass
+            raise HTTPException(status_code=503, detail="Renegotiation failed, please reconnect")
 
     # Clean up existing PC if it exists but isn't connected
     if existing_pc:
@@ -3395,9 +3451,12 @@ async def start_webrtc(
                     robot_id, state, len(robot_browser_pcs.get(robot_id, [])),
                     active_robot_streams.get(robot_id))
         if state == "connected":
-            # New user fully connected - notify existing users so they can add this user's audio track
+            # New user fully connected - set up bidirectional group audio
             # Wait a moment for data channels to be ready
             await asyncio.sleep(0.5)
+            # 1. Add existing users' audio tracks to this new user
+            asyncio.create_task(add_existing_users_audio_to_new_user(robot_id, user_pc_key))
+            # 2. Add this new user's audio track to all existing users
             asyncio.create_task(notify_existing_users_of_new_user(robot_id, user_pc_key))
         elif state in ("failed", "closed", "disconnected"):
             pcs = robot_browser_pcs.get(robot_id, [])
@@ -3446,19 +3505,14 @@ async def start_webrtc(
     # Create this user's audio broadcaster (for when they send audio to group)
     get_or_create_user_broadcaster(user_pc_key, robot_id)
 
-    # Add separate audio tracks for each OTHER user currently in the session
-    # (New users joining later will need renegotiation to add their tracks)
-    other_broadcasters = get_other_user_broadcasters(robot_id, user_pc_key)
-    user_audio_queues = []  # Track for cleanup
-    for broadcaster in other_broadcasters:
-        queue = broadcaster.subscribe()
-        user_audio_queues.append((broadcaster, queue))
-        relay_track = UserAudioRelayTrack(queue, broadcaster.user_key, user_pc_key)
-        pc.addTrack(relay_track)
-        logger.info("SFU Hop2: added user audio track %s -> %s", broadcaster.user_key, user_pc_key)
-
-    logger.info("SFU Hop2: added %d user audio tracks for %s (user=%s)",
-               len(other_broadcasters), robot_id, current_user.email)
+    # NOTE: We don't add other users' audio tracks during initial connection
+    # because the browser's offer only has m-lines for its own media (video recv + audio send).
+    # Adding extra tracks would cause aiortc's transceiver matching to fail.
+    # Instead, after this user's connection is established:
+    # 1. This user will receive other users' audio via renegotiation (add_tracks_for_existing_users)
+    # 2. Other users will receive this user's audio via renegotiation (notify_existing_users_of_new_user)
+    logger.info("SFU Hop2: user audio tracks will be added via renegotiation for %s (user=%s)",
+               robot_id, current_user.email)
 
     # Create telemetry data channel to send to browser
     telemetry_channel = pc.createDataChannel("telemetry", ordered=False)

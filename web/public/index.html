@@ -372,8 +372,15 @@
         padding: 1rem;
         display: flex;
         flex-direction: column;
-        justify-content: flex-start;
+        justify-content: center; /* Center vertically */
         pointer-events: none;
+      }
+      .hud-left-column {
+        display: flex;
+        flex-direction: column;
+        gap: 0.5rem;
+        align-items: flex-start;
+        padding-left: 2.5rem; /* Space for back button */
       }
       .hud-row {
         display: flex;
@@ -400,6 +407,10 @@
         .hud-overlay {
           padding: 0.5rem;
         }
+        .hud-left-column {
+          gap: 0.4rem;
+          padding-left: 2rem;
+        }
         .hud-row {
           gap: 0.4rem;
           padding-right: 100px;
@@ -414,6 +425,9 @@
         }
       }
       @media (max-width: 400px) {
+        .hud-left-column {
+          padding-left: 1.5rem;
+        }
         .hud-panel {
           padding: 0.25rem 0.4rem;
           min-width: 55px;
@@ -434,24 +448,36 @@
         margin: 0;
         border: none;
       }
-      .video-controls-top {
+      .video-controls-top-left {
         position: absolute;
         top: 0.75rem;
-        right: 0.75rem;
+        left: 0.75rem;
         z-index: 5;
         display: flex;
         gap: 0.5rem;
         pointer-events: auto;
       }
-      .video-controls-top button {
-        pointer-events: auto;
-      }
-      .video-fullscreen-btn {
+      .video-controls-top-right {
         position: absolute;
-        bottom: 50px;
+        top: 0.75rem;
         right: 0.75rem;
         z-index: 5;
+        display: flex;
+        flex-direction: column;
+        align-items: flex-end;
+        gap: 0.5rem;
         pointer-events: auto;
+      }
+      .top-right-buttons {
+        display: flex;
+        gap: 0.5rem;
+      }
+      .video-controls-top-left button,
+      .video-controls-top-right button {
+        pointer-events: auto;
+      }
+      .video-controls-top-right .hud-minimap {
+        margin-top: 0.25rem;
       }
       pre {
         background: rgba(2,6,23,0.9);
@@ -590,16 +616,12 @@
 
       /* SLAM Minimap HUD */
       .hud-minimap {
-        position: absolute;
-        bottom: 60px;
-        right: 10px;
         width: 150px;
         height: 150px;
         background: rgba(0,0,0,0.7);
         border: 1px solid rgba(148,163,184,0.5);
         border-radius: 8px;
         pointer-events: none;
-        z-index: 10;
       }
       #minimap-canvas {
         width: 100%;
@@ -610,8 +632,6 @@
         .hud-minimap {
           width: 100px;
           height: 100px;
-          bottom: 50px;
-          right: 5px;
         }
       }
 
@@ -749,7 +769,8 @@
         body.mobile-teleop #video-meta {
           display: none;
         }
-        body.mobile-teleop .video-controls-top {
+        body.mobile-teleop .video-controls-top-left,
+        body.mobile-teleop .video-controls-top-right {
           display: none;
         }
         /* Show touch joysticks on mobile */
@@ -1034,12 +1055,19 @@
               <!-- full-width video with HUD overlay -->
               <div class="video-wrapper" id="video-wrapper">
                 <video id="robot-video" autoplay playsinline controls controlsList="nofullscreen"></video>
-                <div class="video-controls-top">
-                  <button id="mic-toggle-btn" class="ghost mic-btn muted" type="button" title="Voice to other streamers">🎤</button>
-                  <button id="robot-mic-btn" class="ghost mic-btn speaker-vote vote-none" type="button" title="Voice to robot speaker">🔊</button>
+                <div class="video-controls-top-left">
                   <button id="video-back-btn" class="ghost" type="button" aria-label="Exit stream">←</button>
                 </div>
-                <button id="video-fullscreen-btn" class="ghost video-fullscreen-btn" type="button" aria-label="Toggle fullscreen">⤢</button>
+                <div class="video-controls-top-right">
+                  <div class="top-right-buttons">
+                    <button id="mic-toggle-btn" class="ghost mic-btn muted" type="button" title="Voice to other streamers">🎤</button>
+                    <button id="robot-mic-btn" class="ghost mic-btn speaker-vote vote-none" type="button" title="Voice to robot speaker">🔊</button>
+                    <button id="video-fullscreen-btn" class="ghost" type="button" aria-label="Toggle fullscreen">⤢</button>
+                  </div>
+                  <div class="hud-minimap" id="hud-minimap">
+                    <canvas id="minimap-canvas" width="150" height="150"></canvas>
+                  </div>
+                </div>
                 <button class="mobile-exit-btn" id="mobile-exit-btn" type="button">✕ Exit</button>
                 <div class="touch-joystick-zone left" id="joystick-zone-left">
                   <div class="joystick-indicator"></div>
@@ -1056,24 +1084,19 @@
                   <span class="joystick-label">Look</span>
                 </div>
                 <div class="hud-overlay">
-                  <div class="hud-row" style="justify-content:space-between;">
-                    <div style="display:flex;gap:0.5rem;align-items:center;">
-                      <div class="hud-panel hud-robot-name" id="hud-robot-name">
-                        <strong>Robot</strong>
-                      </div>
-                      <div class="hud-panel">
-                        <strong id="linear-speed-value">0.00</strong>
-                      </div>
-                      <div class="hud-panel">
-                        <strong id="angular-speed-value">0.00</strong>
-                      </div>
-                      <div class="hud-panel">
-                        <strong id="front-distance-value">--</strong>
-                      </div>
+                  <div class="hud-left-column">
+                    <div class="hud-panel hud-robot-name" id="hud-robot-name">
+                      <strong>Robot</strong>
                     </div>
-                  </div>
-                  <div class="hud-minimap" id="hud-minimap">
-                    <canvas id="minimap-canvas" width="150" height="150"></canvas>
+                    <div class="hud-panel">
+                      <strong id="linear-speed-value">0.00</strong>
+                    </div>
+                    <div class="hud-panel">
+                      <strong id="angular-speed-value">0.00</strong>
+                    </div>
+                    <div class="hud-panel">
+                      <strong id="front-distance-value">--</strong>
+                    </div>
                   </div>
                 </div>
               </div>
@@ -2252,23 +2275,38 @@
             });
 
             // Send renegotiation offer to API (same endpoint as initial offer)
+            // Retry logic for 409 Conflict (server doing its own renegotiation)
             const namespace = state.activeRobot?.ros_namespace;
             console.log('[mic] sending renegotiation to', `${apiBase()}/robots/${encodeURIComponent(namespace)}/webrtc`);
-            const resp = await authFetch(`${apiBase()}/robots/${encodeURIComponent(namespace)}/webrtc`, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                sdp: state.pc.localDescription.sdp,
-                type: state.pc.localDescription.type,
-                client_id: state.clientId,
-              }),
-            });
 
-            if (!resp.ok) {
-              throw new Error(`Renegotiation failed: ${resp.status}`);
+            let answer = null;
+            for (let attempt = 1; attempt <= 5; attempt++) {
+              const resp = await authFetch(`${apiBase()}/robots/${encodeURIComponent(namespace)}/webrtc`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  sdp: state.pc.localDescription.sdp,
+                  type: state.pc.localDescription.type,
+                  client_id: state.clientId,
+                }),
+              });
+
+              if (resp.ok) {
+                answer = await resp.json();
+                break;
+              } else if (resp.status === 409 && attempt < 5) {
+                // Server is doing its own renegotiation, wait and retry
+                console.warn(`[mic] renegotiation conflict (attempt ${attempt}/5), retrying in 500ms...`);
+                await new Promise(r => setTimeout(r, 500));
+                continue;
+              } else {
+                throw new Error(`Renegotiation failed: ${resp.status}`);
+              }
             }
 
-            const answer = await resp.json();
+            if (!answer) {
+              throw new Error('Renegotiation failed after 5 attempts');
+            }
             console.info('[mic] got answer, setting remote description');
             await state.pc.setRemoteDescription(new RTCSessionDescription(answer));
             console.info('[mic] renegotiation complete, senders:', state.pc.getSenders().map(s => s.track?.kind));
