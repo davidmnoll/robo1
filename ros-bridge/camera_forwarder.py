@@ -754,10 +754,21 @@ class RobotBridgeNode(Node):
                     self.camera_positions[robot_id] = {"pan": 90, "tilt": 90}
                 pos = self.camera_positions[robot_id]
 
+                # Debug: log what keys we received
+                if not hasattr(self, "_ptz_debug_count"):
+                    self._ptz_debug_count = {}
+                self._ptz_debug_count[robot_id] = self._ptz_debug_count.get(robot_id, 0) + 1
+                if self._ptz_debug_count[robot_id] % 50 == 1:
+                    self.get_logger().info(f"PTZ data keys for {robot_id}: {list(data.keys())}")
+
                 # Apply deltas if provided (new delta-based control)
                 if "pan_delta" in data or "tilt_delta" in data:
                     pan_delta = int(data.get("pan_delta", 0))
                     tilt_delta = int(data.get("tilt_delta", 0))
+                    if pan_delta != 0 or tilt_delta != 0:
+                        self.get_logger().info(
+                            f"PTZ deltas for {robot_id}: pan_delta={pan_delta}, tilt_delta={tilt_delta}"
+                        )
                     pos["pan"] = max(0, min(180, pos["pan"] + pan_delta))
                     pos["tilt"] = max(0, min(180, pos["tilt"] + tilt_delta))
                 else:

@@ -669,98 +669,36 @@
         display: none;
       }
 
-      /* Ghost joystick for other users' inputs */
+      /* Ghost joystick - positioned inside touch zones, centered via absolute positioning */
       .ghost-joystick {
         position: absolute;
-        width: 80px;
-        height: 80px;
-        border: 2px solid rgba(255, 165, 0, 0.4);
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        width: 100px;
+        height: 100px;
+        border: 2px solid rgba(34, 197, 94, 0.25);
         border-radius: 50%;
         pointer-events: none;
         z-index: 15;
         opacity: 0;
-        transition: opacity 0.3s ease;
+        transition: opacity 0.2s ease;
       }
       .ghost-joystick.visible {
-        opacity: 1;
+        opacity: 0.7;
       }
       .ghost-joystick .ghost-knob {
         position: absolute;
-        width: 30px;
-        height: 30px;
-        background: rgba(255, 165, 0, 0.5);
+        width: 40px;
+        height: 40px;
+        background: rgba(34, 197, 94, 0.35);
         border-radius: 50%;
         top: 50%;
         left: 50%;
         transform: translate(-50%, -50%);
-        transition: transform 0.05s ease-out;
-      }
-      .ghost-joystick.left {
-        bottom: 80px;
-        left: calc(20% - 40px);
-      }
-      .ghost-joystick.right {
-        bottom: 80px;
-        right: calc(20% - 40px);
+        transition: transform 0.15s ease-out;
       }
 
-      /* Key indicators for WASD/IJKL feedback */
-      .key-indicators {
-        position: absolute;
-        bottom: 20px;
-        left: 50%;
-        transform: translateX(-50%);
-        display: flex;
-        gap: 40px;
-        pointer-events: none;
-        z-index: 25;
-      }
-      .key-group {
-        display: flex;
-        flex-direction: column;
-        align-items: center;
-        gap: 4px;
-      }
-      .key-row {
-        display: flex;
-        gap: 4px;
-      }
-      .key-indicator {
-        width: 32px;
-        height: 32px;
-        border: 2px solid rgba(255, 255, 255, 0.2);
-        border-radius: 6px;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        font-size: 14px;
-        font-weight: bold;
-        color: rgba(255, 255, 255, 0.3);
-        background: rgba(0, 0, 0, 0.3);
-        opacity: 0;
-        transition: opacity 0.15s ease, background 0.1s ease, border-color 0.1s ease;
-      }
-      .key-indicator.active {
-        opacity: 1;
-        background: rgba(59, 130, 246, 0.6);
-        border-color: rgba(59, 130, 246, 0.8);
-        color: white;
-      }
-      .key-indicator.fading {
-        opacity: 0.5;
-        transition: opacity 0.5s ease;
-      }
-      .key-group-label {
-        font-size: 10px;
-        color: rgba(255, 255, 255, 0.3);
-        text-transform: uppercase;
-        letter-spacing: 0.05em;
-        opacity: 0;
-        transition: opacity 0.3s ease;
-      }
-      .key-group.has-active .key-group-label {
-        opacity: 1;
-      }
 
       /* Mobile fullscreen teleop mode */
       @media (max-width: 768px) and (orientation: landscape) {
@@ -824,9 +762,13 @@
         }
       }
 
-      /* Hide touch indicators on very small screens or non-touch */
+      /* On desktop: hide touch indicators but keep zone for ghost joysticks */
       @media (hover: hover) and (pointer: fine) {
         .touch-joystick-zone {
+          pointer-events: none;
+        }
+        .touch-joystick-zone .joystick-indicator,
+        .touch-joystick-zone .joystick-label {
           display: none;
         }
       }
@@ -1101,43 +1043,17 @@
                 <button class="mobile-exit-btn" id="mobile-exit-btn" type="button">✕ Exit</button>
                 <div class="touch-joystick-zone left" id="joystick-zone-left">
                   <div class="joystick-indicator"></div>
+                  <div class="ghost-joystick" id="ghost-move-joystick">
+                    <div class="ghost-knob" id="ghost-move-knob"></div>
+                  </div>
                   <span class="joystick-label">Move</span>
                 </div>
                 <div class="touch-joystick-zone right" id="joystick-zone-right">
                   <div class="joystick-indicator"></div>
+                  <div class="ghost-joystick" id="ghost-camera-joystick">
+                    <div class="ghost-knob" id="ghost-camera-knob"></div>
+                  </div>
                   <span class="joystick-label">Look</span>
-                </div>
-                <!-- Ghost joysticks for other users' inputs -->
-                <div class="ghost-joystick left" id="ghost-move-joystick">
-                  <div class="ghost-knob" id="ghost-move-knob"></div>
-                </div>
-                <div class="ghost-joystick right" id="ghost-camera-joystick">
-                  <div class="ghost-knob" id="ghost-camera-knob"></div>
-                </div>
-                <!-- Key indicators for WASD/IJKL -->
-                <div class="key-indicators" id="key-indicators">
-                  <div class="key-group" id="wasd-group">
-                    <div class="key-row">
-                      <div class="key-indicator" id="key-w">W</div>
-                    </div>
-                    <div class="key-row">
-                      <div class="key-indicator" id="key-a">A</div>
-                      <div class="key-indicator" id="key-s">S</div>
-                      <div class="key-indicator" id="key-d">D</div>
-                    </div>
-                    <span class="key-group-label">Move</span>
-                  </div>
-                  <div class="key-group" id="ijkl-group">
-                    <div class="key-row">
-                      <div class="key-indicator" id="key-i">I</div>
-                    </div>
-                    <div class="key-row">
-                      <div class="key-indicator" id="key-j">J</div>
-                      <div class="key-indicator" id="key-k">K</div>
-                      <div class="key-indicator" id="key-l">L</div>
-                    </div>
-                    <span class="key-group-label">Camera</span>
-                  </div>
                 </div>
                 <div class="hud-overlay">
                   <div class="hud-row" style="justify-content:space-between;">
@@ -1357,9 +1273,7 @@
             return cachedIceServers;
           }
           try {
-            const resp = await fetch(`${apiBase()}/ice-servers`, {
-              headers: authHeaders(),
-            });
+            const resp = await authFetch(`${apiBase()}/ice-servers`);
             if (resp.ok) {
               const data = await resp.json();
               if (data.iceServers && data.iceServers.length) {
@@ -1522,6 +1436,17 @@
           return state.authToken ? { 'Authorization': 'Bearer ' + state.authToken } : {};
         }
 
+        // Wrapper for fetch that automatically handles 401 (expired token)
+        async function authFetch(url, options = {}) {
+          // Merge auth headers
+          options.headers = { ...authHeaders(), ...options.headers };
+          const resp = await fetch(url, options);
+          if (resp.status === 401) {
+            showReauthOverlay();
+          }
+          return resp;
+        }
+
         function showReauthOverlay() {
           reauthEmailInput.value = state.userEmail || '';
           reauthPasswordInput.value = '';
@@ -1645,14 +1570,10 @@
           cancelLobbyFetch();
           lobbyFetchController = new AbortController();
           try {
-            const resp = await fetch(`${apiBase()}/lobbies`, {
-              headers: authHeaders(),
+            const resp = await authFetch(`${apiBase()}/lobbies`, {
               signal: lobbyFetchController.signal,
             });
-            if (resp.status === 401) {
-              showReauthOverlay();
-              return;
-            }
+            if (resp.status === 401) return;
             if (!resp.ok) throw new Error('Failed to load lobbies');
             const data = await resp.json();
             const items = Array.isArray(data.items) ? data.items : [];
@@ -1763,7 +1684,8 @@
         async function openLobbyDetail(lobbyId) {
           if (!state.authToken) return;
           try {
-            const resp = await fetch(`${apiBase()}/lobbies/${lobbyId}`, { headers: authHeaders() });
+            const resp = await authFetch(`${apiBase()}/lobbies/${lobbyId}`);
+            if (resp.status === 401) return;
             if (!resp.ok) throw new Error(await resp.text());
             const data = await resp.json();
             state.currentLobby = data;
@@ -1869,10 +1791,8 @@
 
         async function loadChatHistory(lobbyId) {
           try {
-            const resp = await fetch(`${apiBase()}/lobbies/${lobbyId}/messages?limit=50`, {
-              headers: authHeaders(),
-            });
-            if (!resp.ok) return;
+            const resp = await authFetch(`${apiBase()}/lobbies/${lobbyId}/messages?limit=50`);
+            if (resp.status === 401 || !resp.ok) return;
             const data = await resp.json();
             const messages = data.items || [];
             state.chatMessages = messages;
@@ -1961,12 +1881,9 @@
           if (!lobbyId || !content.trim()) return;
           chatSendBtn.disabled = true;
           try {
-            const resp = await fetch(`${apiBase()}/lobbies/${lobbyId}/messages`, {
+            const resp = await authFetch(`${apiBase()}/lobbies/${lobbyId}/messages`, {
               method: 'POST',
-              headers: {
-                ...authHeaders(),
-                'Content-Type': 'application/json',
-              },
+              headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ content: content.trim() }),
             });
             if (!resp.ok) throw new Error('Failed to send message');
@@ -2325,12 +2242,9 @@
             // Send renegotiation offer to API (same endpoint as initial offer)
             const namespace = state.activeRobot?.ros_namespace;
             console.log('[mic] sending renegotiation to', `${apiBase()}/robots/${encodeURIComponent(namespace)}/webrtc`);
-            const resp = await fetch(`${apiBase()}/robots/${encodeURIComponent(namespace)}/webrtc`, {
+            const resp = await authFetch(`${apiBase()}/robots/${encodeURIComponent(namespace)}/webrtc`, {
               method: 'POST',
-              headers: {
-                'Content-Type': 'application/json',
-                ...authHeaders(),
-              },
+              headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({
                 sdp: state.pc.localDescription.sdp,
                 type: state.pc.localDescription.type,
@@ -2757,9 +2671,9 @@
             })
             .then((offer) => {
               console.info('[video] sending offer to gateway');
-              return fetch(`${apiBase()}/robots/${encodeURIComponent(namespace)}/webrtc`, {
+              return authFetch(`${apiBase()}/robots/${encodeURIComponent(namespace)}/webrtc`, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json', ...authHeaders() },
+                headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ sdp: offer.sdp, type: offer.type }),
               });
             })
@@ -2931,9 +2845,6 @@
             state.keysPressed[key] = isKeyDown;
             const isPressed = Object.values(state.keysPressed).some(v => v);
 
-            // Update key indicator visuals
-            updateKeyIndicator(key, isKeyDown);
-
             // Debug: log key state changes
             console.log(`[key] ${isKeyDown ? 'down' : 'up'} '${key}' wasPressed=${wasPressed} isPressed=${isPressed} interval=${!!state.keySendInterval}`);
 
@@ -2957,9 +2868,6 @@
           if (cameraKeys.includes(key)) {
             event.preventDefault();
             state.keysPressed[key] = isKeyDown;
-
-            // Update key indicator visuals
-            updateKeyIndicator(key, isKeyDown);
 
             // Start/stop camera movement based on whether any camera key is held
             const anyCameraKeyHeld = cameraKeys.some(k => state.keysPressed[k]);
@@ -3063,6 +2971,7 @@
             tilt_delta: Math.round(cameraTiltDelta),
             timestamp: Date.now(),
           };
+          console.log('[camera] sending ptz:', payload.pan_delta, payload.tilt_delta);
           // Reset deltas after sending
           cameraPanDelta = 0;
           cameraTiltDelta = 0;
@@ -3307,50 +3216,6 @@
         window.addEventListener('keydown', (event) => handleKey(event, true));
         window.addEventListener('keyup', (event) => handleKey(event, false));
 
-        // ── Key Indicator Visual Feedback ──────────────────────────────
-        const keyFadeTimeouts = {};
-        function updateKeyIndicator(key, isActive) {
-          // Map arrow keys to WASD for display
-          const keyMap = {
-            'arrowup': 'w', 'arrowdown': 's', 'arrowleft': 'a', 'arrowright': 'd'
-          };
-          const displayKey = keyMap[key] || key;
-          const el = document.getElementById(`key-${displayKey}`);
-          if (!el) return;
-
-          // Clear any pending fade timeout
-          if (keyFadeTimeouts[displayKey]) {
-            clearTimeout(keyFadeTimeouts[displayKey]);
-            delete keyFadeTimeouts[displayKey];
-          }
-
-          el.classList.remove('fading');
-          if (isActive) {
-            el.classList.add('active');
-          } else {
-            el.classList.remove('active');
-            el.classList.add('fading');
-            // Remove fading class after animation
-            keyFadeTimeouts[displayKey] = setTimeout(() => {
-              el.classList.remove('fading');
-            }, 500);
-          }
-
-          // Update group active state for label visibility
-          const wasdKeys = ['w', 'a', 's', 'd'];
-          const ijklKeys = ['i', 'j', 'k', 'l'];
-          const wasdGroup = document.getElementById('wasd-group');
-          const ijklGroup = document.getElementById('ijkl-group');
-          if (wasdGroup) {
-            const anyWasdActive = wasdKeys.some(k => document.getElementById(`key-${k}`)?.classList.contains('active'));
-            wasdGroup.classList.toggle('has-active', anyWasdActive);
-          }
-          if (ijklGroup) {
-            const anyIjklActive = ijklKeys.some(k => document.getElementById(`key-${k}`)?.classList.contains('active'));
-            ijklGroup.classList.toggle('has-active', anyIjklActive);
-          }
-        }
-
         // ── Ghost Joystick for Other Users' Inputs ──────────────────────
         const ghostMoveJoystick = document.getElementById('ghost-move-joystick');
         const ghostMoveKnob = document.getElementById('ghost-move-knob');
@@ -3359,44 +3224,54 @@
         let ghostFadeTimeout = null;
 
         function updateGhostJoysticks(aggregatedAxes, userCount) {
+          // This handles OTHER users' inputs - skip if local control is active
+          const hasLocalMoveInput = !!state.keySendInterval;
+          const hasLocalCameraInput = !!state.cameraPtzInterval;
+
           // Only show ghost if there are other users controlling
           if (userCount <= 1 || !aggregatedAxes) {
-            ghostMoveJoystick?.classList.remove('visible');
-            ghostCameraJoystick?.classList.remove('visible');
+            // Don't hide if local input is active (local handler controls visibility)
+            if (!hasLocalMoveInput) ghostMoveJoystick?.classList.remove('visible');
+            if (!hasLocalCameraInput) ghostCameraJoystick?.classList.remove('visible');
             return;
           }
 
           // Move joystick: axes[1] = forward/back, axes[3] = turn
-          const moveX = aggregatedAxes[3] || 0;  // turn
-          const moveY = -(aggregatedAxes[1] || 0);  // forward (inverted for display)
-          const moveMagnitude = Math.sqrt(moveX * moveX + moveY * moveY);
+          // Skip if local move control is active (local handler takes priority)
+          if (!hasLocalMoveInput) {
+            const moveX = aggregatedAxes[3] || 0;  // turn
+            const moveY = -(aggregatedAxes[1] || 0);  // forward (inverted for display)
+            const moveMagnitude = Math.sqrt(moveX * moveX + moveY * moveY);
 
-          if (moveMagnitude > 0.1 && ghostMoveKnob) {
-            ghostMoveJoystick.classList.add('visible');
-            const maxOffset = 20;  // pixels from center
-            ghostMoveKnob.style.transform = `translate(calc(-50% + ${moveX * maxOffset}px), calc(-50% + ${moveY * maxOffset}px))`;
-          } else {
-            ghostMoveJoystick?.classList.remove('visible');
+            if (moveMagnitude > 0.1 && ghostMoveKnob) {
+              ghostMoveJoystick.classList.add('visible');
+              const maxOffset = 30;  // pixels from center
+              ghostMoveKnob.style.transform = `translate(calc(-50% + ${moveX * maxOffset}px), calc(-50% + ${moveY * maxOffset}px))`;
+            } else {
+              ghostMoveJoystick?.classList.remove('visible');
+            }
           }
 
-          // Camera joystick: axes[4] = camera tilt, we don't have camera turn in aggregated
-          // For now, just show if any camera movement is happening
-          const cameraY = -(aggregatedAxes[4] || 0);
-          const cameraMagnitude = Math.abs(cameraY);
+          // Camera joystick: axes[4] = camera tilt
+          // Skip if local camera control is active (local handler takes priority)
+          if (!hasLocalCameraInput) {
+            const cameraY = -(aggregatedAxes[4] || 0);
+            const cameraMagnitude = Math.abs(cameraY);
 
-          if (cameraMagnitude > 0.1 && ghostCameraKnob) {
-            ghostCameraJoystick.classList.add('visible');
-            const maxOffset = 20;
-            ghostCameraKnob.style.transform = `translate(-50%, calc(-50% + ${cameraY * maxOffset}px))`;
-          } else {
-            ghostCameraJoystick?.classList.remove('visible');
+            if (cameraMagnitude > 0.1 && ghostCameraKnob) {
+              ghostCameraJoystick.classList.add('visible');
+              const maxOffset = 30;
+              ghostCameraKnob.style.transform = `translate(-50%, calc(-50% + ${cameraY * maxOffset}px))`;
+            } else {
+              ghostCameraJoystick?.classList.remove('visible');
+            }
           }
 
-          // Auto-hide after inactivity
+          // Auto-hide after inactivity (only for remote inputs, not local)
           if (ghostFadeTimeout) clearTimeout(ghostFadeTimeout);
           ghostFadeTimeout = setTimeout(() => {
-            ghostMoveJoystick?.classList.remove('visible');
-            ghostCameraJoystick?.classList.remove('visible');
+            if (!state.keySendInterval) ghostMoveJoystick?.classList.remove('visible');
+            if (!state.cameraPtzInterval) ghostCameraJoystick?.classList.remove('visible');
           }, 500);
         }
 
@@ -3404,8 +3279,11 @@
         let ghostCameraFadeTimeout = null;
 
         function updateGhostCameraJoystick(panDelta, tiltDelta, user) {
-          // Show ghost camera joystick for camera control inputs
-          // Skip if this is our own input (user matches our key)
+          // Show ghost camera joystick for OTHER users' camera control inputs
+          // Skip if local camera control is active (local handler takes priority)
+          if (state.cameraPtzInterval) return;
+
+          // Also skip if this is our own echoed input
           const ourKey = `${state.activeRobot?.ros_namespace}:${state.user?.email}`;
           if (user === ourKey) return;
 
@@ -3418,8 +3296,9 @@
 
           if (magnitude > 0.1 && ghostCameraKnob) {
             ghostCameraJoystick.classList.add('visible');
-            const maxOffset = 20;  // pixels from center
-            ghostCameraKnob.style.transform = `translate(calc(-50% + ${panNorm * maxOffset}px), calc(-50% + ${tiltNorm * maxOffset}px))`;
+            const maxOffset = 30;  // pixels from center
+            // Negate panNorm: positive panDelta = left = knob should move left (negative X)
+            ghostCameraKnob.style.transform = `translate(calc(-50% + ${-panNorm * maxOffset}px), calc(-50% + ${tiltNorm * maxOffset}px))`;
           }
 
           // Auto-hide after inactivity
@@ -3442,8 +3321,18 @@
             if (ghostCameraFadeTimeout) clearTimeout(ghostCameraFadeTimeout);
             ghostCameraFadeTimeout = setTimeout(() => {
               ghostCameraJoystick?.classList.remove('visible');
+              // Reset knob to center when hiding
+              if (ghostCameraKnob) {
+                ghostCameraKnob.style.transform = 'translate(-50%, -50%)';
+              }
             }, 150);
             return;
+          }
+
+          // Keys are pressed - clear any pending timeout and show at edge
+          if (ghostCameraFadeTimeout) {
+            clearTimeout(ghostCameraFadeTimeout);
+            ghostCameraFadeTimeout = null;
           }
 
           // Calculate direction from keys
@@ -3456,8 +3345,9 @@
 
           if (ghostCameraKnob && (panDir !== 0 || tiltDir !== 0)) {
             ghostCameraJoystick.classList.add('visible');
-            const maxOffset = 20;
-            ghostCameraKnob.style.transform = `translate(calc(-50% + ${panDir * maxOffset}px), calc(-50% + ${-tiltDir * maxOffset}px))`;
+            const maxOffset = 30;
+            // Negate panDir: J = left = knob should move left (negative X)
+            ghostCameraKnob.style.transform = `translate(calc(-50% + ${-panDir * maxOffset}px), calc(-50% + ${-tiltDir * maxOffset}px))`;
           }
         }
 
@@ -3477,8 +3367,18 @@
             if (ghostMoveFadeTimeout) clearTimeout(ghostMoveFadeTimeout);
             ghostMoveFadeTimeout = setTimeout(() => {
               ghostMoveJoystick?.classList.remove('visible');
+              // Reset knob to center when hiding
+              if (ghostMoveKnob) {
+                ghostMoveKnob.style.transform = 'translate(-50%, -50%)';
+              }
             }, 150);
             return;
+          }
+
+          // Keys are pressed - clear any pending timeout and show at edge
+          if (ghostMoveFadeTimeout) {
+            clearTimeout(ghostMoveFadeTimeout);
+            ghostMoveFadeTimeout = null;
           }
 
           // Calculate direction from keys
@@ -3493,7 +3393,7 @@
 
           if (ghostMoveKnob && (moveX !== 0 || moveY !== 0)) {
             ghostMoveJoystick.classList.add('visible');
-            const maxOffset = 20;
+            const maxOffset = 30;
             ghostMoveKnob.style.transform = `translate(calc(-50% + ${moveX * maxOffset}px), calc(-50% + ${moveY * maxOffset}px))`;
           }
         }
@@ -3566,7 +3466,8 @@
         }
 
         async function fetchLobbyDetail(lobbyId) {
-          const resp = await fetch(`${apiBase()}/lobbies/${lobbyId}`, { headers: authHeaders() });
+          const resp = await authFetch(`${apiBase()}/lobbies/${lobbyId}`);
+          if (resp.status === 401) return null;
           if (!resp.ok) throw new Error(await resp.text());
           return resp.json();
         }
@@ -3667,9 +3568,9 @@
             is_public: lobbyVisibilityInput.value === 'public',
           };
           try {
-            const resp = await fetch(`${apiBase()}/lobbies/${state.manageLobby.id}`, {
+            const resp = await authFetch(`${apiBase()}/lobbies/${state.manageLobby.id}`, {
               method: 'PATCH',
-              headers: { 'Content-Type': 'application/json', ...authHeaders() },
+              headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify(body),
             });
             if (!resp.ok) throw new Error(await resp.text());
@@ -3719,9 +3620,9 @@
             is_public: lobbyVisibilityInput.value === 'public',
           };
           try {
-            const resp = await fetch(`${apiBase()}/lobbies`, {
+            const resp = await authFetch(`${apiBase()}/lobbies`, {
               method: 'POST',
-              headers: { 'Content-Type': 'application/json', ...authHeaders() },
+              headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify(body),
             });
             if (!resp.ok) throw new Error(await resp.text());
@@ -3743,9 +3644,8 @@
           if (!state.manageLobby) return;
           if (!confirm('Delete this lobby?')) return;
           try {
-            const resp = await fetch(`${apiBase()}/lobbies/${state.manageLobby.id}`, {
+            const resp = await authFetch(`${apiBase()}/lobbies/${state.manageLobby.id}`, {
               method: 'DELETE',
-              headers: authHeaders(),
             });
             if (!resp.ok) throw new Error(await resp.text());
             lobbyMessage.textContent = 'Lobby deleted.';
@@ -3783,18 +3683,18 @@
           };
           try {
             if (botForm.dataset.editingId) {
-              const resp = await fetch(`${apiBase()}/bots/${botForm.dataset.editingId}`, {
+              const resp = await authFetch(`${apiBase()}/bots/${botForm.dataset.editingId}`, {
                 method: 'PATCH',
-                headers: { 'Content-Type': 'application/json', ...authHeaders() },
+                headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(payload),
               });
               if (!resp.ok) throw new Error(await resp.text());
               botMessage.textContent = 'Robot updated.';
             } else {
               payload.lobby_id = state.manageLobby.id;
-              const resp = await fetch(`${apiBase()}/bots`, {
+              const resp = await authFetch(`${apiBase()}/bots`, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json', ...authHeaders() },
+                headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(payload),
               });
               if (!resp.ok) throw new Error(await resp.text());
@@ -3831,11 +3731,12 @@
           if (!botForm.dataset.editingId) return;  // Only auto-save for existing robots
           const vol = parseInt(botVolumeInput.value, 10) / 100;
           try {
-            const resp = await fetch(`${apiBase()}/bots/${botForm.dataset.editingId}`, {
+            const resp = await authFetch(`${apiBase()}/bots/${botForm.dataset.editingId}`, {
               method: 'PATCH',
-              headers: { 'Content-Type': 'application/json', ...authHeaders() },
+              headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ volume: vol }),
             });
+            if (resp.status === 401) return;
             if (!resp.ok) throw new Error(await resp.text());
             botMessage.textContent = 'Volume saved';
             setTimeout(() => { if (botMessage.textContent === 'Volume saved') botMessage.textContent = ''; }, 1500);
@@ -3874,11 +3775,12 @@
           // Auto-save if editing existing robot
           if (botForm.dataset.editingId) {
             try {
-              const resp = await fetch(`${apiBase()}/bots/${botForm.dataset.editingId}`, {
+              const resp = await authFetch(`${apiBase()}/bots/${botForm.dataset.editingId}`, {
                 method: 'PATCH',
-                headers: { 'Content-Type': 'application/json', ...authHeaders() },
+                headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ volume: newVol / 100 }),
               });
+              if (resp.status === 401) return;
               if (!resp.ok) throw new Error(await resp.text());
               botMessage.textContent = newVol === 0 ? 'Muted' : 'Unmuted';
               setTimeout(() => { if (botMessage.textContent === 'Muted' || botMessage.textContent === 'Unmuted') botMessage.textContent = ''; }, 1500);
@@ -3892,10 +3794,10 @@
         async function deleteBot(botId) {
           if (!confirm('Archive this robot?')) return;
           try {
-            const resp = await fetch(`${apiBase()}/bots/${botId}`, {
+            const resp = await authFetch(`${apiBase()}/bots/${botId}`, {
               method: 'DELETE',
-              headers: authHeaders(),
             });
+            if (resp.status === 401) return;
             if (!resp.ok) throw new Error(await resp.text());
             const detail = await fetchLobbyDetail(state.manageLobby.id);
             state.manageLobby = detail;
