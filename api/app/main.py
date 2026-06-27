@@ -255,6 +255,14 @@ speaker_votes: Dict[str, set] = defaultdict(set)
 # Key: robot_id, Value: set of user_pc_keys
 connected_streamers: Dict[str, set] = defaultdict(set)
 
+# Control channels per user (for server-initiated renegotiation)
+# Key: user_pc_key, Value: RTCDataChannel
+user_control_channels: Dict[str, RTCDataChannel] = {}
+
+# Pending renegotiations (waiting for answer from browser)
+# Key: user_pc_key, Value: asyncio.Future
+pending_renegotiations: Dict[str, asyncio.Future] = {}
+
 
 class RobotAudioBroadcaster:
     """Consumes audio from Hop1 source track and broadcasts to multiple Hop2 relay tracks.
@@ -512,18 +520,23 @@ class BrowserAudioRelayTrack(AudioStreamTrack):
                             self._push_count, self.robot_id, arr.shape, arr.dtype, rms, arr.min(), arr.max(), frame.samples)
 
             # Handle different audio formats
+            # aiortc AudioFrame.to_ndarray() can return different formats:
+            # - (2, N): planar stereo - 2 channels, N samples each
+            # - (1, N): mono - 1 channel, N samples
+            # - (1, N*2): interleaved stereo - 1 row with L,R,L,R,... samples
+            # - (N,): 1D mono array
             if len(arr.shape) == 1:
                 # Already 1D mono audio
                 samples = arr.astype(np.int16)
-            elif arr.shape[0] > 1:
+            elif arr.shape[0] == 2:
                 # Planar stereo (2, N): take left channel
                 samples = arr[0].astype(np.int16)
-            elif arr.shape[1] > frame.samples:
-                # Packed/interleaved stereo (1, N*2): extract left channel (every other sample)
+            elif arr.shape[0] == 1 and arr.shape[1] > frame.samples:
+                # Interleaved stereo (1, N*2): extract left channel (every other sample)
                 samples = arr.flatten()[::2].astype(np.int16)
             else:
-                # Mono (1, N): use as-is
-                samples = arr.flatten()
+                # Mono (1, N) or unknown - flatten
+                samples = arr.flatten().astype(np.int16)
 
             self._buffer = np.concatenate([self._buffer, samples])
 
@@ -613,17 +626,22 @@ class GroupAudioMixer:
         try:
             arr = frame.to_ndarray()
             # Convert to mono if needed
-            # Handle 1D array (already mono/flattened) vs 2D (channels, samples)
+            # aiortc AudioFrame.to_ndarray() can return different formats:
+            # - (2, N): planar stereo - 2 channels, N samples each
+            # - (1, N): mono - 1 channel, N samples
+            # - (1, N*2): interleaved stereo - 1 row with L,R,L,R,... samples
+            # - (N,): 1D mono array
             if len(arr.shape) == 1:
                 # Already 1D mono audio
                 samples = arr.astype(np.int16)
-            elif arr.shape[0] > 1:
-                # Multiple channels - take first channel
+            elif arr.shape[0] == 2:
+                # Planar stereo (2, N): take left channel
                 samples = arr[0].astype(np.int16)
-            elif arr.shape[1] > frame.samples:
-                # Interleaved stereo - take every other sample
+            elif arr.shape[0] == 1 and arr.shape[1] > frame.samples:
+                # Interleaved stereo (1, N*2): extract left channel (every other sample)
                 samples = arr.flatten()[::2].astype(np.int16)
             else:
+                # Mono (1, N) or unknown - flatten
                 samples = arr.flatten().astype(np.int16)
 
             # Store in user's buffer
@@ -686,6 +704,241 @@ class GroupAudioMixer:
             if frames:
                 return True
         return False
+
+
+class UserAudioBroadcaster:
+    """Broadcasts a single user's audio to multiple subscriber queues.
+
+    Each user who sends audio (to_group=True) has their own broadcaster.
+    Other users subscribe to receive that user's audio as a separate track.
+    """
+
+    def __init__(self, user_key: str, robot_id: str) -> None:
+        self.user_key = user_key
+        self.robot_id = robot_id
+        self._subscribers: list[asyncio.Queue] = []
+        self._frame_count = 0
+        logger.info("UserAudioBroadcaster created for %s on %s", user_key, robot_id)
+
+    def push_frame(self, frame: AudioFrame) -> None:
+        """Push a frame to all subscribers."""
+        self._frame_count += 1
+        if self._frame_count % 500 == 1:
+            logger.info("UserAudioBroadcaster %s: frame %d, subscribers=%d",
+                       self.user_key, self._frame_count, len(self._subscribers))
+
+        for q in self._subscribers:
+            try:
+                q.put_nowait(frame)
+            except asyncio.QueueFull:
+                # Drop oldest frame and add new one
+                try:
+                    q.get_nowait()
+                    q.put_nowait(frame)
+                except (asyncio.QueueEmpty, asyncio.QueueFull):
+                    pass
+
+    def subscribe(self) -> asyncio.Queue:
+        """Create a new subscriber queue."""
+        q: asyncio.Queue = asyncio.Queue(maxsize=50)
+        self._subscribers.append(q)
+        logger.info("UserAudioBroadcaster %s: new subscriber (total=%d)",
+                    self.user_key, len(self._subscribers))
+        return q
+
+    def unsubscribe(self, q: asyncio.Queue) -> None:
+        """Remove a subscriber queue."""
+        if q in self._subscribers:
+            self._subscribers.remove(q)
+            logger.info("UserAudioBroadcaster %s: removed subscriber (total=%d)",
+                        self.user_key, len(self._subscribers))
+
+    def stop(self) -> None:
+        """Signal all subscribers to stop."""
+        for q in self._subscribers:
+            try:
+                q.put_nowait(None)
+            except asyncio.QueueFull:
+                pass
+        self._subscribers.clear()
+        logger.info("UserAudioBroadcaster %s: stopped", self.user_key)
+
+
+class UserAudioRelayTrack(AudioStreamTrack):
+    """Relay track that receives audio from a UserAudioBroadcaster queue."""
+
+    kind = "audio"
+
+    def __init__(self, queue: asyncio.Queue, source_user_key: str, target_user_key: str) -> None:
+        super().__init__()
+        self._queue = queue
+        self.source_user_key = source_user_key
+        self.target_user_key = target_user_key
+        self._frame_count = 0
+        self._pts = 0
+        self._silence_frame = None
+        logger.info("UserAudioRelayTrack created: %s -> %s", source_user_key, target_user_key)
+
+    async def recv(self) -> AudioFrame:
+        """Get next frame from the queue, or return silence if queue is empty."""
+        try:
+            # Non-blocking get with timeout to avoid blocking forever
+            frame = await asyncio.wait_for(self._queue.get(), timeout=0.05)
+
+            if frame is None:
+                raise Exception("Audio stream ended")
+
+            self._frame_count += 1
+
+            # Update pts for this consumer's timeline
+            frame.pts = self._pts
+            self._pts += frame.samples
+
+            if self._frame_count % 500 == 1:
+                logger.info("UserAudioRelayTrack %s->%s: frame %d",
+                           self.source_user_key, self.target_user_key, self._frame_count)
+
+            return frame
+        except asyncio.TimeoutError:
+            # No frame available, return silence
+            if self._silence_frame is None:
+                # Create a silence frame (960 samples of stereo silence at 48kHz)
+                silence = np.zeros((1, 1920), dtype=np.int16)
+                self._silence_frame = AudioFrame.from_ndarray(silence, format="s16", layout="stereo")
+                self._silence_frame.sample_rate = 48000
+
+            frame = AudioFrame.from_ndarray(
+                np.zeros((1, 1920), dtype=np.int16), format="s16", layout="stereo"
+            )
+            frame.sample_rate = 48000
+            frame.pts = self._pts
+            self._pts += 960
+            return frame
+
+
+# Per-user audio broadcasters (key: user_pc_key like "rosmaster1:user@email.com:client_id")
+user_audio_broadcasters: Dict[str, UserAudioBroadcaster] = {}
+
+
+def get_or_create_user_broadcaster(user_key: str, robot_id: str) -> UserAudioBroadcaster:
+    """Get or create a UserAudioBroadcaster for a user."""
+    if user_key not in user_audio_broadcasters:
+        user_audio_broadcasters[user_key] = UserAudioBroadcaster(user_key, robot_id)
+    return user_audio_broadcasters[user_key]
+
+
+def get_other_user_broadcasters(robot_id: str, exclude_user_key: str) -> list[UserAudioBroadcaster]:
+    """Get all user broadcasters for a robot, excluding a specific user."""
+    result = []
+    for key, broadcaster in user_audio_broadcasters.items():
+        if broadcaster.robot_id == robot_id and key != exclude_user_key:
+            result.append(broadcaster)
+    return result
+
+
+async def add_user_audio_track_and_renegotiate(
+    target_user_key: str,
+    new_user_broadcaster: UserAudioBroadcaster,
+) -> bool:
+    """Add a new user's audio track to an existing user's PC and renegotiate.
+
+    Returns True if successful, False otherwise.
+    """
+    pc = browser_user_pcs.get(target_user_key)
+    control_channel = user_control_channels.get(target_user_key)
+
+    if not pc or pc.connectionState != "connected":
+        logger.warning("Cannot renegotiate with %s: PC not connected (state=%s)",
+                      target_user_key, pc.connectionState if pc else "none")
+        return False
+
+    if not control_channel or control_channel.readyState != "open":
+        logger.warning("Cannot renegotiate with %s: control channel not open",
+                      target_user_key)
+        return False
+
+    try:
+        # Subscribe to new user's broadcaster and create relay track
+        queue = new_user_broadcaster.subscribe()
+        relay_track = UserAudioRelayTrack(queue, new_user_broadcaster.user_key, target_user_key)
+        pc.addTrack(relay_track)
+        logger.info("Added track for %s -> %s, starting renegotiation",
+                   new_user_broadcaster.user_key, target_user_key)
+
+        # Create new offer
+        offer = await pc.createOffer()
+        await pc.setLocalDescription(offer)
+
+        # Wait for ICE gathering to complete
+        if pc.iceGatheringState != "complete":
+            gathering_complete = asyncio.Event()
+
+            @pc.on("icegatheringstatechange")
+            def on_ice_gathering_state_change():
+                if pc.iceGatheringState == "complete":
+                    gathering_complete.set()
+
+            try:
+                await asyncio.wait_for(gathering_complete.wait(), timeout=5.0)
+            except asyncio.TimeoutError:
+                logger.warning("ICE gathering timeout for %s", target_user_key)
+
+        # Send offer to browser via control channel
+        offer_msg = json.dumps({
+            "type": "renegotiation_offer",
+            "sdp": pc.localDescription.sdp,
+            "sdp_type": pc.localDescription.type,
+        })
+        control_channel.send(offer_msg)
+        logger.info("Sent renegotiation offer to %s", target_user_key)
+
+        # Wait for answer (will be handled by control channel message handler)
+        future = asyncio.get_event_loop().create_future()
+        pending_renegotiations[target_user_key] = future
+
+        try:
+            answer_data = await asyncio.wait_for(future, timeout=10.0)
+            await pc.setRemoteDescription(
+                RTCSessionDescription(sdp=answer_data["sdp"], type=answer_data["type"])
+            )
+            logger.info("Renegotiation complete for %s", target_user_key)
+            return True
+        except asyncio.TimeoutError:
+            logger.warning("Renegotiation answer timeout for %s", target_user_key)
+            return False
+        finally:
+            pending_renegotiations.pop(target_user_key, None)
+
+    except Exception as e:
+        logger.error("Renegotiation failed for %s: %s", target_user_key, e)
+        return False
+
+
+async def notify_existing_users_of_new_user(robot_id: str, new_user_key: str) -> None:
+    """When a new user joins, add their audio track to all existing users' PCs."""
+    new_broadcaster = user_audio_broadcasters.get(new_user_key)
+    if not new_broadcaster:
+        logger.warning("No broadcaster for new user %s", new_user_key)
+        return
+
+    # Find all other users connected to this robot
+    other_users = [
+        key for key in browser_user_pcs.keys()
+        if key.startswith(f"{robot_id}:") and key != new_user_key
+    ]
+
+    logger.info("Notifying %d existing users of new user %s", len(other_users), new_user_key)
+
+    # Renegotiate with each existing user (in parallel)
+    tasks = [
+        add_user_audio_track_and_renegotiate(user_key, new_broadcaster)
+        for user_key in other_users
+    ]
+    if tasks:
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        success_count = sum(1 for r in results if r is True)
+        logger.info("Renegotiation results for new user %s: %d/%d successful",
+                   new_user_key, success_count, len(results))
 
 
 class GroupAudioRelayTrack(AudioStreamTrack):
@@ -785,13 +1038,11 @@ class MixedAudioTrack(AudioStreamTrack):
             robot_frame = await self.robot_track.recv()
             robot_arr = robot_frame.to_ndarray()
             # Convert to mono if stereo
-            if len(robot_arr.shape) == 1:
-                # Already 1D mono audio
-                robot_samples = robot_arr.astype(np.float32)
-            elif robot_arr.shape[0] > 1:
+            if robot_arr.shape[0] > 1:
                 # Planar stereo (2, N): take left channel
                 robot_samples = robot_arr[0].astype(np.float32)
             else:
+                # Mono or other format - flatten and truncate below
                 robot_samples = robot_arr.flatten().astype(np.float32)
             # Ensure correct length
             if len(robot_samples) > self.SAMPLES_PER_FRAME:
@@ -1143,6 +1394,7 @@ class TwistCommand(BaseModel):
 class WebRTCOffer(BaseModel):
     sdp: str
     type: str
+    client_id: str | None = None  # Unique per browser/device, allows same user on multiple devices
 
 
 class TelemetryPayload(BaseModel):
@@ -2970,7 +3222,9 @@ async def start_webrtc(
     Supports renegotiation (e.g., when browser adds mic track).
     """
     # Check if this is a renegotiation (user already has a PC for this robot)
-    user_pc_key = f"{robot_id}:{current_user.email}"
+    # Include client_id to allow same user on multiple devices
+    client_id = offer.client_id or "default"
+    user_pc_key = f"{robot_id}:{current_user.email}:{client_id}"
     existing_pc = browser_user_pcs.get(user_pc_key)
     logger.info("SFU Hop2: offer for %s (user=%s, existing_pc=%s, state=%s)",
                 robot_id, current_user.email, existing_pc is not None,
@@ -3055,6 +3309,8 @@ async def start_webrtc(
                     channel.label, robot_id, current_user.email, channel.readyState)
         if channel.label == "control":
             hop2_control_channels[robot_id].append(channel)
+            # Store channel for this user (for server-initiated renegotiation)
+            user_control_channels[user_pc_key] = channel
             # Get control aggregator for multi-user command averaging
             aggregator = get_or_create_control_aggregator(robot_id)
 
@@ -3069,7 +3325,7 @@ async def start_webrtc(
 
             @channel.on("message")
             def on_control_message(message: str) -> None:
-                """Handle control messages: joystick commands, audio routing, and speaker votes."""
+                """Handle control messages: joystick commands, audio routing, speaker votes, and renegotiation."""
                 try:
                     data = json.loads(message)
                     if data.get("type") == "audio_routing":
@@ -3094,6 +3350,16 @@ async def start_webrtc(
                         # Broadcast speaker state to all connected clients
                         asyncio.create_task(broadcast_speaker_state(robot_id))
                         return
+                    if data.get("type") == "renegotiation_answer":
+                        # Handle renegotiation answer from browser
+                        logger.info("Received renegotiation answer from %s", user_pc_key)
+                        future = pending_renegotiations.get(user_pc_key)
+                        if future and not future.done():
+                            future.set_result({
+                                "sdp": data.get("sdp"),
+                                "type": data.get("sdp_type", "answer"),
+                            })
+                        return
                 except json.JSONDecodeError:
                     pass
                 # Otherwise it's a joystick command
@@ -3112,6 +3378,8 @@ async def start_webrtc(
                 logger.info("SFU Hop2: control data channel closed for %s (user=%s)", robot_id, current_user.email)
                 if channel in hop2_control_channels.get(robot_id, []):
                     hop2_control_channels[robot_id].remove(channel)
+                # Remove user's control channel reference
+                user_control_channels.pop(user_pc_key, None)
                 # Remove user from aggregator
                 aggregator.remove_user(user_pc_key)
                 # Remove user from connected streamers and speaker votes
@@ -3126,18 +3394,28 @@ async def start_webrtc(
         logger.info("SFU Hop2 state for %s: %s (pcs=%d, viewers=%s)",
                     robot_id, state, len(robot_browser_pcs.get(robot_id, [])),
                     active_robot_streams.get(robot_id))
-        if state in ("failed", "closed", "disconnected"):
+        if state == "connected":
+            # New user fully connected - notify existing users so they can add this user's audio track
+            # Wait a moment for data channels to be ready
+            await asyncio.sleep(0.5)
+            asyncio.create_task(notify_existing_users_of_new_user(robot_id, user_pc_key))
+        elif state in ("failed", "closed", "disconnected"):
             pcs = robot_browser_pcs.get(robot_id, [])
             if pc in pcs:
                 pcs.remove(pc)
                 logger.info("SFU Hop2: removed pc, remaining=%d", len(pcs))
             # Clean up user PC tracking and audio forward task
             browser_user_pcs.pop(user_pc_key, None)
+            user_control_channels.pop(user_pc_key, None)
             old_task = browser_audio_forward_tasks.pop(user_pc_key, None)
             if old_task and not old_task.done():
                 old_task.cancel()
             # Note: data channels are cleaned up in their on_close handlers
             await pc.close()
+            # Clean up user's audio broadcaster
+            broadcaster = user_audio_broadcasters.pop(user_pc_key, None)
+            if broadcaster:
+                broadcaster.stop()
             # Clean up user from group audio mixer and control aggregator
             mixer = group_audio_mixers.get(robot_id)
             if mixer:
@@ -3158,15 +3436,29 @@ async def start_webrtc(
 
     pc.addTrack(relayed_video_track)
 
-    # Add mixed audio track (robot audio + group audio from other users)
-    # This combines both into a single track to avoid SDP negotiation issues
+    # Add robot audio track (pass-through from ros-bridge)
     if relayed_audio_track:
-        group_mixer = get_or_create_group_mixer(robot_id)
-        mixed_audio_track = MixedAudioTrack(relayed_audio_track, group_mixer, user_pc_key)
-        pc.addTrack(mixed_audio_track)
-        logger.info("SFU Hop2: added mixed audio track for %s (user=%s)", robot_id, current_user.email)
+        pc.addTrack(relayed_audio_track)
+        logger.info("SFU Hop2: added robot audio track for %s (user=%s)", robot_id, current_user.email)
     else:
-        logger.warning("SFU Hop2: no audio track for %s", robot_id)
+        logger.warning("SFU Hop2: no robot audio track for %s", robot_id)
+
+    # Create this user's audio broadcaster (for when they send audio to group)
+    get_or_create_user_broadcaster(user_pc_key, robot_id)
+
+    # Add separate audio tracks for each OTHER user currently in the session
+    # (New users joining later will need renegotiation to add their tracks)
+    other_broadcasters = get_other_user_broadcasters(robot_id, user_pc_key)
+    user_audio_queues = []  # Track for cleanup
+    for broadcaster in other_broadcasters:
+        queue = broadcaster.subscribe()
+        user_audio_queues.append((broadcaster, queue))
+        relay_track = UserAudioRelayTrack(queue, broadcaster.user_key, user_pc_key)
+        pc.addTrack(relay_track)
+        logger.info("SFU Hop2: added user audio track %s -> %s", broadcaster.user_key, user_pc_key)
+
+    logger.info("SFU Hop2: added %d user audio tracks for %s (user=%s)",
+               len(other_broadcasters), robot_id, current_user.email)
 
     # Create telemetry data channel to send to browser
     telemetry_channel = pc.createDataChannel("telemetry", ordered=False)
@@ -3265,16 +3557,17 @@ def _relay_control_to_robot(robot_id: str, message: str) -> None:
 
 
 async def _forward_browser_audio(robot_id: str, track: MediaStreamTrack, user_key: str = None) -> None:
-    """Forward audio frames from browser to the robot and group mixer."""
+    """Forward audio frames from browser to the robot and user broadcaster."""
     relay = browser_audio_relay_tracks.get(robot_id)
     if not relay:
         logger.warning("No browser audio relay track for %s", robot_id)
         return
 
-    # Get or create group mixer for this robot
-    mixer = get_or_create_group_mixer(robot_id)
+    # Get this user's broadcaster for group audio
+    broadcaster = user_audio_broadcasters.get(user_key) if user_key else None
 
-    logger.info("Starting browser audio forwarding for %s (user=%s)", robot_id, user_key)
+    logger.info("Starting browser audio forwarding for %s (user=%s, broadcaster=%s)",
+               robot_id, user_key, broadcaster is not None)
     frame_count = 0
     try:
         while True:
@@ -3303,14 +3596,13 @@ async def _forward_browser_audio(robot_id: str, track: MediaStreamTrack, user_ke
             if routing.get("to_robot", False):
                 relay.push_frame(frame)
 
-            # Push to group mixer for other users to hear if enabled
-            if user_key and routing.get("to_group", False):
-                mixer.push_frame(user_key, frame)
+            # Push to user's broadcaster for other users to hear if enabled
+            if broadcaster and routing.get("to_group", False):
+                broadcaster.push_frame(frame)
                 if frame_count % 200 == 1:
-                    logger.info("Pushed frame %d to group mixer for %s (to_group=True)", frame_count, user_key)
+                    logger.info("Pushed frame %d to broadcaster for %s (to_group=True)", frame_count, user_key)
     except Exception as e:
         logger.info("Browser audio forwarding ended for %s (user=%s): %s", robot_id, user_key, e)
-        # Clean up user from mixer and routing when they disconnect
+        # Clean up routing when they disconnect (broadcaster cleanup in PC handler)
         if user_key:
-            mixer.remove_user(user_key)
             user_audio_routing.pop(user_key, None)

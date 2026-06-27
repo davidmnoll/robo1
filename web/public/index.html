@@ -1298,9 +1298,13 @@
         const initialToken = localStorage.getItem('arenaToken') || sessionStorage.getItem('arenaToken') || '';
         const initialEmail = localStorage.getItem('arenaUserEmail') || sessionStorage.getItem('arenaUserEmail') || '';
 
+        // Generate unique client ID for this browser session (allows same user on multiple devices)
+        const clientId = crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+
         const state = {
           authToken: initialToken,
           userEmail: initialEmail,
+          clientId: clientId,
           lobbies: [],
           offlineLobbies: [],
           offlineCollapsed: true,
@@ -2204,10 +2208,18 @@
             const micTrack = micStream.getAudioTracks()[0];
             console.info('[mic] got track:', micTrack.label, 'enabled:', micTrack.enabled, 'muted:', micTrack.muted, 'readyState:', micTrack.readyState);
             console.info('[mic] track settings:', JSON.stringify(micTrack.getSettings()));
+
+            // Explicitly enable track (iOS sometimes starts disabled)
+            micTrack.enabled = true;
+            console.info('[mic] track after enable:', 'enabled:', micTrack.enabled, 'muted:', micTrack.muted);
+
             state.micTrack = micTrack;
 
             // Monitor track state changes (useful for iOS debugging)
-            micTrack.onmute = () => console.warn('[mic] track MUTED');
+            micTrack.onmute = () => {
+              console.warn('[mic] track MUTED - re-enabling');
+              micTrack.enabled = true;
+            };
             micTrack.onunmute = () => console.info('[mic] track unmuted');
             micTrack.onended = () => console.warn('[mic] track ENDED');
 
@@ -2248,6 +2260,7 @@
               body: JSON.stringify({
                 sdp: state.pc.localDescription.sdp,
                 type: state.pc.localDescription.type,
+                client_id: state.clientId,
               }),
             });
 
@@ -2535,7 +2548,10 @@
           state.pc = pc;
           const inboundStream = new MediaStream();
           pc.addEventListener('track', (event) => {
-            console.info('[video] received track:', event.track.kind);
+            const audioTracks = inboundStream.getAudioTracks();
+            const videoTracks = inboundStream.getVideoTracks();
+            console.info('[video] received track:', event.track.kind, 'id:', event.track.id,
+                         'existing audio:', audioTracks.length, 'existing video:', videoTracks.length);
             inboundStream.addTrack(event.track);
             videoElement.srcObject = inboundStream;
             // Handle audio track - start unmuted so group audio can be heard
@@ -2620,8 +2636,8 @@
             controlChannel.onerror = (event) => {
               console.warn('[data] control channel error:', event);
             };
-            controlChannel.onmessage = (event) => {
-              // Handle incoming messages from server (speaker state, aggregated control, etc.)
+            controlChannel.onmessage = async (event) => {
+              // Handle incoming messages from server (speaker state, aggregated control, renegotiation, etc.)
               try {
                 const data = JSON.parse(event.data);
                 if (data.type === 'speaker_state') {
@@ -2632,6 +2648,27 @@
                 } else if (data.type === 'camera_control') {
                   // Update ghost camera joystick for other users' camera inputs
                   updateGhostCameraJoystick(data.pan_delta, data.tilt_delta, data.user);
+                } else if (data.type === 'renegotiation_offer') {
+                  // Server is adding new tracks (e.g., new user joined)
+                  console.info('[reneg] received renegotiation offer from server');
+                  try {
+                    await state.pc.setRemoteDescription(new RTCSessionDescription({
+                      sdp: data.sdp,
+                      type: data.sdp_type || 'offer',
+                    }));
+                    console.info('[reneg] set remote description, creating answer');
+                    const answer = await state.pc.createAnswer();
+                    await state.pc.setLocalDescription(answer);
+                    console.info('[reneg] sending answer back to server');
+                    controlChannel.send(JSON.stringify({
+                      type: 'renegotiation_answer',
+                      sdp: state.pc.localDescription.sdp,
+                      sdp_type: state.pc.localDescription.type,
+                    }));
+                    console.info('[reneg] renegotiation complete');
+                  } catch (reneg_err) {
+                    console.error('[reneg] renegotiation failed:', reneg_err);
+                  }
                 }
               } catch (err) {
                 console.warn('[data] control channel message parse error:', err);
@@ -2674,7 +2711,7 @@
               return authFetch(`${apiBase()}/robots/${encodeURIComponent(namespace)}/webrtc`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ sdp: offer.sdp, type: offer.type }),
+                body: JSON.stringify({ sdp: offer.sdp, type: offer.type, client_id: state.clientId }),
               });
             })
             .then((resp) => {
