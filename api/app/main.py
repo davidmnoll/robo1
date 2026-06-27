@@ -247,6 +247,14 @@ hop2_map_channels: Dict[str, list[RTCDataChannel]] = defaultdict(list)        # 
 # Value: {"to_group": bool, "to_robot": bool}
 user_audio_routing: Dict[str, dict] = {}
 
+# Speaker votes per robot - tracks which users have voted to enable speaker
+# Key: robot_id, Value: set of user_pc_keys who voted yes
+speaker_votes: Dict[str, set] = defaultdict(set)
+
+# Connected users per robot (for counting total streamers)
+# Key: robot_id, Value: set of user_pc_keys
+connected_streamers: Dict[str, set] = defaultdict(set)
+
 
 class RobotAudioBroadcaster:
     """Consumes audio from Hop1 source track and broadcasts to multiple Hop2 relay tracks.
@@ -616,9 +624,10 @@ class GroupAudioMixer:
                 self._user_buffers[user_key].pop(0)
 
             self._push_count += 1
-            if self._push_count % 500 == 1:
-                logger.info("GroupAudioMixer %s: push from %s, active_users=%d",
-                           self.robot_id, user_key, len(self._user_buffers))
+            if self._push_count % 100 == 1:
+                logger.info("GroupAudioMixer %s: push %d from %s, active_users=%d, buffer_sizes=%s",
+                           self.robot_id, self._push_count, user_key, len(self._user_buffers),
+                           {k: len(v) for k, v in self._user_buffers.items()})
         except Exception as e:
             logger.warning("GroupAudioMixer push error for %s: %s", self.robot_id, e)
 
@@ -810,9 +819,10 @@ class MixedAudioTrack(AudioStreamTrack):
         frame.pts = self._pts
         self._pts += self.SAMPLES_PER_FRAME
 
-        if self._recv_count % 500 == 1:
-            logger.info("MixedAudioTrack recv %d for %s: robot_rms=%.1f, group_rms=%.1f",
-                       self._recv_count, self.user_key, robot_rms, group_rms)
+        if self._recv_count % 100 == 1:
+            has_group = self.mixer.has_audio(exclude_user=self.user_key)
+            logger.info("MixedAudioTrack recv %d for %s: robot_rms=%.1f, group_rms=%.1f, has_group=%s",
+                       self._recv_count, self.user_key, robot_rms, group_rms, has_group)
 
         return frame
 
@@ -2523,6 +2533,33 @@ async def broadcast_chat_message(lobby_id: int, message: "ChatMessage") -> None:
             chat_subscribers.pop(lobby_id, None)
 
 
+async def broadcast_speaker_state(robot_id: str) -> None:
+    """Broadcast speaker voting state to all connected streamers for a robot."""
+    total_streamers = len(connected_streamers.get(robot_id, set()))
+    votes = len(speaker_votes.get(robot_id, set()))
+    voters = list(speaker_votes.get(robot_id, set()))
+
+    payload = json.dumps({
+        "type": "speaker_state",
+        "total_streamers": total_streamers,
+        "votes": votes,
+        "voters": voters,  # List of user_pc_keys who voted yes
+        "enabled": total_streamers > 0 and votes == total_streamers,
+    })
+
+    # Send to all control channels for this robot
+    channels = hop2_control_channels.get(robot_id, [])
+    for channel in channels:
+        try:
+            if channel.readyState == "open":
+                channel.send(payload)
+        except Exception as e:
+            logger.warning("Failed to send speaker state to channel: %s", e)
+
+    logger.info("Broadcast speaker state for %s: votes=%d/%d, enabled=%s",
+               robot_id, votes, total_streamers, total_streamers > 0 and votes == total_streamers)
+
+
 async def create_system_message(lobby_id: int, content: str) -> None:
     """Create and broadcast a system message for a lobby."""
     async with AsyncSessionLocal() as session:
@@ -2970,7 +3007,7 @@ async def start_webrtc(
 
             @channel.on("message")
             def on_control_message(message: str) -> None:
-                """Handle control messages: joystick commands and audio routing."""
+                """Handle control messages: joystick commands, audio routing, and speaker votes."""
                 try:
                     data = json.loads(message)
                     if data.get("type") == "audio_routing":
@@ -2982,6 +3019,19 @@ async def start_webrtc(
                         logger.info("Audio routing for %s: to_group=%s, to_robot=%s",
                                    user_pc_key, data.get("to_group"), data.get("to_robot"))
                         return
+                    if data.get("type") == "speaker_vote":
+                        # Handle speaker vote
+                        vote = data.get("vote", False)
+                        if vote:
+                            speaker_votes[robot_id].add(user_pc_key)
+                        else:
+                            speaker_votes[robot_id].discard(user_pc_key)
+                        logger.info("Speaker vote for %s: user=%s vote=%s (total=%d/%d)",
+                                   robot_id, user_pc_key, vote,
+                                   len(speaker_votes[robot_id]), len(connected_streamers[robot_id]))
+                        # Broadcast speaker state to all connected clients
+                        asyncio.create_task(broadcast_speaker_state(robot_id))
+                        return
                 except json.JSONDecodeError:
                     pass
                 # Otherwise it's a joystick command
@@ -2990,6 +3040,10 @@ async def start_webrtc(
             @channel.on("open")
             def on_open() -> None:
                 logger.info("SFU Hop2: control data channel open for %s (user=%s)", robot_id, current_user.email)
+                # Track this user as a connected streamer
+                connected_streamers[robot_id].add(user_pc_key)
+                # Send current speaker state to the newly connected user
+                asyncio.create_task(broadcast_speaker_state(robot_id))
 
             @channel.on("close")
             def on_close() -> None:
@@ -2998,6 +3052,11 @@ async def start_webrtc(
                     hop2_control_channels[robot_id].remove(channel)
                 # Remove user from aggregator
                 aggregator.remove_user(user_pc_key)
+                # Remove user from connected streamers and speaker votes
+                connected_streamers[robot_id].discard(user_pc_key)
+                speaker_votes[robot_id].discard(user_pc_key)
+                # Broadcast updated speaker state
+                asyncio.create_task(broadcast_speaker_state(robot_id))
 
     @pc.on("connectionstatechange")
     async def on_state() -> None:
@@ -3172,6 +3231,11 @@ async def _forward_browser_audio(robot_id: str, track: MediaStreamTrack, user_ke
 
             # Check routing preferences for this user
             routing = user_audio_routing.get(user_key, {"to_group": False, "to_robot": False})
+
+            # Log routing state periodically
+            if frame_count % 100 == 1:
+                logger.info("_forward_browser_audio %s: frame %d, routing=%s",
+                           user_key, frame_count, routing)
 
             # Forward to robot if enabled
             if routing.get("to_robot", False):

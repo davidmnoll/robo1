@@ -522,6 +522,39 @@
         color: #22c55e;
         box-shadow: 0 0 12px rgba(34,197,94,0.5);
       }
+      /* Speaker button with voting states */
+      .speaker-btn {
+        width: 42px;
+        height: 42px;
+        border-radius: 50%;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 1.2rem;
+        flex-shrink: 0;
+        pointer-events: auto;
+        transition: background 0.2s, border-color 0.2s, color 0.2s;
+      }
+      .speaker-btn.vote-none {
+        background: rgba(239,68,68,0.2);
+        border-color: rgba(239,68,68,0.4);
+        color: #ef4444;
+      }
+      .speaker-btn.vote-partial {
+        background: rgba(249,115,22,0.2);
+        border-color: rgba(249,115,22,0.4);
+        color: #f97316;
+      }
+      .speaker-btn.vote-pending {
+        background: rgba(234,179,8,0.2);
+        border-color: rgba(234,179,8,0.4);
+        color: #eab308;
+      }
+      .speaker-btn.vote-enabled {
+        background: rgba(34,197,94,0.3);
+        border-color: rgba(34,197,94,0.5);
+        color: #22c55e;
+      }
       .volume-slider {
         flex: 1;
         min-width: 100px;
@@ -646,6 +679,99 @@
       /* Hide indicators when joystick is active */
       .touch-joystick-zone.active .joystick-indicator {
         display: none;
+      }
+
+      /* Ghost joystick for other users' inputs */
+      .ghost-joystick {
+        position: absolute;
+        width: 80px;
+        height: 80px;
+        border: 2px solid rgba(255, 165, 0, 0.4);
+        border-radius: 50%;
+        pointer-events: none;
+        z-index: 15;
+        opacity: 0;
+        transition: opacity 0.3s ease;
+      }
+      .ghost-joystick.visible {
+        opacity: 1;
+      }
+      .ghost-joystick .ghost-knob {
+        position: absolute;
+        width: 30px;
+        height: 30px;
+        background: rgba(255, 165, 0, 0.5);
+        border-radius: 50%;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        transition: transform 0.05s ease-out;
+      }
+      .ghost-joystick.left {
+        bottom: 80px;
+        left: calc(20% - 40px);
+      }
+      .ghost-joystick.right {
+        bottom: 80px;
+        right: calc(20% - 40px);
+      }
+
+      /* Key indicators for WASD/IJKL feedback */
+      .key-indicators {
+        position: absolute;
+        bottom: 20px;
+        left: 50%;
+        transform: translateX(-50%);
+        display: flex;
+        gap: 40px;
+        pointer-events: none;
+        z-index: 25;
+      }
+      .key-group {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 4px;
+      }
+      .key-row {
+        display: flex;
+        gap: 4px;
+      }
+      .key-indicator {
+        width: 32px;
+        height: 32px;
+        border: 2px solid rgba(255, 255, 255, 0.2);
+        border-radius: 6px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 14px;
+        font-weight: bold;
+        color: rgba(255, 255, 255, 0.3);
+        background: rgba(0, 0, 0, 0.3);
+        opacity: 0;
+        transition: opacity 0.15s ease, background 0.1s ease, border-color 0.1s ease;
+      }
+      .key-indicator.active {
+        opacity: 1;
+        background: rgba(59, 130, 246, 0.6);
+        border-color: rgba(59, 130, 246, 0.8);
+        color: white;
+      }
+      .key-indicator.fading {
+        opacity: 0.5;
+        transition: opacity 0.5s ease;
+      }
+      .key-group-label {
+        font-size: 10px;
+        color: rgba(255, 255, 255, 0.3);
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        opacity: 0;
+        transition: opacity 0.3s ease;
+      }
+      .key-group.has-active .key-group-label {
+        opacity: 1;
       }
 
       /* Mobile fullscreen teleop mode */
@@ -979,6 +1105,7 @@
               <div class="video-wrapper" id="video-wrapper">
                 <video id="robot-video" autoplay playsinline controls controlsList="nofullscreen"></video>
                 <div class="video-controls-top">
+                  <button id="speaker-btn" class="ghost speaker-btn vote-none" type="button" title="Vote to enable robot audio (requires unanimous vote)">🔈</button>
                   <button id="mic-toggle-btn" class="ghost mic-btn muted" type="button" title="Voice to other streamers">🎤</button>
                   <button id="robot-mic-btn" class="ghost mic-btn muted" type="button" title="Voice to robot speaker">🔊</button>
                   <button id="video-back-btn" class="ghost" type="button" aria-label="Exit stream">←</button>
@@ -991,6 +1118,38 @@
                 </div>
                 <div class="touch-joystick-zone right" id="joystick-zone-right">
                   <div class="joystick-indicator"></div>
+                <!-- Ghost joysticks for other users' inputs -->
+                <div class="ghost-joystick left" id="ghost-move-joystick">
+                  <div class="ghost-knob" id="ghost-move-knob"></div>
+                </div>
+                <div class="ghost-joystick right" id="ghost-camera-joystick">
+                  <div class="ghost-knob" id="ghost-camera-knob"></div>
+                </div>
+                <!-- Key indicators for WASD/IJKL -->
+                <div class="key-indicators" id="key-indicators">
+                  <div class="key-group" id="wasd-group">
+                    <div class="key-row">
+                      <div class="key-indicator" id="key-w">W</div>
+                    </div>
+                    <div class="key-row">
+                      <div class="key-indicator" id="key-a">A</div>
+                      <div class="key-indicator" id="key-s">S</div>
+                      <div class="key-indicator" id="key-d">D</div>
+                    </div>
+                    <span class="key-group-label">Move</span>
+                  </div>
+                  <div class="key-group" id="ijkl-group">
+                    <div class="key-row">
+                      <div class="key-indicator" id="key-i">I</div>
+                    </div>
+                    <div class="key-row">
+                      <div class="key-indicator" id="key-j">J</div>
+                      <div class="key-indicator" id="key-k">K</div>
+                      <div class="key-indicator" id="key-l">L</div>
+                    </div>
+                    <span class="key-group-label">Camera</span>
+                  </div>
+                </div>
                   <span class="joystick-label">Look</span>
                 </div>
                 <div class="hud-overlay">
@@ -1045,7 +1204,7 @@
               <button type="button" id="copy-key-btn" class="secondary">Copy</button>
             </div>
             <div class="lobby-actions">
-              <button type="submit" id="save-lobby-btn">Save lobby</button>
+              <button type="submit" id="create-lobby-btn">Create lobby</button>
               <button type="button" id="delete-lobby-btn" class="secondary">Delete lobby</button>
             </div>
             <p id="lobby-message" class="hint"></p>
@@ -1072,6 +1231,7 @@
                 <div style="flex:1;">
                   <label for="bot-volume">Volume</label>
                   <div style="display:flex;align-items:center;gap:0.5rem;">
+                    <button type="button" id="bot-mute-btn" class="ghost" title="Mute robot">🔊</button>
                     <input type="range" id="bot-volume" min="0" max="100" value="100" style="flex:1;">
                     <span id="bot-volume-label" style="min-width:3ch;">100</span>%
                   </div>
@@ -1155,7 +1315,8 @@
         const activeRobotLabel = document.getElementById('active-robot-label');
         const micToggleBtn = document.getElementById('mic-toggle-btn');
         const robotMicBtn = document.getElementById('robot-mic-btn');
-        console.log('[init] micToggleBtn=', micToggleBtn, 'robotMicBtn=', robotMicBtn);
+        const speakerBtn = document.getElementById('speaker-btn');
+        console.log('[init] micToggleBtn=', micToggleBtn, 'robotMicBtn=', robotMicBtn, 'speakerBtn=', speakerBtn);
         const micVolumeSlider = document.getElementById('mic-volume');
         const videoWrapper = document.getElementById('video-wrapper');
         const videoFullscreenBtn = document.getElementById('video-fullscreen-btn');
@@ -1179,7 +1340,9 @@
         const botDescInput = document.getElementById('bot-desc');
         const botVolumeInput = document.getElementById('bot-volume');
         const botVolumeLabel = document.getElementById('bot-volume-label');
+        const botMuteBtn = document.getElementById('bot-mute-btn');
         const botMessage = document.getElementById('bot-message');
+        let botPreviousVolume = 100;  // Store volume before muting
         const cancelBotEditBtn = document.getElementById('cancel-bot-edit');
         // Chat elements
         const chatMessages = document.getElementById('chat-messages');
@@ -1262,6 +1425,8 @@
           micTrack: null,
           // Audio playback state (robot -> browser)
           speakerEnabled: false,
+          speakerVoted: false,  // Has current user voted to enable speaker
+          speakerState: { total: 0, votes: 0, enabled: false, voters: [] },  // Server state
           playbackContext: null,
           playbackQueue: [],
           playbackPlaying: false,
@@ -1944,10 +2109,13 @@
           stopIdleTimeout();
           state.activeRobot = null;
           state.viewOnly = false;
+          state.speakerVoted = false;
+          state.speakerState = { total: 0, votes: 0, enabled: false, voters: [] };
           activeRobotLabel.textContent = '';
           setTeleopAvailability(false);
           resetJoy();
           stopMicrophone();
+          updateSpeakerButton();
           stopGamepadPolling();
           destroyTouchJoysticks();
           teleopPane.hidden = true;
@@ -2023,10 +2191,81 @@
           };
           if (state.controlChannel && state.controlChannel.readyState === 'open') {
             state.controlChannel.send(JSON.stringify(routing));
-            console.log('[audio] sent routing:', routing);
+            console.info('[audio] SENT routing:', routing);
           } else {
-            console.log('[audio] routing not sent (channel not ready), state:', routing);
+            console.warn('[audio] routing NOT sent (channel not ready):', routing);
           }
+        }
+
+        function sendSpeakerVote() {
+          // Send speaker vote to server via control channel
+          const vote = {
+            type: 'speaker_vote',
+            vote: state.speakerVoted,
+          };
+          if (state.controlChannel && state.controlChannel.readyState === 'open') {
+            state.controlChannel.send(JSON.stringify(vote));
+            console.info('[speaker] SENT vote:', vote);
+          } else {
+            console.warn('[speaker] vote NOT sent (channel not ready):', vote);
+          }
+        }
+
+        function handleSpeakerState(data) {
+          // Update local speaker state from server
+          state.speakerState = {
+            total: data.total_streamers || 0,
+            votes: data.votes || 0,
+            enabled: data.enabled || false,
+            voters: data.voters || [],
+          };
+          console.info('[speaker] state update:', state.speakerState);
+          updateSpeakerButton();
+          // Mute/unmute video based on speaker enabled state
+          const videoElement = document.getElementById('robot-video');
+          if (videoElement) {
+            videoElement.muted = !state.speakerState.enabled;
+            console.info('[speaker] video muted:', videoElement.muted);
+          }
+        }
+
+        function updateSpeakerButton() {
+          if (!speakerBtn) return;
+          const { total, votes, enabled, voters } = state.speakerState;
+          const userKey = `${state.activeRobot?.ros_namespace}:${state.user?.email}`;
+          const userVoted = voters.includes(userKey) || state.speakerVoted;
+
+          // Remove all vote classes
+          speakerBtn.classList.remove('vote-none', 'vote-partial', 'vote-pending', 'vote-enabled');
+
+          if (enabled) {
+            // Green: everyone has voted yes
+            speakerBtn.classList.add('vote-enabled');
+            speakerBtn.textContent = '🔊';
+            speakerBtn.title = `Speaker enabled (${votes}/${total} votes)`;
+          } else if (votes === 0) {
+            // Red: nobody has voted
+            speakerBtn.classList.add('vote-none');
+            speakerBtn.textContent = '🔇';
+            speakerBtn.title = `Vote to enable speaker (0/${total} votes)`;
+          } else if (userVoted) {
+            // Yellow: current user voted but not everyone
+            speakerBtn.classList.add('vote-pending');
+            speakerBtn.textContent = '🔈';
+            speakerBtn.title = `Waiting for others (${votes}/${total} votes)`;
+          } else {
+            // Orange: some people voted but not current user
+            speakerBtn.classList.add('vote-partial');
+            speakerBtn.textContent = '🔈';
+            speakerBtn.title = `Others want speaker (${votes}/${total} votes) - click to vote`;
+          }
+        }
+
+        function toggleSpeakerVote() {
+          state.speakerVoted = !state.speakerVoted;
+          sendSpeakerVote();
+          updateSpeakerButton();
+          logTelemetry(state.speakerVoted ? 'Voted for speaker' : 'Removed speaker vote');
         }
 
         async function enableMicrophone() {
@@ -2365,19 +2604,19 @@
             console.info('[video] received track:', event.track.kind);
             inboundStream.addTrack(event.track);
             videoElement.srcObject = inboundStream;
-            // Ensure audio plays
+            // Handle audio track - start muted, will be unmuted when speaker vote passes
             if (event.track.kind === 'audio') {
-              console.info('[video] audio track received, enabling playback');
-              videoElement.muted = false;
+              console.info('[video] audio track received, speaker voting required');
+              // Start muted - will be unmuted by handleSpeakerState when vote passes
+              videoElement.muted = !state.speakerState.enabled;
               videoElement.volume = 1.0;
-              // Try to play - if blocked, user will need to click
+              // Try to play (muted) - if blocked, user will need to click
               videoElement.play().then(() => {
-                console.info('[video] audio playback started');
+                console.info('[video] playback started (muted=%s)', videoElement.muted);
               }).catch(e => {
-                console.warn('[video] autoplay blocked, click video to enable audio:', e);
-                // Add click handler to enable audio
+                console.warn('[video] autoplay blocked, click video to enable:', e);
+                // Add click handler to enable playback (still respects speaker vote for unmute)
                 videoElement.onclick = () => {
-                  videoElement.muted = false;
                   videoElement.play();
                   videoElement.onclick = null;
                 };
@@ -2430,6 +2669,8 @@
               logTelemetry('Control data channel connected');
               // Send current audio routing state in case buttons were clicked before channel opened
               sendAudioRouting();
+              // Send current speaker vote state
+              sendSpeakerVote();
             };
             controlChannel.onclose = () => {
               console.info('[data] control channel closed');
@@ -2437,6 +2678,17 @@
             };
             controlChannel.onerror = (event) => {
               console.warn('[data] control channel error:', event);
+            };
+            controlChannel.onmessage = (event) => {
+              // Handle incoming messages from server (speaker state, etc.)
+              try {
+                const data = JSON.parse(event.data);
+                if (data.type === 'speaker_state') {
+                  handleSpeakerState(data);
+                }
+              } catch (err) {
+                console.warn('[data] control channel message parse error:', err);
+              }
             };
           }
 
@@ -2646,6 +2898,9 @@
             state.keysPressed[key] = isKeyDown;
             const isPressed = Object.values(state.keysPressed).some(v => v);
 
+            // Update key indicator visuals
+            updateKeyIndicator(key, isKeyDown);
+
             // Debug: log key state changes
             console.log(`[key] ${isKeyDown ? 'down' : 'up'} '${key}' wasPressed=${wasPressed} isPressed=${isPressed} interval=${!!state.keySendInterval}`);
 
@@ -2669,6 +2924,9 @@
           if (cameraKeys.includes(key)) {
             event.preventDefault();
             state.keysPressed[key] = isKeyDown;
+
+            // Update key indicator visuals
+            updateKeyIndicator(key, isKeyDown);
 
             // Start/stop camera movement based on whether any camera key is held
             const anyCameraKeyHeld = cameraKeys.some(k => state.keysPressed[k]);
@@ -3005,6 +3263,99 @@
         window.addEventListener('keydown', (event) => handleKey(event, true));
         window.addEventListener('keyup', (event) => handleKey(event, false));
 
+        // ── Key Indicator Visual Feedback ──────────────────────────────
+        const keyFadeTimeouts = {};
+        function updateKeyIndicator(key, isActive) {
+          // Map arrow keys to WASD for display
+          const keyMap = {
+            'arrowup': 'w', 'arrowdown': 's', 'arrowleft': 'a', 'arrowright': 'd'
+          };
+          const displayKey = keyMap[key] || key;
+          const el = document.getElementById(`key-${displayKey}`);
+          if (!el) return;
+
+          // Clear any pending fade timeout
+          if (keyFadeTimeouts[displayKey]) {
+            clearTimeout(keyFadeTimeouts[displayKey]);
+            delete keyFadeTimeouts[displayKey];
+          }
+
+          el.classList.remove('fading');
+          if (isActive) {
+            el.classList.add('active');
+          } else {
+            el.classList.remove('active');
+            el.classList.add('fading');
+            // Remove fading class after animation
+            keyFadeTimeouts[displayKey] = setTimeout(() => {
+              el.classList.remove('fading');
+            }, 500);
+          }
+
+          // Update group active state for label visibility
+          const wasdKeys = ['w', 'a', 's', 'd'];
+          const ijklKeys = ['i', 'j', 'k', 'l'];
+          const wasdGroup = document.getElementById('wasd-group');
+          const ijklGroup = document.getElementById('ijkl-group');
+          if (wasdGroup) {
+            const anyWasdActive = wasdKeys.some(k => document.getElementById(`key-${k}`)?.classList.contains('active'));
+            wasdGroup.classList.toggle('has-active', anyWasdActive);
+          }
+          if (ijklGroup) {
+            const anyIjklActive = ijklKeys.some(k => document.getElementById(`key-${k}`)?.classList.contains('active'));
+            ijklGroup.classList.toggle('has-active', anyIjklActive);
+          }
+        }
+
+        // ── Ghost Joystick for Other Users' Inputs ──────────────────────
+        const ghostMoveJoystick = document.getElementById('ghost-move-joystick');
+        const ghostMoveKnob = document.getElementById('ghost-move-knob');
+        const ghostCameraJoystick = document.getElementById('ghost-camera-joystick');
+        const ghostCameraKnob = document.getElementById('ghost-camera-knob');
+        let ghostFadeTimeout = null;
+
+        function updateGhostJoysticks(aggregatedAxes, userCount) {
+          // Only show ghost if there are other users controlling
+          if (userCount <= 1 || !aggregatedAxes) {
+            ghostMoveJoystick?.classList.remove('visible');
+            ghostCameraJoystick?.classList.remove('visible');
+            return;
+          }
+
+          // Move joystick: axes[1] = forward/back, axes[3] = turn
+          const moveX = aggregatedAxes[3] || 0;  // turn
+          const moveY = -(aggregatedAxes[1] || 0);  // forward (inverted for display)
+          const moveMagnitude = Math.sqrt(moveX * moveX + moveY * moveY);
+
+          if (moveMagnitude > 0.1 && ghostMoveKnob) {
+            ghostMoveJoystick.classList.add('visible');
+            const maxOffset = 20;  // pixels from center
+            ghostMoveKnob.style.transform = `translate(calc(-50% + ${moveX * maxOffset}px), calc(-50% + ${moveY * maxOffset}px))`;
+          } else {
+            ghostMoveJoystick?.classList.remove('visible');
+          }
+
+          // Camera joystick: axes[4] = camera tilt, we don't have camera turn in aggregated
+          // For now, just show if any camera movement is happening
+          const cameraY = -(aggregatedAxes[4] || 0);
+          const cameraMagnitude = Math.abs(cameraY);
+
+          if (cameraMagnitude > 0.1 && ghostCameraKnob) {
+            ghostCameraJoystick.classList.add('visible');
+            const maxOffset = 20;
+            ghostCameraKnob.style.transform = `translate(-50%, calc(-50% + ${cameraY * maxOffset}px))`;
+          } else {
+            ghostCameraJoystick?.classList.remove('visible');
+          }
+
+          // Auto-hide after inactivity
+          if (ghostFadeTimeout) clearTimeout(ghostFadeTimeout);
+          ghostFadeTimeout = setTimeout(() => {
+            ghostMoveJoystick?.classList.remove('visible');
+            ghostCameraJoystick?.classList.remove('visible');
+          }, 500);
+        }
+
         micToggleBtn.addEventListener('click', () => {
           console.log('[mic] button clicked, micEnabled=', state.micEnabled);
           toggleMicrophone();
@@ -3013,6 +3364,11 @@
         robotMicBtn.addEventListener('click', () => {
           console.log('[mic] robot mic button clicked, robotMicEnabled=', state.robotMicEnabled);
           toggleRobotMic();
+        });
+
+        speakerBtn.addEventListener('click', () => {
+          console.log('[speaker] button clicked, speakerVoted=', state.speakerVoted);
+          toggleSpeakerVote();
         });
 
         micVolumeSlider.addEventListener('input', (event) => {
@@ -3087,6 +3443,9 @@
           } else {
             keyRow.hidden = true;
           }
+          // Show create button only for new lobbies, delete button only for existing
+          const createLobbyBtn = document.getElementById('create-lobby-btn');
+          createLobbyBtn.style.display = lobby ? 'none' : 'inline-flex';
           deleteLobbyBtn.style.display = lobby ? 'inline-flex' : 'none';
         }
 
@@ -3134,6 +3493,15 @@
           const vol = Math.round((bot.volume ?? 1.0) * 100);
           botVolumeInput.value = vol;
           botVolumeLabel.textContent = vol;
+          botPreviousVolume = vol > 0 ? vol : 100;  // Store for unmute
+          // Update mute button icon
+          if (vol === 0) {
+            botMuteBtn.textContent = '🔇';
+            botMuteBtn.title = 'Unmute robot';
+          } else {
+            botMuteBtn.textContent = '🔊';
+            botMuteBtn.title = 'Mute robot';
+          }
           botMessage.textContent = `Editing ${bot.name}`;
         }
 
@@ -3144,12 +3512,15 @@
           botDescInput.value = '';
           botVolumeInput.value = 100;
           botVolumeLabel.textContent = '100';
+          botMuteBtn.textContent = '🔊';
+          botMuteBtn.title = 'Mute robot';
+          botPreviousVolume = 100;
           botMessage.textContent = '';
         }
 
-        lobbyForm.addEventListener('submit', async (event) => {
-          event.preventDefault();
-          if (!state.authToken) return;
+        // Auto-save lobby fields on change
+        async function autoSaveLobby() {
+          if (!state.authToken || !state.manageLobby) return;
           lobbyMessage.textContent = 'Saving...';
           const body = {
             name: lobbyNameInput.value,
@@ -3157,41 +3528,75 @@
             is_public: lobbyVisibilityInput.value === 'public',
           };
           try {
-            if (state.manageLobby) {
-              const resp = await fetch(`${apiBase()}/lobbies/${state.manageLobby.id}`, {
-                method: 'PATCH',
-                headers: { 'Content-Type': 'application/json', ...authHeaders() },
-                body: JSON.stringify(body),
-              });
-              if (!resp.ok) throw new Error(await resp.text());
-              lobbyMessage.textContent = 'Lobby updated.';
-              const updated = await fetchLobbyDetail(state.manageLobby.id);
-              state.manageLobby = updated;
-              if (state.currentLobby?.id === updated.id) {
-                state.currentLobby = updated;
-                renderLobbyDetail();
-              }
-              keyRow.hidden = !updated.access_key;
-              lobbyKeyEl.textContent = updated.access_key || '';
-            } else {
-              const resp = await fetch(`${apiBase()}/lobbies`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', ...authHeaders() },
-                body: JSON.stringify(body),
-              });
-              if (!resp.ok) throw new Error(await resp.text());
-              const created = await resp.json();
-              lobbyMessage.textContent = 'Lobby created. Key copied to clipboard.';
-              copyText(created.access_key, 'Lobby key copied');
-              const detail = await fetchLobbyDetail(created.id);
-              state.manageLobby = detail;
-              populateLobbyForm(detail);
-              renderManageRobots();
+            const resp = await fetch(`${apiBase()}/lobbies/${state.manageLobby.id}`, {
+              method: 'PATCH',
+              headers: { 'Content-Type': 'application/json', ...authHeaders() },
+              body: JSON.stringify(body),
+            });
+            if (!resp.ok) throw new Error(await resp.text());
+            lobbyMessage.textContent = 'Saved';
+            setTimeout(() => { if (lobbyMessage.textContent === 'Saved') lobbyMessage.textContent = ''; }, 1500);
+            const updated = await fetchLobbyDetail(state.manageLobby.id);
+            state.manageLobby = updated;
+            if (state.currentLobby?.id === updated.id) {
+              state.currentLobby = updated;
+              renderLobbyDetail();
             }
+            keyRow.hidden = !updated.access_key;
+            lobbyKeyEl.textContent = updated.access_key || '';
             fetchLobbies();
           } catch (err) {
             console.error(err);
-            lobbyMessage.textContent = 'Failed to save lobby.';
+            lobbyMessage.textContent = 'Failed to save';
+          }
+        }
+
+        // Debounce auto-save for text inputs
+        let lobbySaveTimeout = null;
+        function debouncedLobbyAutoSave() {
+          if (lobbySaveTimeout) clearTimeout(lobbySaveTimeout);
+          lobbySaveTimeout = setTimeout(autoSaveLobby, 500);
+        }
+
+        // Auto-save on field changes (only for existing lobbies)
+        lobbyNameInput.addEventListener('blur', () => { if (state.manageLobby) autoSaveLobby(); });
+        lobbyDescInput.addEventListener('blur', () => { if (state.manageLobby) autoSaveLobby(); });
+        lobbyVisibilityInput.addEventListener('change', () => { if (state.manageLobby) autoSaveLobby(); });
+
+        // For new lobbies, create on first field blur if name is filled
+        lobbyForm.addEventListener('submit', async (event) => {
+          event.preventDefault();
+          // Only used for creating new lobbies now
+          if (state.manageLobby) return;  // Already exists, auto-save handles updates
+          if (!state.authToken) return;
+          if (!lobbyNameInput.value.trim()) {
+            lobbyMessage.textContent = 'Enter a lobby name';
+            return;
+          }
+          lobbyMessage.textContent = 'Creating...';
+          const body = {
+            name: lobbyNameInput.value,
+            description: lobbyDescInput.value || null,
+            is_public: lobbyVisibilityInput.value === 'public',
+          };
+          try {
+            const resp = await fetch(`${apiBase()}/lobbies`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', ...authHeaders() },
+              body: JSON.stringify(body),
+            });
+            if (!resp.ok) throw new Error(await resp.text());
+            const created = await resp.json();
+            lobbyMessage.textContent = 'Lobby created. Key copied to clipboard.';
+            copyText(created.access_key, 'Lobby key copied');
+            const detail = await fetchLobbyDetail(created.id);
+            state.manageLobby = detail;
+            populateLobbyForm(detail);
+            renderManageRobots();
+            fetchLobbies();
+          } catch (err) {
+            console.error(err);
+            lobbyMessage.textContent = 'Failed to create lobby.';
           }
         });
 
@@ -3275,8 +3680,74 @@
           resetBotForm();
         });
 
+        // Volume slider - update label and auto-save for existing robots
         botVolumeInput.addEventListener('input', () => {
-          botVolumeLabel.textContent = botVolumeInput.value;
+          const vol = parseInt(botVolumeInput.value, 10);
+          botVolumeLabel.textContent = vol;
+          updateMuteButtonIcon(vol);
+        });
+
+        // Auto-save volume when slider is released (for existing robots)
+        botVolumeInput.addEventListener('change', async () => {
+          if (!botForm.dataset.editingId) return;  // Only auto-save for existing robots
+          const vol = parseInt(botVolumeInput.value, 10) / 100;
+          try {
+            const resp = await fetch(`${apiBase()}/bots/${botForm.dataset.editingId}`, {
+              method: 'PATCH',
+              headers: { 'Content-Type': 'application/json', ...authHeaders() },
+              body: JSON.stringify({ volume: vol }),
+            });
+            if (!resp.ok) throw new Error(await resp.text());
+            botMessage.textContent = 'Volume saved';
+            setTimeout(() => { if (botMessage.textContent === 'Volume saved') botMessage.textContent = ''; }, 1500);
+          } catch (err) {
+            console.error(err);
+            botMessage.textContent = 'Failed to save volume';
+          }
+        });
+
+        // Mute button
+        function updateMuteButtonIcon(vol) {
+          if (vol === 0) {
+            botMuteBtn.textContent = '🔇';
+            botMuteBtn.title = 'Unmute robot';
+          } else {
+            botMuteBtn.textContent = '🔊';
+            botMuteBtn.title = 'Mute robot';
+          }
+        }
+
+        botMuteBtn.addEventListener('click', async () => {
+          const currentVol = parseInt(botVolumeInput.value, 10);
+          let newVol;
+          if (currentVol > 0) {
+            // Mute: save current volume and set to 0
+            botPreviousVolume = currentVol;
+            newVol = 0;
+          } else {
+            // Unmute: restore previous volume
+            newVol = botPreviousVolume || 100;
+          }
+          botVolumeInput.value = newVol;
+          botVolumeLabel.textContent = newVol;
+          updateMuteButtonIcon(newVol);
+
+          // Auto-save if editing existing robot
+          if (botForm.dataset.editingId) {
+            try {
+              const resp = await fetch(`${apiBase()}/bots/${botForm.dataset.editingId}`, {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json', ...authHeaders() },
+                body: JSON.stringify({ volume: newVol / 100 }),
+              });
+              if (!resp.ok) throw new Error(await resp.text());
+              botMessage.textContent = newVol === 0 ? 'Muted' : 'Unmuted';
+              setTimeout(() => { if (botMessage.textContent === 'Muted' || botMessage.textContent === 'Unmuted') botMessage.textContent = ''; }, 1500);
+            } catch (err) {
+              console.error(err);
+              botMessage.textContent = 'Failed to save';
+            }
+          }
         });
 
         async function deleteBot(botId) {
