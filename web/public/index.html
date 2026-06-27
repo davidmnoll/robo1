@@ -2204,11 +2204,14 @@
           };
           console.info('[speaker] state update:', state.speakerState);
           updateSpeakerButton();
-          // Mute/unmute video based on speaker enabled state
+          // NOTE: Don't mute video based on speaker vote - that would also mute group audio
+          // The speaker vote is advisory; audio routing controls what actually gets sent
+          // to the robot. The video element should always be unmuted to receive audio.
           const videoElement = document.getElementById('robot-video');
-          if (videoElement) {
-            videoElement.muted = !state.speakerState.enabled;
-            console.info('[speaker] video muted:', videoElement.muted);
+          if (videoElement && videoElement.muted) {
+            // Unmute on first interaction (autoplay policy workaround)
+            videoElement.muted = false;
+            console.info('[speaker] video unmuted for audio');
           }
         }
 
@@ -2282,8 +2285,14 @@
             }
             state.micStream = micStream;
             const micTrack = micStream.getAudioTracks()[0];
-            console.info('[mic] got track:', micTrack.label, 'enabled:', micTrack.enabled, 'muted:', micTrack.muted);
+            console.info('[mic] got track:', micTrack.label, 'enabled:', micTrack.enabled, 'muted:', micTrack.muted, 'readyState:', micTrack.readyState);
+            console.info('[mic] track settings:', JSON.stringify(micTrack.getSettings()));
             state.micTrack = micTrack;
+
+            // Monitor track state changes (useful for iOS debugging)
+            micTrack.onmute = () => console.warn('[mic] track MUTED');
+            micTrack.onunmute = () => console.info('[mic] track unmuted');
+            micTrack.onended = () => console.warn('[mic] track ENDED');
 
             // Set up audio level detection for visual feedback
             setupMicLevelDetection(micStream);
@@ -2389,9 +2398,16 @@
           updateMicUI();
         }
 
-        function setupMicLevelDetection(stream) {
+        async function setupMicLevelDetection(stream) {
           try {
             const audioContext = new AudioContext();
+            // iOS requires explicit resume after user interaction
+            if (audioContext.state === 'suspended') {
+              console.info('[mic] AudioContext suspended, resuming...');
+              await audioContext.resume();
+            }
+            console.info('[mic] AudioContext state:', audioContext.state, 'sampleRate:', audioContext.sampleRate);
+
             const analyser = audioContext.createAnalyser();
             const source = audioContext.createMediaStreamSource(stream);
             source.connect(analyser);
@@ -2401,7 +2417,7 @@
 
             // Check audio levels periodically
             state.micLevelInterval = setInterval(() => {
-              if (!state.micEnabled) {
+              if (!state.micEnabled && !state.robotMicEnabled) {
                 micToggleBtn.classList.remove('speaking');
                 return;
               }
@@ -2410,6 +2426,12 @@
               // Threshold for "speaking" - adjust as needed
               const isSpeaking = average > 15;
               micToggleBtn.classList.toggle('speaking', isSpeaking);
+              // Log every 50 intervals (~5 sec) for debugging
+              if (state._micLevelCount === undefined) state._micLevelCount = 0;
+              state._micLevelCount++;
+              if (state._micLevelCount % 50 === 1) {
+                console.info('[mic] level check:', average.toFixed(1), 'speaking:', isSpeaking);
+              }
             }, 100);
           } catch (err) {
             console.warn('[mic] Could not set up level detection:', err);
@@ -2568,6 +2590,9 @@
           // Update display
           updateJoyIndicators();
           sendJoy();
+
+          // Update ghost move joystick to show local WASD inputs
+          updateLocalMoveGhost();
         }
 
         function updateJoyIndicators() {
@@ -2599,22 +2624,29 @@
             console.info('[video] received track:', event.track.kind);
             inboundStream.addTrack(event.track);
             videoElement.srcObject = inboundStream;
-            // Handle audio track - start muted, will be unmuted when speaker vote passes
+            // Handle audio track - start unmuted so group audio can be heard
+            // (speaker vote only controls what gets sent TO the robot, not what you hear)
             if (event.track.kind === 'audio') {
-              console.info('[video] audio track received, speaker voting required');
-              // Start muted - will be unmuted by handleSpeakerState when vote passes
-              videoElement.muted = !state.speakerState.enabled;
+              console.info('[video] audio track received, enabling audio playback');
+              videoElement.muted = false;
               videoElement.volume = 1.0;
-              // Try to play (muted) - if blocked, user will need to click
+              // Try to play - if blocked by autoplay policy, start muted then unmute on click
               videoElement.play().then(() => {
-                console.info('[video] playback started (muted=%s)', videoElement.muted);
+                console.info('[video] playback started with audio');
               }).catch(e => {
-                console.warn('[video] autoplay blocked, click video to enable:', e);
-                // Add click handler to enable playback (still respects speaker vote for unmute)
-                videoElement.onclick = () => {
-                  videoElement.play();
-                  videoElement.onclick = null;
-                };
+                console.warn('[video] autoplay blocked, starting muted:', e);
+                videoElement.muted = true;
+                videoElement.play().then(() => {
+                  console.info('[video] muted playback started, click to unmute');
+                  // Add click handler to unmute
+                  videoElement.onclick = () => {
+                    videoElement.muted = false;
+                    console.info('[video] unmuted after click');
+                    videoElement.onclick = null;
+                  };
+                }).catch(e2 => {
+                  console.error('[video] playback failed even muted:', e2);
+                });
               });
             }
           });
@@ -2683,6 +2715,9 @@
                 } else if (data.type === 'aggregated_control') {
                   // Update ghost joysticks to show other users' inputs
                   updateGhostJoysticks(data.axes, data.users);
+                } else if (data.type === 'camera_control') {
+                  // Update ghost camera joystick for other users' camera inputs
+                  updateGhostCameraJoystick(data.pan_delta, data.tilt_delta, data.user);
                 }
               } catch (err) {
                 console.warn('[data] control channel message parse error:', err);
@@ -2960,10 +2995,13 @@
           }
         }
 
-        // Camera pan/tilt control (IJKL keys)
-        const CAMERA_STEP = 5;  // Degrees per update
+        // Camera pan/tilt control (IJKL keys) - uses DELTAS for multi-user compatibility
+        const CAMERA_STEP = 5;  // Degrees per update (keyboard)
         const CAMERA_MIN = 0;
         const CAMERA_MAX = 180;
+        // Track deltas accumulated since last send (for delta-based control)
+        let cameraPanDelta = 0;
+        let cameraTiltDelta = 0;
 
         function startCameraPtz() {
           if (state.cameraPtzInterval) return;
@@ -2984,27 +3022,30 @@
 
           // I = tilt up, K = tilt down
           if (keys['i']) {
-            state.cameraTilt = Math.min(CAMERA_MAX, state.cameraTilt + CAMERA_STEP);
+            cameraTiltDelta += CAMERA_STEP;
             changed = true;
           }
           if (keys['k']) {
-            state.cameraTilt = Math.max(CAMERA_MIN, state.cameraTilt - CAMERA_STEP);
+            cameraTiltDelta -= CAMERA_STEP;
             changed = true;
           }
 
           // J = pan left, L = pan right
           if (keys['j']) {
-            state.cameraPan = Math.min(CAMERA_MAX, state.cameraPan + CAMERA_STEP);
+            cameraPanDelta += CAMERA_STEP;
             changed = true;
           }
           if (keys['l']) {
-            state.cameraPan = Math.max(CAMERA_MIN, state.cameraPan - CAMERA_STEP);
+            cameraPanDelta -= CAMERA_STEP;
             changed = true;
           }
 
           if (changed) {
             sendCameraPtz();
           }
+
+          // Update ghost camera joystick to show local IJKL inputs
+          updateLocalCameraGhost();
         }
 
         function sendCameraPtz() {
@@ -3012,12 +3053,19 @@
           if (!state.controlChannel || state.controlChannel.readyState !== 'open') {
             return;
           }
+          // Only send if there's actually a delta to send
+          if (cameraPanDelta === 0 && cameraTiltDelta === 0) {
+            return;
+          }
           const payload = {
             type: 'camera_ptz',
-            pan: Math.round(state.cameraPan),
-            tilt: Math.round(state.cameraTilt),
+            pan_delta: Math.round(cameraPanDelta),
+            tilt_delta: Math.round(cameraTiltDelta),
             timestamp: Date.now(),
           };
+          // Reset deltas after sending
+          cameraPanDelta = 0;
+          cameraTiltDelta = 0;
           resetIdleTimeout();
           try {
             state.controlChannel.send(JSON.stringify(payload));
@@ -3032,14 +3080,14 @@
           state.joyAxes = [0, 0, 0, 0, 0, 0];
           state.joyButtons = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
           state.keysPressed = {};
-          // Reset camera to center
-          state.cameraPan = 90;
-          state.cameraTilt = 90;
+          // Clear any pending camera deltas
+          cameraPanDelta = 0;
+          cameraTiltDelta = 0;
           updateJoyIndicators();
           // Only send commands if requested (don't send when joining - let robot keep its state)
           if (sendCommands) {
             sendJoy();
-            sendCameraPtz();
+            // Note: don't send camera reset - we're using deltas now, robot maintains its own state
           }
         }
 
@@ -3212,13 +3260,11 @@
 
           cameraJoystick.on('move', (evt, data) => {
             const force = Math.min(data.force, 1);
-            // Adjust pan/tilt based on joystick position
+            // Accumulate pan/tilt deltas based on joystick position
             // x: left = pan left (+), right = pan right (-)
             // y: up = tilt up (+), down = tilt down (-)
-            const panDelta = -data.vector.x * force * 1;
-            const tiltDelta = data.vector.y * force * 1;
-            state.cameraPan = Math.max(CAMERA_MIN, Math.min(CAMERA_MAX, state.cameraPan + panDelta));
-            state.cameraTilt = Math.max(CAMERA_MIN, Math.min(CAMERA_MAX, state.cameraTilt + tiltDelta));
+            cameraPanDelta += -data.vector.x * force * 1;
+            cameraTiltDelta += data.vector.y * force * 1;
           });
 
           cameraJoystick.on('end', () => {
@@ -3352,6 +3398,104 @@
             ghostMoveJoystick?.classList.remove('visible');
             ghostCameraJoystick?.classList.remove('visible');
           }, 500);
+        }
+
+        // Track camera ghost timeout separately
+        let ghostCameraFadeTimeout = null;
+
+        function updateGhostCameraJoystick(panDelta, tiltDelta, user) {
+          // Show ghost camera joystick for camera control inputs
+          // Skip if this is our own input (user matches our key)
+          const ourKey = `${state.activeRobot?.ros_namespace}:${state.user?.email}`;
+          if (user === ourKey) return;
+
+          // Convert deltas to joystick position (-1 to 1 range)
+          // panDelta: positive = left, negative = right
+          // tiltDelta: positive = up, negative = down
+          const panNorm = Math.max(-1, Math.min(1, panDelta / 10));
+          const tiltNorm = Math.max(-1, Math.min(1, -tiltDelta / 10));  // Invert for display
+          const magnitude = Math.sqrt(panNorm * panNorm + tiltNorm * tiltNorm);
+
+          if (magnitude > 0.1 && ghostCameraKnob) {
+            ghostCameraJoystick.classList.add('visible');
+            const maxOffset = 20;  // pixels from center
+            ghostCameraKnob.style.transform = `translate(calc(-50% + ${panNorm * maxOffset}px), calc(-50% + ${tiltNorm * maxOffset}px))`;
+          }
+
+          // Auto-hide after inactivity
+          if (ghostCameraFadeTimeout) clearTimeout(ghostCameraFadeTimeout);
+          ghostCameraFadeTimeout = setTimeout(() => {
+            ghostCameraJoystick?.classList.remove('visible');
+          }, 300);
+        }
+
+        // Also show ghost camera joystick for local IJKL inputs
+        function updateLocalCameraGhost() {
+          const keys = state.keysPressed;
+          const hasI = keys['i'];
+          const hasK = keys['k'];
+          const hasJ = keys['j'];
+          const hasL = keys['l'];
+
+          if (!hasI && !hasK && !hasJ && !hasL) {
+            // No camera keys pressed, hide after timeout
+            if (ghostCameraFadeTimeout) clearTimeout(ghostCameraFadeTimeout);
+            ghostCameraFadeTimeout = setTimeout(() => {
+              ghostCameraJoystick?.classList.remove('visible');
+            }, 150);
+            return;
+          }
+
+          // Calculate direction from keys
+          let panDir = 0;
+          let tiltDir = 0;
+          if (hasJ) panDir += 1;  // left
+          if (hasL) panDir -= 1;  // right
+          if (hasI) tiltDir += 1;  // up
+          if (hasK) tiltDir -= 1;  // down
+
+          if (ghostCameraKnob && (panDir !== 0 || tiltDir !== 0)) {
+            ghostCameraJoystick.classList.add('visible');
+            const maxOffset = 20;
+            ghostCameraKnob.style.transform = `translate(calc(-50% + ${panDir * maxOffset}px), calc(-50% + ${-tiltDir * maxOffset}px))`;
+          }
+        }
+
+        // Track move ghost timeout separately
+        let ghostMoveFadeTimeout = null;
+
+        // Show ghost move joystick for local WASD/arrow inputs
+        function updateLocalMoveGhost() {
+          const keys = state.keysPressed;
+          const hasW = keys['w'] || keys['arrowup'];
+          const hasS = keys['s'] || keys['arrowdown'];
+          const hasA = keys['a'] || keys['arrowleft'];
+          const hasD = keys['d'] || keys['arrowright'];
+
+          if (!hasW && !hasS && !hasA && !hasD) {
+            // No move keys pressed, hide after timeout
+            if (ghostMoveFadeTimeout) clearTimeout(ghostMoveFadeTimeout);
+            ghostMoveFadeTimeout = setTimeout(() => {
+              ghostMoveJoystick?.classList.remove('visible');
+            }, 150);
+            return;
+          }
+
+          // Calculate direction from keys
+          // X: A/left = -1, D/right = +1
+          // Y: W/up = -1 (forward), S/down = +1 (backward) - inverted for display
+          let moveX = 0;
+          let moveY = 0;
+          if (hasA) moveX -= 1;
+          if (hasD) moveX += 1;
+          if (hasW) moveY -= 1;  // Forward = up on joystick
+          if (hasS) moveY += 1;  // Backward = down on joystick
+
+          if (ghostMoveKnob && (moveX !== 0 || moveY !== 0)) {
+            ghostMoveJoystick.classList.add('visible');
+            const maxOffset = 20;
+            ghostMoveKnob.style.transform = `translate(calc(-50% + ${moveX * maxOffset}px), calc(-50% + ${moveY * maxOffset}px))`;
+          }
         }
 
         micToggleBtn.addEventListener('click', () => {

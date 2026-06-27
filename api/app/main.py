@@ -821,8 +821,9 @@ class MixedAudioTrack(AudioStreamTrack):
 
         if self._recv_count % 100 == 1:
             has_group = self.mixer.has_audio(exclude_user=self.user_key)
-            logger.info("MixedAudioTrack recv %d for %s: robot_rms=%.1f, group_rms=%.1f, has_group=%s",
-                       self._recv_count, self.user_key, robot_rms, group_rms, has_group)
+            active_users = list(self.mixer._user_buffers.keys())
+            logger.info("MixedAudioTrack recv %d for %s: robot_rms=%.1f, group_rms=%.1f, has_group=%s, active_users=%s",
+                       self._recv_count, self.user_key, robot_rms, group_rms, has_group, active_users)
 
         return frame
 
@@ -893,6 +894,21 @@ class ControlAggregator:
                     channel.send(message)
                     logger.debug("ControlAggregator: forwarded %s command for %s",
                                 cmd.get("type"), self.robot_id)
+
+                # Broadcast camera_ptz to other users (for ghost joystick display)
+                if cmd.get("type") == "camera_ptz":
+                    broadcast_msg = json.dumps({
+                        "type": "camera_control",
+                        "pan_delta": cmd.get("pan_delta", 0),
+                        "tilt_delta": cmd.get("tilt_delta", 0),
+                        "user": user_key,
+                    })
+                    for browser_channel in hop2_control_channels.get(self.robot_id, []):
+                        if browser_channel.readyState == "open":
+                            try:
+                                browser_channel.send(broadcast_msg)
+                            except Exception as e:
+                                logger.warning("Broadcast camera control error: %s", e)
                 return
 
             # Store joy commands for averaging
@@ -2998,8 +3014,10 @@ async def start_webrtc(
     @pc.on("track")
     def on_browser_track(track: MediaStreamTrack) -> None:
         """Handle incoming audio track from browser mic."""
+        logger.info("SFU Hop2: received track kind=%s for %s (user=%s, id=%s)",
+                   track.kind, robot_id, current_user.email, track.id)
         if track.kind == "audio":
-            logger.info("SFU Hop2: received browser audio track for %s (user=%s)", robot_id, current_user.email)
+            logger.info("SFU Hop2: starting audio forwarding for %s (user=%s)", robot_id, current_user.email)
             # Cancel any existing forwarding task for this user
             old_task = browser_audio_forward_tasks.pop(user_pc_key, None)
             if old_task and not old_task.done():
@@ -3012,12 +3030,21 @@ async def start_webrtc(
     @pc.on("datachannel")
     def on_browser_datachannel(channel: RTCDataChannel) -> None:
         """Handle incoming data channels from browser (control commands)."""
-        logger.info("SFU Hop2: received data channel '%s' from browser for %s (user=%s)",
-                    channel.label, robot_id, current_user.email)
+        logger.info("SFU Hop2: received data channel '%s' from browser for %s (user=%s, state=%s)",
+                    channel.label, robot_id, current_user.email, channel.readyState)
         if channel.label == "control":
             hop2_control_channels[robot_id].append(channel)
             # Get control aggregator for multi-user command averaging
             aggregator = get_or_create_control_aggregator(robot_id)
+
+            # Track this user as a connected streamer immediately
+            # (channel may already be open when received, so on_open might not fire)
+            if user_pc_key not in connected_streamers[robot_id]:
+                connected_streamers[robot_id].add(user_pc_key)
+                logger.info("SFU Hop2: added %s to connected_streamers (now %d)",
+                           user_pc_key, len(connected_streamers[robot_id]))
+                # Send current speaker state to the newly connected user
+                asyncio.create_task(broadcast_speaker_state(robot_id))
 
             @channel.on("message")
             def on_control_message(message: str) -> None:
@@ -3053,11 +3080,11 @@ async def start_webrtc(
 
             @channel.on("open")
             def on_open() -> None:
-                logger.info("SFU Hop2: control data channel open for %s (user=%s)", robot_id, current_user.email)
-                # Track this user as a connected streamer
-                connected_streamers[robot_id].add(user_pc_key)
-                # Send current speaker state to the newly connected user
-                asyncio.create_task(broadcast_speaker_state(robot_id))
+                logger.info("SFU Hop2: control data channel open event for %s (user=%s)", robot_id, current_user.email)
+                # Ensure user is tracked (redundant but safe)
+                if user_pc_key not in connected_streamers[robot_id]:
+                    connected_streamers[robot_id].add(user_pc_key)
+                    asyncio.create_task(broadcast_speaker_state(robot_id))
 
             @channel.on("close")
             def on_close() -> None:
@@ -3258,6 +3285,8 @@ async def _forward_browser_audio(robot_id: str, track: MediaStreamTrack, user_ke
             # Push to group mixer for other users to hear if enabled
             if user_key and routing.get("to_group", False):
                 mixer.push_frame(user_key, frame)
+                if frame_count % 200 == 1:
+                    logger.info("Pushed frame %d to group mixer for %s (to_group=True)", frame_count, user_key)
     except Exception as e:
         logger.info("Browser audio forwarding ended for %s (user=%s): %s", robot_id, user_key, e)
         # Clean up user from mixer and routing when they disconnect
