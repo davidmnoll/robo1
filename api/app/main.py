@@ -4295,6 +4295,10 @@ async def handle_forwarder_offer(ws: WebSocket, message: dict) -> None:
 
     # Add browser audio relay as a new track
     # This creates a new m-line in the answer for sending audio to ros-bridge
+    # Check PC state first to avoid race with ICE failure
+    if pc.connectionState in ("closed", "failed"):
+        logger.warning("SFU Hop1: PC already closed/failed for %s, aborting", robot)
+        return
     pc.addTrack(browser_relay)
     logger.info("SFU Hop1: added browser audio relay for %s", robot)
 

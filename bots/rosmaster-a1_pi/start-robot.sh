@@ -19,6 +19,19 @@ fi
 echo "Starting robot services in container $CONTAINER_NAME..."
 echo "ROBOT_ID=$ROBOT_ID ROS_DOMAIN_ID=$ROS_DOMAIN_ID"
 
+# Clean up any stale processes before starting
+echo "Cleaning up any existing robot processes..."
+docker exec "$CONTAINER_NAME" bash -c "
+    pkill -9 -f rosmaster_robot || true
+    pkill -9 -f usb_cam || true
+    pkill -9 -f ydlidar || true
+    pkill -9 -f audio_play || true
+    pkill -9 -f audio_stream || true
+    pkill -9 -f static_transform_publisher || true
+    pkill -9 -f slam_toolbox || true
+" 2>/dev/null || true
+sleep 1
+
 # Run the robot launch in the container
 exec docker exec -e ROS_DOMAIN_ID="$ROS_DOMAIN_ID" -e ROBOT_ID="$ROBOT_ID" "$CONTAINER_NAME" bash -c "
     source /opt/ros/humble/setup.bash
