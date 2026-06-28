@@ -16,8 +16,8 @@ def generate_launch_description():
 
     lidar_port_arg = DeclareLaunchArgument(
         'lidar_port',
-        default_value='/dev/ttyUSB0',
-        description='YDLIDAR serial port'
+        default_value='/dev/tmini',
+        description='T-mini Plus LIDAR serial port (udev symlink)'
     )
 
     camera_device_arg = DeclareLaunchArgument(
@@ -104,10 +104,59 @@ def generate_launch_description():
         ],
     )
 
-    # TODO: SLAM/LIDAR nodes - enable once lidar driver is installed
-    # ydlidar_node = Node(...)
-    # static_tf_base_to_laser = Node(...)
-    # slam_node = Node(...)
+    # YDLIDAR T-mini Plus node
+    # Built from: https://github.com/YDLIDAR/ydlidar_ros2_driver (humble branch)
+    ydlidar_node = Node(
+        package='ydlidar_ros2_driver',
+        executable='ydlidar_ros2_driver_node',
+        name='ydlidar',
+        output='screen',
+        parameters=[{
+            'port': lidar_port,
+            'baudrate': 230400,
+            'frame_id': 'laser_link',
+            'lidar_type': 1,        # TOF lidar
+            'device_type': 0,       # Serial
+            'sample_rate': 4,       # 4K samples/sec
+            'frequency': 10.0,      # 10Hz scan rate
+            'range_min': 0.1,
+            'range_max': 12.0,
+            'angle_min': -180.0,
+            'angle_max': 180.0,
+            'invalid_range_is_inf': False,
+        }],
+        remappings=[
+            ('scan', ['/', robot_id, '/scan']),
+        ],
+    )
+
+    # Static TF: base_link -> laser_link (lidar mounted on top of robot)
+    static_tf_base_to_laser = Node(
+        package='tf2_ros',
+        executable='static_transform_publisher',
+        name='base_to_laser_tf',
+        arguments=['0', '0', '0.1', '0', '0', '0', 'base_link', 'laser_link'],
+    )
+
+    # SLAM Toolbox for mapping
+    slam_node = Node(
+        package='slam_toolbox',
+        executable='async_slam_toolbox_node',
+        name='slam_toolbox',
+        output='screen',
+        parameters=[{
+            'use_sim_time': False,
+            'odom_frame': 'odom',
+            'map_frame': 'map',
+            'base_frame': 'base_link',
+            'scan_topic': ['/', robot_id, '/scan'],
+            'mode': 'mapping',
+            'resolution': 0.05,
+        }],
+        remappings=[
+            ('map', ['/', robot_id, '/map']),
+        ],
+    )
 
     return LaunchDescription([
         robot_id_arg,
@@ -120,7 +169,7 @@ def generate_launch_description():
         audio_stream_node,
         audio_play_node,
         camera_node,
-        # ydlidar_node,
-        # static_tf_base_to_laser,
-        # slam_node,
+        ydlidar_node,
+        static_tf_base_to_laser,
+        # slam_node,  # Disabled - crashes Pi
     ])

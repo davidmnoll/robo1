@@ -2873,7 +2873,8 @@
               // Each audio track gets its own audio element (browser mixes automatically)
               console.info('[audio] creating audio element for track:', event.track.id);
               const audioEl = document.createElement('audio');
-              audioEl.srcObject = new MediaStream([event.track]);
+              const audioStream = new MediaStream([event.track]);
+              audioEl.srcObject = audioStream;
               audioEl.autoplay = true;
               audioEl.play().then(() => {
                 console.info('[audio] playing track:', event.track.id);
@@ -2881,6 +2882,52 @@
                 console.warn('[audio] autoplay blocked for track:', event.track.id, e);
               });
               audioElements.push({ el: audioEl, track: event.track });
+
+              // RMS audio level monitoring for debugging peer audio
+              const trackId = event.track.id.substring(0, 8);  // Short ID for logging
+              try {
+                const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+                const source = audioCtx.createMediaStreamSource(audioStream);
+                const analyser = audioCtx.createAnalyser();
+                analyser.fftSize = 256;
+                source.connect(analyser);
+                const dataArray = new Float32Array(analyser.fftSize);
+                let hasLoggedAudio = false;
+                let silentFrames = 0;
+
+                const checkAudio = () => {
+                  if (event.track.readyState !== 'live') {
+                    console.info('[audio-monitor] track %s no longer live, stopping', trackId);
+                    audioCtx.close();
+                    return;
+                  }
+                  analyser.getFloatTimeDomainData(dataArray);
+                  let sum = 0;
+                  for (let i = 0; i < dataArray.length; i++) {
+                    sum += dataArray[i] * dataArray[i];
+                  }
+                  const rms = Math.sqrt(sum / dataArray.length);
+
+                  if (rms > 0.01) {  // Threshold for "audio present"
+                    if (!hasLoggedAudio) {
+                      console.info('[audio-monitor] PEER AUDIO DETECTED on track %s, rms=%.4f', trackId, rms);
+                      hasLoggedAudio = true;
+                    }
+                    silentFrames = 0;
+                  } else {
+                    silentFrames++;
+                    if (hasLoggedAudio && silentFrames === 50) {  // ~5 seconds of silence
+                      console.info('[audio-monitor] peer audio went silent on track %s', trackId);
+                      hasLoggedAudio = false;
+                    }
+                  }
+                  setTimeout(checkAudio, 100);  // Check every 100ms
+                };
+                setTimeout(checkAudio, 500);  // Start after short delay
+                console.info('[audio-monitor] started monitoring peer track %s', trackId);
+              } catch (e) {
+                console.warn('[audio-monitor] failed to setup for track %s:', trackId, e);
+              }
 
               // Clean up when track ends
               event.track.onended = () => {
@@ -2961,21 +3008,26 @@
                 } else if (data.type === 'camera_control') {
                   // Update ghost camera joystick for other users' camera inputs
                   updateGhostCameraJoystick(data.pan_delta, data.tilt_delta, data.user);
+                } else if (data.type === 'renegotiate_request') {
+                  // Server has new tracks for us - send a new offer (browser-initiated renegotiation)
+                  const trackCount = data.new_track_count || 1;
+                  console.info('[renegotiate] server requested renegotiation, reason:', data.reason, 'tracks:', trackCount);
+                  const namespace = state.activeRobot?.ros_namespace;
+                  if (namespace && state.pc && state.pc.signalingState === 'stable') {
+                    handleServerRenegotiateRequest(namespace, trackCount);
+                  } else {
+                    console.warn('[renegotiate] cannot renegotiate: no PC or not stable');
+                  }
                 } else if (data.type === 'reconnect_needed') {
-                  // Server wants us to reconnect to get new audio tracks
+                  // Server wants us to fully reconnect (fallback)
                   console.info('[reconnect] server requested reconnect, reason:', data.reason);
-                  // Close current PC and reconnect
                   const namespace = state.activeRobot?.ros_namespace;
                   if (namespace) {
                     console.info('[reconnect] closing current connection and reconnecting...');
-                    // Remember mic state before reconnection
                     const wasMicEnabled = state.micEnabled;
                     const wasRobotMicEnabled = state.robotMicEnabled;
-                    // Small delay to let the message be processed
                     setTimeout(async () => {
-                      // Clean up old mic track (it's dead now that PC is closing)
                       if (state.micTrack) {
-                        console.info('[reconnect] stopping old mic track');
                         state.micTrack.stop();
                         state.micTrack = null;
                       }
@@ -2987,15 +3039,10 @@
                         state.pc.close();
                         state.pc = null;
                       }
-                      // Restart WebRTC connection
-                      startWebRTC(namespace);
-                      // Restore mic if it was enabled before reconnection
+                      startVideo(namespace);
                       if (wasMicEnabled || wasRobotMicEnabled) {
-                        console.info('[reconnect] will restore mic after connection stabilizes');
-                        // Wait for connection to be established before re-enabling mic
                         const waitForConnection = () => {
                           if (state.pc && state.pc.connectionState === 'connected' && state.pc.signalingState === 'stable') {
-                            console.info('[reconnect] connection stable, restoring mic');
                             enableMicrophone();
                           } else if (state.pc) {
                             setTimeout(waitForConnection, 200);
@@ -3017,13 +3064,8 @@
 
           // Receive robot audio (recvonly)
           pc.addTransceiver('audio', { direction: 'recvonly' });
-
-          // Add extra audio transceivers for group audio (up to 4 other users)
-          // These are recvonly and will be used by the server to send other users' audio
-          for (let i = 0; i < 4; i++) {
-            pc.addTransceiver('audio', { direction: 'recvonly' });
-          }
-          console.info('[video] added 5 recvonly audio transceivers (1 robot + 4 group)');
+          // Group audio tracks are added dynamically via renegotiation
+          console.info('[video] added recvonly transceivers for video + robot audio');
           pc.addEventListener('connectionstatechange', () => {
             console.info('[video] connection state changed:', pc.connectionState);
             if (pc.connectionState === 'connected') {
@@ -3067,6 +3109,78 @@
             .catch((err) => {
               console.error('Video setup failed', err);
             });
+        }
+
+        let renegotiationInProgress = false;  // Guard against concurrent renegotiation
+
+        async function handleServerRenegotiateRequest(namespace, newTrackCount = 1) {
+          /**
+           * Handle server's request for renegotiation (new audio tracks available).
+           * Browser creates a new offer and sends it to server.
+           * @param {number} newTrackCount - How many new audio transceivers to create
+           */
+          if (renegotiationInProgress) {
+            console.info('[renegotiate] renegotiation already in progress, skipping');
+            return;
+          }
+
+          if (!state.pc || state.pc.signalingState !== 'stable') {
+            console.warn('[renegotiate] cannot renegotiate: PC not stable (sig=%s)',
+                        state.pc?.signalingState);
+            return;
+          }
+
+          renegotiationInProgress = true;
+          try {
+            // Add recvonly audio transceivers for each new track the server wants to send
+            // Each transceiver = one audio stream (e.g., one other user's mic)
+            for (let i = 0; i < newTrackCount; i++) {
+              state.pc.addTransceiver('audio', { direction: 'recvonly' });
+            }
+            console.info('[renegotiate] added %d recvonly audio transceiver(s), creating new offer', newTrackCount);
+            const offer = await state.pc.createOffer();
+            await state.pc.setLocalDescription(offer);
+
+            // Wait for ICE gathering (brief timeout since ICE should already be established)
+            await new Promise((resolve) => {
+              if (state.pc.iceGatheringState === 'complete') {
+                resolve();
+              } else {
+                const checkState = () => {
+                  if (state.pc.iceGatheringState === 'complete') {
+                    state.pc.removeEventListener('icegatheringstatechange', checkState);
+                    resolve();
+                  }
+                };
+                state.pc.addEventListener('icegatheringstatechange', checkState);
+                setTimeout(resolve, 1000);  // Short timeout - ICE should already be ready
+              }
+            });
+
+            console.info('[renegotiate] sending offer to server');
+            const resp = await authFetch(`${apiBase()}/robots/${encodeURIComponent(namespace)}/webrtc`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                sdp: state.pc.localDescription.sdp,
+                type: state.pc.localDescription.type,
+                client_id: state.clientId,
+              }),
+            });
+
+            if (!resp.ok) {
+              throw new Error(`Renegotiation failed: ${resp.status}`);
+            }
+
+            const answer = await resp.json();
+            console.info('[renegotiate] received answer, setting remote description');
+            await state.pc.setRemoteDescription(new RTCSessionDescription(answer));
+            console.info('[renegotiate] renegotiation complete');
+          } catch (err) {
+            console.error('[renegotiate] renegotiation failed:', err);
+          } finally {
+            renegotiationInProgress = false;
+          }
         }
 
         function handleTelemetryData(message) {

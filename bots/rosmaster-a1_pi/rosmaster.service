@@ -8,8 +8,7 @@ Type=simple
 EnvironmentFile=-/home/pi/share/rosmaster/.env
 ExecStart=/home/pi/share/rosmaster/start-robot.sh
 ExecStop=/home/pi/share/rosmaster/stop-robot.sh
-Restart=always
-RestartSec=10
+Restart=no
 User=pi
 
 [Install]

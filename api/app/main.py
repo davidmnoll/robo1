@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import contextlib
 import json
 import logging
@@ -238,6 +239,9 @@ media_relay = MediaRelay()
 robot_incoming_tracks: Dict[str, MediaStreamTrack] = {}
 # Incoming audio track from forwarder per robot (Hop 1)
 robot_incoming_audio_tracks: Dict[str, MediaStreamTrack] = {}
+# Incoming audio track from browser per user (Hop 2) - key: user_pc_key
+# These are the actual MediaStreamTracks that can be relayed via MediaRelay
+user_incoming_audio_tracks: Dict[str, MediaStreamTrack] = {}
 # Hop 1 PeerConnection from forwarder per robot
 robot_forwarder_pcs: Dict[str, RTCPeerConnection] = {}
 # Hop 2 PeerConnections (one per browser viewer) per robot
@@ -282,7 +286,7 @@ robot_audio_broadcasters: Dict[str, "RobotAudioBroadcaster"] = {}
 # Hop1: ros-bridge <-> API
 hop1_telemetry_channels: Dict[str, RTCDataChannel] = {}  # robot_id -> channel from ros-bridge
 hop1_control_channels: Dict[str, RTCDataChannel] = {}    # robot_id -> channel to ros-bridge
-hop1_map_channels: Dict[str, RTCDataChannel] = {}        # robot_id -> map channel from ros-bridge
+hop1_scan_channels: Dict[str, RTCDataChannel] = {}        # robot_id -> scan channel from ros-bridge
 # Hop2: API <-> Browser(s)
 hop2_telemetry_channels: Dict[str, list[RTCDataChannel]] = defaultdict(list)  # robot_id -> list of channels to browsers
 hop2_control_channels: Dict[str, list[RTCDataChannel]] = defaultdict(list)    # robot_id -> list of channels from browsers
@@ -304,9 +308,164 @@ connected_streamers: Dict[str, set] = defaultdict(set)
 # Key: user_pc_key, Value: RTCDataChannel
 user_control_channels: Dict[str, RTCDataChannel] = {}
 
+# Track which user pairs have been introduced (to avoid reconnect loops)
+# Key: robot_id, Value: set of frozenset({user_key_a, user_key_b}) pairs
+introduced_user_pairs: Dict[str, set] = defaultdict(set)
+
+# Track last renegotiation request time per user (rate limiting)
+# Key: user_pc_key, Value: timestamp
+last_renegotiation_request: Dict[str, float] = {}
+RENEGOTIATION_COOLDOWN = 10.0  # seconds
+
 # Pending renegotiations (waiting for answer from browser)
 # Key: user_pc_key, Value: asyncio.Future
 pending_renegotiations: Dict[str, asyncio.Future] = {}
+
+# SLAM processors per robot
+slam_processors: Dict[str, "SlamProcessor"] = {}
+
+
+class SlamProcessor:
+    """Simple occupancy grid SLAM processor.
+
+    Accumulates laser scans and builds an occupancy grid map.
+    Uses scan matching for pose estimation (simplified ICP-like approach).
+    """
+
+    def __init__(self, robot_id: str, map_size: int = 200, resolution: float = 0.05):
+        self.robot_id = robot_id
+        self.map_size = map_size  # Grid cells
+        self.resolution = resolution  # Meters per cell
+        self.map_width = map_size
+        self.map_height = map_size
+
+        # Occupancy grid: -1 = unknown, 0 = free, 100 = occupied
+        self.grid = np.full((map_size, map_size), -1, dtype=np.int16)
+
+        # Robot pose (x, y, theta) in meters/radians - starts at center of map
+        self.pose = np.array([map_size * resolution / 2, map_size * resolution / 2, 0.0])
+
+        # Origin of map in world coordinates
+        self.origin_x = 0.0
+        self.origin_y = 0.0
+
+        # Scan counter for periodic map updates
+        self.scan_count = 0
+        self.last_map_update = 0
+
+        logger.info("SlamProcessor created for %s: %dx%d grid, %.2fm resolution",
+                    robot_id, map_size, map_size, resolution)
+
+    def process_scan(self, scan_data: dict) -> Optional[dict]:
+        """Process a laser scan and update the map.
+
+        Returns map update dict if map changed significantly, None otherwise.
+        """
+        try:
+            # Decode ranges from base64 float32 array
+            ranges_b64 = scan_data.get("ranges", "")
+            ranges_bytes = base64.b64decode(ranges_b64)
+            ranges = np.frombuffer(ranges_bytes, dtype=np.float32)
+
+            angle_min = scan_data.get("angle_min", -np.pi)
+            angle_max = scan_data.get("angle_max", np.pi)
+            angle_increment = scan_data.get("angle_increment", 0.01)
+            range_min = scan_data.get("range_min", 0.1)
+            range_max = scan_data.get("range_max", 12.0)
+
+            self.scan_count += 1
+
+            # Convert scan to points in robot frame
+            # Generate angles array matching ranges length exactly
+            n_ranges = len(ranges)
+            if angle_increment > 0 and n_ranges > 0:
+                angles = angle_min + np.arange(n_ranges) * angle_increment
+            else:
+                angles = np.linspace(angle_min, angle_max, n_ranges)
+            valid = (ranges >= range_min) & (ranges <= range_max) & np.isfinite(ranges)
+
+            if not np.any(valid):
+                return None
+
+            # Points in robot frame
+            x_robot = ranges[valid] * np.cos(angles[valid])
+            y_robot = ranges[valid] * np.sin(angles[valid])
+
+            # Transform to world frame using current pose
+            cos_theta = np.cos(self.pose[2])
+            sin_theta = np.sin(self.pose[2])
+            x_world = self.pose[0] + x_robot * cos_theta - y_robot * sin_theta
+            y_world = self.pose[1] + x_robot * sin_theta + y_robot * cos_theta
+
+            # Update occupancy grid
+            self._update_grid(x_world, y_world)
+
+            # Send map update every 10 scans (~1 second at 10Hz)
+            if self.scan_count - self.last_map_update >= 10:
+                self.last_map_update = self.scan_count
+                return self._get_map_update()
+
+            return None
+
+        except Exception as e:
+            logger.warning("SlamProcessor error for %s: %s", self.robot_id, e)
+            return None
+
+    def _update_grid(self, x_points: np.ndarray, y_points: np.ndarray) -> None:
+        """Update occupancy grid with obstacle points."""
+        # Convert world coordinates to grid cells
+        grid_x = ((x_points - self.origin_x) / self.resolution).astype(int)
+        grid_y = ((y_points - self.origin_y) / self.resolution).astype(int)
+
+        # Robot position in grid
+        robot_gx = int((self.pose[0] - self.origin_x) / self.resolution)
+        robot_gy = int((self.pose[1] - self.origin_y) / self.resolution)
+
+        # Mark cells along rays as free (simplified ray tracing)
+        for gx, gy in zip(grid_x, grid_y):
+            if 0 <= gx < self.map_width and 0 <= gy < self.map_height:
+                # Mark endpoint as occupied (clamp to int8 range)
+                current = int(self.grid[gy, gx])
+                if current >= 0:
+                    self.grid[gy, gx] = min(100, current + 20)
+                else:
+                    self.grid[gy, gx] = 100
+
+                # Simple ray tracing: mark cells between robot and obstacle as free
+                dx = abs(gx - robot_gx)
+                dy = abs(gy - robot_gy)
+                steps = max(dx, dy)
+                if steps > 0:
+                    x_step = (gx - robot_gx) / steps
+                    y_step = (gy - robot_gy) / steps
+                    for i in range(int(steps)):
+                        cx = int(robot_gx + i * x_step)
+                        cy = int(robot_gy + i * y_step)
+                        if 0 <= cx < self.map_width and 0 <= cy < self.map_height:
+                            curr = int(self.grid[cy, cx])
+                            if curr < 50:  # Don't clear if strongly occupied
+                                self.grid[cy, cx] = max(0, curr - 5) if curr >= 0 else 0
+
+    def _get_map_update(self) -> dict:
+        """Generate map update message for browsers."""
+        # Convert grid to uint8: -1 -> 0 (unknown), 0 -> 1 (free), 100 -> 101 (occupied)
+        # Clamp values to valid range before converting
+        grid_clamped = np.clip(self.grid.flatten(), -1, 100)
+        grid_uint8 = (grid_clamped + 1).astype(np.uint8)
+        map_b64 = base64.b64encode(grid_uint8.tobytes()).decode('ascii')
+
+        return {
+            "type": "map_update",
+            "width": self.map_width,
+            "height": self.map_height,
+            "resolution": self.resolution,
+            "origin_x": self.origin_x,
+            "origin_y": self.origin_y,
+            "robot_x": self.pose[0],
+            "robot_y": self.pose[1],
+            "robot_theta": self.pose[2],
+            "data": map_b64,
+        }
 
 
 class RobotAudioBroadcaster:
@@ -768,7 +927,7 @@ class UserAudioBroadcaster:
     def push_frame(self, frame: AudioFrame) -> None:
         """Push a frame to all subscribers."""
         self._frame_count += 1
-        if self._frame_count % 500 == 1:
+        if self._frame_count % 100 == 1:  # More frequent logging for debugging
             logger.info("UserAudioBroadcaster %s: frame %d, subscribers=%d",
                        self.user_key, self._frame_count, len(self._subscribers))
 
@@ -809,6 +968,76 @@ class UserAudioBroadcaster:
         logger.info("UserAudioBroadcaster %s: stopped", self.user_key)
 
 
+class GroupAudioSlotTrack(AudioStreamTrack):
+    """Audio slot track that can be connected to different broadcasters dynamically.
+
+    Created during initial connection to ensure aiortc starts consuming it.
+    Queue can be swapped later when users connect.
+    """
+
+    kind = "audio"
+
+    def __init__(self, slot_index: int, target_user_key: str) -> None:
+        super().__init__()
+        self.slot_index = slot_index
+        self.target_user_key = target_user_key
+        self._queue: Optional[asyncio.Queue] = None
+        self._source_user_key: Optional[str] = None
+        self._frame_count = 0
+        self._pts = 0
+        self._recv_calls = 0
+        self._silence_count = 0
+        logger.info("GroupAudioSlotTrack slot %d created for %s", slot_index, target_user_key)
+
+    def connect_broadcaster(self, queue: asyncio.Queue, source_user_key: str) -> None:
+        """Connect this slot to a broadcaster's queue."""
+        self._queue = queue
+        self._source_user_key = source_user_key
+        logger.info("GroupAudioSlotTrack slot %d connected: %s -> %s",
+                   self.slot_index, source_user_key, self.target_user_key)
+
+    def disconnect(self) -> None:
+        """Disconnect from current broadcaster."""
+        if self._source_user_key:
+            logger.info("GroupAudioSlotTrack slot %d disconnected from %s",
+                       self.slot_index, self._source_user_key)
+        self._queue = None
+        self._source_user_key = None
+
+    async def recv(self) -> AudioFrame:
+        """Get next frame from connected queue, or return silence."""
+        self._recv_calls += 1
+
+        if self._recv_calls <= 5 or self._recv_calls % 500 == 0:
+            logger.info("GroupAudioSlotTrack slot %d (%s->%s): recv() call %d, connected=%s",
+                       self.slot_index, self._source_user_key or "none", self.target_user_key,
+                       self._recv_calls, self._queue is not None)
+
+        if self._queue is not None:
+            try:
+                frame = await asyncio.wait_for(self._queue.get(), timeout=0.02)
+                if frame is not None:
+                    self._frame_count += 1
+                    frame.pts = self._pts
+                    self._pts += frame.samples
+                    if self._frame_count % 100 == 1:
+                        logger.info("GroupAudioSlotTrack slot %d: frame %d from %s",
+                                   self.slot_index, self._frame_count, self._source_user_key)
+                    return frame
+            except asyncio.TimeoutError:
+                pass
+
+        # Return silence
+        self._silence_count += 1
+        frame = AudioFrame.from_ndarray(
+            np.zeros((1, 1920), dtype=np.int16), format="s16", layout="stereo"
+        )
+        frame.sample_rate = 48000
+        frame.pts = self._pts
+        self._pts += 960
+        return frame
+
+
 class UserAudioRelayTrack(AudioStreamTrack):
     """Relay track that receives audio from a UserAudioBroadcaster queue."""
 
@@ -822,10 +1051,21 @@ class UserAudioRelayTrack(AudioStreamTrack):
         self._frame_count = 0
         self._pts = 0
         self._silence_frame = None
-        logger.info("UserAudioRelayTrack created: %s -> %s", source_user_key, target_user_key)
+        self._recv_calls = 0
+        self._silence_count = 0
+        logger.info("UserAudioRelayTrack created: %s -> %s (queue=%s)",
+                    source_user_key, target_user_key, id(queue))
 
     async def recv(self) -> AudioFrame:
         """Get next frame from the queue, or return silence if queue is empty."""
+        self._recv_calls += 1
+
+        # Log first few recv calls to confirm aiortc is calling us
+        if self._recv_calls <= 5 or self._recv_calls % 500 == 0:
+            logger.info("UserAudioRelayTrack %s->%s: recv() call %d, queue_size=%d",
+                       self.source_user_key, self.target_user_key,
+                       self._recv_calls, self._queue.qsize())
+
         try:
             # Non-blocking get with timeout to avoid blocking forever
             frame = await asyncio.wait_for(self._queue.get(), timeout=0.05)
@@ -839,13 +1079,18 @@ class UserAudioRelayTrack(AudioStreamTrack):
             frame.pts = self._pts
             self._pts += frame.samples
 
-            if self._frame_count % 500 == 1:
-                logger.info("UserAudioRelayTrack %s->%s: frame %d",
+            if self._frame_count % 100 == 1:  # More frequent logging for debugging
+                logger.info("UserAudioRelayTrack %s->%s: received frame %d",
                            self.source_user_key, self.target_user_key, self._frame_count)
 
             return frame
         except asyncio.TimeoutError:
             # No frame available, return silence
+            self._silence_count += 1
+            if self._silence_count <= 5 or self._silence_count % 500 == 0:
+                logger.info("UserAudioRelayTrack %s->%s: silence %d (no frames in queue)",
+                           self.source_user_key, self.target_user_key, self._silence_count)
+
             if self._silence_frame is None:
                 # Create a silence frame (960 samples of stereo silence at 48kHz)
                 silence = np.zeros((1, 1920), dtype=np.int16)
@@ -863,6 +1108,12 @@ class UserAudioRelayTrack(AudioStreamTrack):
 
 # Per-user audio broadcasters (key: user_pc_key like "rosmaster1:user@email.com:client_id")
 user_audio_broadcasters: Dict[str, UserAudioBroadcaster] = {}
+
+# Per-user audio slot tracks (key: user_pc_key, value: list of GroupAudioSlotTrack)
+# These are created during initial connection and can be connected to broadcasters later
+user_audio_slots: Dict[str, list] = {}
+
+NUM_GROUP_AUDIO_SLOTS = 4  # Number of audio slots per user (for hearing up to 4 other users)
 
 
 def get_or_create_user_broadcaster(user_key: str, robot_id: str) -> UserAudioBroadcaster:
@@ -908,16 +1159,91 @@ def notify_browser_to_reconnect(target_user_key: str) -> bool:
     return True
 
 
+def request_browser_renegotiation(target_user_key: str) -> bool:
+    """Ask browser to send a new offer for renegotiation (browser-initiated).
+
+    This avoids ICE role conflicts by keeping the browser as the offerer.
+    The server will add pending tracks when processing the browser's offer.
+    """
+    import time
+
+    # Rate limit: don't send requests too frequently to the same user
+    now = time.time()
+    last_request = last_renegotiation_request.get(target_user_key, 0)
+    if now - last_request < RENEGOTIATION_COOLDOWN:
+        logger.info("Skipping renegotiation request to %s: cooldown (%.1fs remaining)",
+                   target_user_key, RENEGOTIATION_COOLDOWN - (now - last_request))
+        return True  # Return True to stop retries - track is queued, will be added later
+
+    # Check control channel is ready
+    control_channel = user_control_channels.get(target_user_key)
+    if not control_channel or control_channel.readyState != "open":
+        logger.warning("Cannot request renegotiation from %s: control channel not open", target_user_key)
+        return False
+
+    # Check target user's PC is connected and in stable signaling state
+    target_pc = browser_user_pcs.get(target_user_key)
+    if not target_pc:
+        logger.warning("Cannot request renegotiation from %s: no PC", target_user_key)
+        return False
+    if target_pc.connectionState != "connected":
+        logger.warning("Cannot request renegotiation from %s: PC not connected (state=%s)",
+                      target_user_key, target_pc.connectionState)
+        return False
+    if target_pc.signalingState != "stable":
+        logger.warning("Cannot request renegotiation from %s: signaling not stable (state=%s)",
+                      target_user_key, target_pc.signalingState)
+        return False
+
+    # Update last request time
+    last_renegotiation_request[target_user_key] = now
+
+    # Tell browser how many new transceivers to create
+    pending_count = len(pending_relayed_audio.get(target_user_key, []))
+    msg = json.dumps({
+        "type": "renegotiate_request",
+        "reason": "new_audio_tracks",
+        "new_track_count": pending_count
+    })
+    control_channel.send(msg)
+    logger.info("Requested renegotiation from %s for %d new audio tracks", target_user_key, pending_count)
+    return True
+
+
 def add_pending_tracks_to_pc(user_pc_key: str, pc: RTCPeerConnection) -> int:
     """Add any pending audio tracks to a PC. Called when browser sends renegotiation offer."""
     broadcasters = pending_audio_tracks.pop(user_pc_key, [])
+    if broadcasters:
+        logger.info("Processing %d pending tracks for %s", len(broadcasters), user_pc_key)
+
+    # Find available audio transceivers (recvonly without sender track = browser wants to receive)
+    available_transceivers = []
+    for trans in pc.getTransceivers():
+        if trans.kind == "audio" and trans.sender.track is None:
+            available_transceivers.append(trans)
+    logger.info("Found %d available audio transceivers for %s", len(available_transceivers), user_pc_key)
+
     added = 0
     for broadcaster in broadcasters:
         try:
             queue = broadcaster.subscribe()
             relay_track = UserAudioRelayTrack(queue, broadcaster.user_key, user_pc_key)
-            pc.addTrack(relay_track)
-            logger.info("Added pending track %s -> %s", broadcaster.user_key, user_pc_key)
+
+            if available_transceivers:
+                # Bind to existing transceiver
+                trans = available_transceivers.pop(0)
+                trans.sender.replaceTrack(relay_track)
+                # Change direction to sendonly so we send to browser
+                trans.direction = "sendonly"
+                logger.info("Bound pending track %s -> %s to transceiver (broadcaster has %d subscribers, track_id=%s)",
+                           broadcaster.user_key, user_pc_key,
+                           len(broadcaster._subscribers), relay_track.id)
+            else:
+                # Fallback: add new track (creates new transceiver)
+                pc.addTrack(relay_track)
+                logger.info("Added pending track %s -> %s (new transceiver, broadcaster has %d subscribers, track_id=%s)",
+                           broadcaster.user_key, user_pc_key,
+                           len(broadcaster._subscribers), relay_track.id)
             added += 1
         except Exception as e:
             logger.error("Failed to add pending track %s -> %s: %s",
@@ -925,8 +1251,30 @@ def add_pending_tracks_to_pc(user_pc_key: str, pc: RTCPeerConnection) -> int:
     return added
 
 
-async def notify_existing_users_of_new_user(robot_id: str, new_user_key: str) -> None:
-    """When a new user joins, notify existing users to reconnect to get the new audio track."""
+def add_pending_tracks_to_pc_simple(user_pc_key: str, pc: RTCPeerConnection) -> int:
+    """Add pending audio tracks using simple addTrack (before setRemoteDescription)."""
+    broadcasters = pending_audio_tracks.pop(user_pc_key, [])
+    if broadcasters:
+        logger.info("Processing %d pending tracks (simple) for %s", len(broadcasters), user_pc_key)
+
+    added = 0
+    for broadcaster in broadcasters:
+        try:
+            queue = broadcaster.subscribe()
+            relay_track = UserAudioRelayTrack(queue, broadcaster.user_key, user_pc_key)
+            pc.addTrack(relay_track)
+            logger.info("Added pending track (simple) %s -> %s (broadcaster has %d subscribers, track_id=%s)",
+                       broadcaster.user_key, user_pc_key,
+                       len(broadcaster._subscribers), relay_track.id)
+            added += 1
+        except Exception as e:
+            logger.error("Failed to add pending track %s -> %s: %s",
+                        broadcaster.user_key, user_pc_key, e)
+    return added
+
+
+async def queue_new_user_audio_for_existing_users(robot_id: str, new_user_key: str) -> None:
+    """Connect new user's audio broadcaster to existing users' audio slots."""
     new_broadcaster = user_audio_broadcasters.get(new_user_key)
     if not new_broadcaster:
         logger.warning("No broadcaster for new user %s", new_user_key)
@@ -938,11 +1286,42 @@ async def notify_existing_users_of_new_user(robot_id: str, new_user_key: str) ->
         if key.startswith(f"{robot_id}:") and key != new_user_key
     ]
 
-    logger.info("Notifying %d existing users to reconnect for new user %s", len(other_users), new_user_key)
-
-    # Notify each existing user to reconnect (they'll get all audio tracks on reconnect)
+    # Connect new user's broadcaster to existing users' available audio slots
+    connected_count = 0
     for user_key in other_users:
-        notify_browser_to_reconnect(user_key)
+        slots = user_audio_slots.get(user_key, [])
+        # Find an empty slot
+        for slot in slots:
+            if slot._queue is None:
+                # Subscribe to the new broadcaster and connect to this slot
+                queue = new_broadcaster.subscribe()
+                slot.connect_broadcaster(queue, new_user_key)
+                connected_count += 1
+                break  # Only need one slot per user
+        else:
+            logger.warning("No available audio slots for user %s to hear %s", user_key, new_user_key)
+
+    if connected_count > 0:
+        logger.info("Connected %s's audio to %d existing users' slots", new_user_key, connected_count)
+    else:
+        logger.info("No existing users to connect %s's audio to", new_user_key)
+
+
+async def request_renegotiation_with_retry(user_key: str, max_retries: int = 5) -> None:
+    """Request browser renegotiation with retry logic."""
+    for attempt in range(max_retries):
+        if request_browser_renegotiation(user_key):
+            return  # Success
+        # Wait before retry, with exponential backoff
+        delay = 0.5 * (2 ** attempt)  # 0.5s, 1s, 2s, 4s, 8s
+        logger.info("Renegotiation request to %s failed (attempt %d/%d), retrying in %.1fs",
+                   user_key, attempt + 1, max_retries, delay)
+        await asyncio.sleep(delay)
+        # Check if user is still connected
+        if user_key not in browser_user_pcs:
+            logger.info("User %s disconnected, cancelling renegotiation retry", user_key)
+            return
+    logger.warning("Failed to request renegotiation from %s after %d attempts", user_key, max_retries)
 
 
 async def add_existing_users_audio_to_new_user(robot_id: str, new_user_key: str) -> None:
@@ -950,6 +1329,161 @@ async def add_existing_users_audio_to_new_user(robot_id: str, new_user_key: str)
     # Existing users' audio tracks are added during initial connection (pc.addTrack)
     # This function is kept for compatibility but does nothing
     logger.info("Existing users' audio already added during initial connection for %s", new_user_key)
+
+
+# Track relayed user audio subscriptions per connection: {target_user_key: {source_user_key: relayed_track}}
+user_audio_relays: Dict[str, Dict[str, MediaStreamTrack]] = {}
+# Track pending relayed audio tracks to add during renegotiation
+pending_relayed_audio: Dict[str, list] = {}  # {target_user_key: [(source_user_key, relayed_track)]}
+
+
+class LoggingRelayTrack(AudioStreamTrack):
+    """Wrapper around a MediaRelay track that logs RMS values for debugging."""
+
+    kind = "audio"
+
+    def __init__(self, source_track: MediaStreamTrack, source_user: str, target_user: str) -> None:
+        super().__init__()
+        self._source = source_track
+        self._source_user = source_user
+        self._target_user = target_user
+        self._frame_count = 0
+        self._last_log_time = 0
+        logger.info("LoggingRelayTrack created: %s -> %s", source_user, target_user)
+
+    async def recv(self) -> AudioFrame:
+        frame = await self._source.recv()
+        self._frame_count += 1
+
+        # Log RMS periodically or when audio is loud
+        import time
+        now = time.time()
+        try:
+            arr = frame.to_ndarray()
+            rms = np.sqrt(np.mean(arr.astype(np.float32)**2))
+
+            # Log every 5 seconds or if RMS > 100 (actual speech)
+            if now - self._last_log_time >= 5.0 or (rms > 100 and now - self._last_log_time >= 0.5):
+                logger.info("LoggingRelayTrack %s->%s: frame %d, rms=%.1f, samples=%d",
+                           self._source_user, self._target_user, self._frame_count, rms, frame.samples)
+                self._last_log_time = now
+        except Exception:
+            pass
+
+        return frame
+
+
+async def relay_new_user_audio_to_existing_users(robot_id: str, new_user_key: str) -> None:
+    """Relay new user's audio to existing users via MediaRelay + browser-initiated renegotiation.
+
+    This is the proper approach using aiortc's MediaRelay:
+    1. Get the actual incoming audio track from the new user
+    2. Use media_relay.subscribe() to create relayed copies (aiortc properly consumes these)
+    3. Add relayed tracks to existing users' PCs
+    4. Request browser-initiated renegotiation from each existing user
+    """
+    # Get the new user's incoming audio track
+    source_track = user_incoming_audio_tracks.get(new_user_key)
+    if not source_track:
+        logger.warning("No incoming audio track for new user %s", new_user_key)
+        return
+
+    # Find all other users connected to this robot
+    other_users = [
+        key for key in browser_user_pcs.keys()
+        if key.startswith(f"{robot_id}:") and key != new_user_key
+    ]
+
+    if not other_users:
+        logger.info("No other users to relay %s's audio to", new_user_key)
+        return
+
+    logger.info("Relaying %s's audio to %d existing users via MediaRelay", new_user_key, len(other_users))
+
+    for target_user_key in other_users:
+        target_pc = browser_user_pcs.get(target_user_key)
+        if not target_pc:
+            logger.warning("No PC for target user %s", target_user_key)
+            continue
+
+        # Check if we already have a relay for this source->target pair
+        if target_user_key not in user_audio_relays:
+            user_audio_relays[target_user_key] = {}
+        if new_user_key in user_audio_relays[target_user_key]:
+            logger.info("Already have relay %s -> %s, skipping", new_user_key, target_user_key)
+            continue
+
+        try:
+            # Create a relayed copy via MediaRelay (this is what makes aiortc properly consume the track)
+            relayed_track = media_relay.subscribe(source_track)
+            user_audio_relays[target_user_key][new_user_key] = relayed_track
+            logger.info("Created MediaRelay subscription: %s -> %s (track_id=%s)",
+                       new_user_key, target_user_key, relayed_track.id)
+
+            # Queue this track to be added during renegotiation
+            if target_user_key not in pending_relayed_audio:
+                pending_relayed_audio[target_user_key] = []
+            pending_relayed_audio[target_user_key].append((new_user_key, relayed_track))
+
+            # Request browser-initiated renegotiation
+            asyncio.ensure_future(request_renegotiation_with_retry(target_user_key))
+
+        except Exception as e:
+            logger.error("Failed to create MediaRelay subscription %s -> %s: %s",
+                        new_user_key, target_user_key, e)
+
+
+def add_pending_relayed_audio_to_pc(user_pc_key: str, pc: RTCPeerConnection) -> int:
+    """Add pending relayed audio tracks to a PC during renegotiation.
+
+    Called AFTER setRemoteDescription when browser sends a renegotiation offer.
+    Browser added recvonly transceivers - we find those with empty senders and
+    use replaceTrack() to attach our audio tracks.
+    """
+    pending = pending_relayed_audio.pop(user_pc_key, [])
+    if not pending:
+        return 0
+
+    logger.info("Adding %d pending relayed audio tracks for %s", len(pending), user_pc_key)
+
+    # Find audio transceivers with empty senders (browser's recvonly transceivers)
+    # After setRemoteDescription, these exist but have no track on the sender
+    available_transceivers = []
+    for trans in pc.getTransceivers():
+        if trans.kind == "audio" and trans.sender.track is None:
+            available_transceivers.append(trans)
+            logger.info("Found available audio transceiver: direction=%s, mid=%s",
+                       trans.direction, trans.mid)
+
+    if len(available_transceivers) < len(pending):
+        logger.warning("Not enough transceivers: have %d, need %d",
+                      len(available_transceivers), len(pending))
+
+    added = 0
+    for i, (source_user_key, relayed_track) in enumerate(pending):
+        if i >= len(available_transceivers):
+            logger.warning("No transceiver available for track from %s", source_user_key)
+            # Put it back for next renegotiation
+            if user_pc_key not in pending_relayed_audio:
+                pending_relayed_audio[user_pc_key] = []
+            pending_relayed_audio[user_pc_key].append((source_user_key, relayed_track))
+            continue
+
+        trans = available_transceivers[i]
+        try:
+            # Use replaceTrack on the sender - this attaches our track to the
+            # transceiver the browser created
+            trans.sender.replaceTrack(relayed_track)
+            # Set direction to sendonly so aiortc will actually send frames
+            # Browser's recvonly means we (server) should send
+            trans.direction = "sendonly"
+            logger.info("Attached relayed audio track %s -> %s via replaceTrack (mid=%s, track_id=%s, dir=%s)",
+                       source_user_key, user_pc_key, trans.mid, relayed_track.id, trans.direction)
+            added += 1
+        except Exception as e:
+            logger.error("Failed to attach relayed audio track %s -> %s: %s",
+                        source_user_key, user_pc_key, e)
+    return added
 
 
 class GroupAudioRelayTrack(AudioStreamTrack):
@@ -1516,7 +2050,7 @@ class BotOut(BaseModel):
 
 class LobbyDetailOut(LobbyOut):
     bots: list[BotOut]
-    virtual_players: list[VirtualPlayerOut] = []
+    virtual_players: list["VirtualPlayerOut"] = []
 
 
 class RobotCommandOut(BaseModel):
@@ -1608,6 +2142,10 @@ class VirtualPlayerOut(BaseModel):
     color: str
     created_at: datetime
     is_deleted: bool
+
+
+# Rebuild LobbyDetailOut to resolve forward reference to VirtualPlayerOut
+LobbyDetailOut.model_rebuild()
 
 
 class VirtualWorldOut(BaseModel):
@@ -2651,6 +3189,11 @@ async def prepare_database(max_attempts: int = 60, delay: int = 5) -> None:
                 )
                 await conn.execute(
                     text(
+                        "ALTER TABLE lobbies ADD COLUMN IF NOT EXISTS is_virtual BOOLEAN NOT NULL DEFAULT false"
+                    )
+                )
+                await conn.execute(
+                    text(
                         "ALTER TABLE bots ADD COLUMN IF NOT EXISTS is_deleted BOOLEAN NOT NULL DEFAULT false"
                     )
                 )
@@ -3006,7 +3549,7 @@ async def debug_memory() -> dict[str, Any]:
         "robot_audio_broadcasters": len(robot_audio_broadcasters),
         "hop1_telemetry_channels": len(hop1_telemetry_channels),
         "hop1_control_channels": len(hop1_control_channels),
-        "hop1_map_channels": len(hop1_map_channels),
+        "hop1_scan_channels": len(hop1_scan_channels),
         "hop2_telemetry_channels": {k: len(v) for k, v in hop2_telemetry_channels.items()},
         "hop2_control_channels": {k: len(v) for k, v in hop2_control_channels.items()},
         "hop2_map_channels": {k: len(v) for k, v in hop2_map_channels.items()},
@@ -3621,7 +4164,7 @@ async def handle_forwarder_offer(ws: WebSocket, message: dict) -> None:
     # Clean up old data channels
     hop1_telemetry_channels.pop(robot, None)
     hop1_control_channels.pop(robot, None)
-    hop1_map_channels.pop(robot, None)
+    hop1_scan_channels.pop(robot, None)
 
     pc = RTCPeerConnection()
     robot_forwarder_pcs[robot] = pc
@@ -3658,7 +4201,6 @@ async def handle_forwarder_offer(ws: WebSocket, message: dict) -> None:
 
             @channel.on("message")
             def on_telemetry_message(message: str) -> None:
-                """Relay telemetry from ros-bridge to all connected browsers."""
                 _relay_telemetry_to_browsers(robot, message)
 
             @channel.on("open")
@@ -3670,22 +4212,45 @@ async def handle_forwarder_offer(ws: WebSocket, message: dict) -> None:
                 logger.info("SFU Hop1: telemetry data channel closed for %s", robot)
                 hop1_telemetry_channels.pop(robot, None)
 
-        elif channel.label == "map":
-            hop1_map_channels[robot] = channel
+        elif channel.label == "scan":
+            hop1_scan_channels[robot] = channel
+            logger.info("SFU Hop1: scan channel received for %s, state=%s", robot, channel.readyState)
+
+            # Create SLAM processor for this robot if not exists
+            if robot not in slam_processors:
+                slam_processors[robot] = SlamProcessor(robot)
+                logger.info("SFU Hop1: created SlamProcessor for %s", robot)
+
+            # Create the handler once with closure over robot
+            scan_count = [0]
 
             @channel.on("message")
-            def on_map_message(message: str) -> None:
-                """Relay map data from ros-bridge to all connected browsers."""
-                _relay_map_to_browsers(robot, message)
+            def on_scan_message(message: str) -> None:
+                scan_count[0] += 1
+                if scan_count[0] <= 3 or scan_count[0] % 100 == 0:
+                    logger.info("SFU Hop1: received scan message %d for %s (len=%d)",
+                                scan_count[0], robot, len(message))
+                try:
+                    scan_data = json.loads(message)
+                    processor = slam_processors.get(robot)
+                    if processor:
+                        map_update = processor.process_scan(scan_data)
+                        if map_update:
+                            logger.info("SFU Hop1: sending map update for %s (scan %d)", robot, processor.scan_count)
+                            _relay_map_to_browsers(robot, json.dumps(map_update))
+                    else:
+                        logger.warning("SFU Hop1: no SLAM processor for %s", robot)
+                except Exception as e:
+                    logger.warning("SFU Hop1: scan processing error for %s: %s", robot, e, exc_info=True)
 
             @channel.on("open")
-            def on_map_open() -> None:
-                logger.info("SFU Hop1: map data channel open for %s", robot)
+            def on_scan_open() -> None:
+                logger.info("SFU Hop1: scan data channel open for %s", robot)
 
             @channel.on("close")
-            def on_map_close() -> None:
-                logger.info("SFU Hop1: map data channel closed for %s", robot)
-                hop1_map_channels.pop(robot, None)
+            def on_scan_close() -> None:
+                logger.info("SFU Hop1: scan data channel closed for %s", robot)
+                hop1_scan_channels.pop(robot, None)
 
     @pc.on("connectionstatechange")
     async def on_state() -> None:
@@ -3704,7 +4269,7 @@ async def handle_forwarder_offer(ws: WebSocket, message: dict) -> None:
             # Clean up data channels
             hop1_telemetry_channels.pop(robot, None)
             hop1_control_channels.pop(robot, None)
-            hop1_map_channels.pop(robot, None)
+            hop1_scan_channels.pop(robot, None)
             hop2_telemetry_channels.pop(robot, None)
             hop2_control_channels.pop(robot, None)
             hop2_map_channels.pop(robot, None)
@@ -3830,13 +4395,21 @@ async def _handle_browser_offer_inner(
         logger.info("SFU Hop2: renegotiating for %s (user=%s)", robot_id, current_user.email)
         pc = existing_pc
         try:
-            # Add any pending audio tracks before processing the offer
-            added_tracks = add_pending_tracks_to_pc(user_pc_key, pc)
-            if added_tracks > 0:
-                logger.info("SFU Hop2: added %d pending tracks during renegotiation for %s",
-                           added_tracks, user_pc_key)
-
+            # First set remote description to parse browser's offer and create transceivers
             await pc.setRemoteDescription(RTCSessionDescription(sdp=offer.sdp, type=offer.type))
+
+            # Now bind pending relayed audio tracks to the transceivers browser created
+            added_relayed = add_pending_relayed_audio_to_pc(user_pc_key, pc)
+            if added_relayed > 0:
+                logger.info("SFU Hop2: bound %d pending relayed audio tracks during renegotiation for %s",
+                           added_relayed, user_pc_key)
+
+            # Log transceiver state after binding
+            for i, trans in enumerate(pc.getTransceivers()):
+                logger.info("SFU Hop2: transceiver %d - kind=%s, direction=%s, sender.track=%s",
+                           i, trans.kind, trans.direction,
+                           trans.sender.track.id if trans.sender.track else None)
+
             answer = await pc.createAnswer()
             await pc.setLocalDescription(answer)
             return {"sdp": pc.localDescription.sdp, "type": pc.localDescription.type}
@@ -3906,6 +4479,10 @@ async def _handle_browser_offer_inner(
                    track.kind, robot_id, current_user.email, track.id)
         if track.kind == "audio":
             logger.info("SFU Hop2: starting audio forwarding for %s (user=%s)", robot_id, current_user.email)
+            # Store the actual track for MediaRelay (for group audio to other users)
+            user_incoming_audio_tracks[user_pc_key] = track
+            logger.info("SFU Hop2: stored user audio track for %s (id=%s)", user_pc_key, track.id)
+
             # Cancel any existing forwarding task for this user
             old_task = browser_audio_forward_tasks.pop(user_pc_key, None)
             if old_task and not old_task.done():
@@ -3914,6 +4491,9 @@ async def _handle_browser_offer_inner(
             # Start new forwarding task (pass user_key for group audio)
             task = asyncio.ensure_future(_forward_browser_audio(robot_id, track, user_pc_key))
             browser_audio_forward_tasks[user_pc_key] = task
+
+            # Relay this user's audio to existing users via browser-initiated renegotiation
+            asyncio.ensure_future(relay_new_user_audio_to_existing_users(robot_id, user_pc_key))
 
     @pc.on("datachannel")
     def on_browser_datachannel(channel: RTCDataChannel) -> None:
@@ -4001,20 +4581,27 @@ async def _handle_browser_offer_inner(
                 # Broadcast updated speaker state
                 asyncio.create_task(broadcast_speaker_state(robot_id))
 
+    # Track if we've already handled the "connected" state for this PC
+    pc_connected_handled = False
+    pc_id = id(pc)  # Unique ID for this PC for logging
+
     @pc.on("connectionstatechange")
     async def on_state() -> None:
+        nonlocal pc_connected_handled
         state = pc.connectionState
-        logger.info("SFU Hop2 state for %s: %s (pcs=%d, viewers=%s)",
-                    robot_id, state, len(robot_browser_pcs.get(robot_id, [])),
-                    active_robot_streams.get(robot_id))
-        if state == "connected":
-            # New user fully connected - set up bidirectional group audio
-            # Wait for data channels to be fully ready
-            await asyncio.sleep(1.0)
-            # 1. Add existing users' audio tracks to this new user
-            asyncio.create_task(add_existing_users_audio_to_new_user(robot_id, user_pc_key))
-            # 2. Add this new user's audio track to all existing users
-            asyncio.create_task(notify_existing_users_of_new_user(robot_id, user_pc_key))
+        logger.info("SFU Hop2 state for %s (pc=%d): %s (pcs=%d, handled=%s, pairs=%s)",
+                    user_pc_key, pc_id, state, len(robot_browser_pcs.get(robot_id, [])),
+                    pc_connected_handled, list(introduced_user_pairs.get(robot_id, set())))
+        if state == "connected" and not pc_connected_handled:
+            pc_connected_handled = True
+            logger.info("SFU Hop2: FIRST connected for %s (pc=%d), will queue audio",
+                       user_pc_key, pc_id)
+            # New user fully connected - existing users' audio is added during initial connection
+            # via MediaRelay. New user's audio is relayed to existing users when they enable mic
+            # (handled in on_browser_track via relay_new_user_audio_to_existing_users)
+            pass
+        elif state == "connected" and pc_connected_handled:
+            logger.info("SFU Hop2: repeated connected for %s (pc=%d), skipping", user_pc_key, pc_id)
         elif state in ("failed", "closed", "disconnected"):
             pcs = robot_browser_pcs.get(robot_id, [])
             if pc in pcs:
@@ -4038,6 +4625,27 @@ async def _handle_browser_offer_inner(
                     if broadcaster:
                         broadcaster.stop()
                         logger.info("Cleaned up broadcaster for %s after delay", user_pc_key)
+                    # Clean up audio slots
+                    slots = user_audio_slots.pop(user_pc_key, None)
+                    if slots:
+                        logger.info("Cleaned up %d audio slots for %s", len(slots), user_pc_key)
+                    # Clean up user's incoming audio track
+                    user_incoming_audio_tracks.pop(user_pc_key, None)
+                    # Clean up relayed tracks for this user
+                    user_audio_relays.pop(user_pc_key, None)
+                    # Clean up pending relayed audio for this user
+                    pending_relayed_audio.pop(user_pc_key, None)
+                    # Clean up relayed tracks where this user is the source
+                    for target_key in list(user_audio_relays.keys()):
+                        if user_pc_key in user_audio_relays.get(target_key, {}):
+                            user_audio_relays[target_key].pop(user_pc_key, None)
+                    logger.info("Cleaned up audio relays for %s", user_pc_key)
+                    # Clean up introduced pairs for this user so fresh connections work
+                    pairs_to_remove = [p for p in introduced_user_pairs[robot_id] if user_pc_key in p]
+                    for pair in pairs_to_remove:
+                        introduced_user_pairs[robot_id].discard(pair)
+                    if pairs_to_remove:
+                        logger.info("Cleaned up %d introduced pairs for %s", len(pairs_to_remove), user_pc_key)
             asyncio.create_task(delayed_broadcaster_cleanup())
             # Clean up user from group audio mixer and control aggregator
             mixer = group_audio_mixers.get(robot_id)
@@ -4069,19 +4677,30 @@ async def _handle_browser_offer_inner(
     # Create this user's audio broadcaster (for when they send audio to group)
     get_or_create_user_broadcaster(user_pc_key, robot_id)
 
-    # Add existing users' audio tracks (browser has extra recvonly audio transceivers for this)
-    other_broadcasters = get_other_user_broadcasters(robot_id, user_pc_key)
-    for broadcaster in other_broadcasters:
+    # Add existing users' audio tracks via MediaRelay (proper approach that aiortc consumes)
+    # Find other users who have incoming audio tracks for this robot
+    other_user_audio_tracks = [
+        (key, track) for key, track in user_incoming_audio_tracks.items()
+        if key.startswith(f"{robot_id}:") and key != user_pc_key
+    ]
+    logger.info("SFU Hop2: found %d other users with audio tracks for %s", len(other_user_audio_tracks), user_pc_key)
+
+    # Initialize relay tracking for this user
+    if user_pc_key not in user_audio_relays:
+        user_audio_relays[user_pc_key] = {}
+
+    # Add relayed audio tracks for each existing user (up to NUM_GROUP_AUDIO_SLOTS)
+    for source_user_key, source_track in other_user_audio_tracks[:NUM_GROUP_AUDIO_SLOTS]:
         try:
-            queue = broadcaster.subscribe()
-            relay_track = UserAudioRelayTrack(queue, broadcaster.user_key, user_pc_key)
-            pc.addTrack(relay_track)
-            logger.info("SFU Hop2: added user audio track %s -> %s", broadcaster.user_key, user_pc_key)
+            # Create a relayed copy via MediaRelay
+            relayed_track = media_relay.subscribe(source_track)
+            user_audio_relays[user_pc_key][source_user_key] = relayed_track
+            pc.addTrack(relayed_track)
+            logger.info("SFU Hop2: added relayed audio track %s -> %s (track_id=%s)",
+                       source_user_key, user_pc_key, relayed_track.id)
         except Exception as e:
-            logger.error("SFU Hop2: failed to add user audio track %s -> %s: %s",
-                        broadcaster.user_key, user_pc_key, e)
-    logger.info("SFU Hop2: added %d user audio tracks for %s (user=%s)",
-               len(other_broadcasters), robot_id, current_user.email)
+            logger.error("SFU Hop2: failed to add relayed audio track %s -> %s: %s",
+                        source_user_key, user_pc_key, e)
 
     # Create telemetry data channel to send to browser
     telemetry_channel = pc.createDataChannel("telemetry", ordered=False)

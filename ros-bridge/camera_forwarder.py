@@ -22,9 +22,8 @@ from rclpy.node import Node
 from rclpy.publisher import Publisher
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 from rclpy.subscription import Subscription
-from sensor_msgs.msg import Image
+from sensor_msgs.msg import Image, LaserScan
 from std_msgs.msg import String, UInt8MultiArray, Int32MultiArray
-from nav_msgs.msg import OccupancyGrid
 import base64
 
 
@@ -37,6 +36,13 @@ _AUDIO_QOS = QoSProfile(
     reliability=ReliabilityPolicy.BEST_EFFORT,
     history=HistoryPolicy.KEEP_LAST,
     depth=1,
+)
+
+# QoS for lidar scan - match ydlidar publisher (BEST_EFFORT, VOLATILE)
+_SCAN_QOS = QoSProfile(
+    reliability=ReliabilityPolicy.BEST_EFFORT,
+    history=HistoryPolicy.KEEP_LAST,
+    depth=5,
 )
 _DISCOVERY_INTERVAL = 3.0
 
@@ -236,8 +242,8 @@ class RobotBridgeNode(Node):
         self.audio_streaming_robots: Set[str] = set()
 
         # Map handling
-        self.map_subscriptions: Dict[str, Subscription] = {}
-        self._map_channels: Dict[str, RTCDataChannel] = {}
+        self.scan_subscriptions: Dict[str, Subscription] = {}
+        self._scan_channels: Dict[str, RTCDataChannel] = {}
 
         # SFU: one track and one PC per robot (forwarder -> server)
         self._video_tracks: Dict[str, RosVideoTrack] = {}
@@ -351,13 +357,14 @@ class RobotBridgeNode(Node):
             _AUDIO_QOS,
         )
 
-        # Subscribe to map topic for SLAM minimap
-        map_topic = f"/{robot}/map"
-        self.map_subscriptions[robot] = self.create_subscription(
-            OccupancyGrid,
-            map_topic,
-            lambda msg, ns=robot: self._handle_map(ns, msg),
-            10,
+        # Subscribe to scan topic for SLAM (processed on API server)
+        # Use BEST_EFFORT QoS to match LIDAR publisher
+        scan_topic = f"/{robot}/scan"
+        self.scan_subscriptions[robot] = self.create_subscription(
+            LaserScan,
+            scan_topic,
+            lambda msg, ns=robot: self._handle_scan(ns, msg),
+            _SCAN_QOS,
         )
 
         if not self._ice_servers_fetched:
@@ -366,7 +373,7 @@ class RobotBridgeNode(Node):
         asyncio.run_coroutine_threadsafe(
             self._create_forwarder_offer(robot, video_track, audio_track), self._aio_loop
         )
-        self.get_logger().info(f"Started streaming {topic} + {audio_topic} + {map_topic}")
+        self.get_logger().info(f"Started streaming {topic} + {audio_topic} + {scan_topic}")
 
     def _send_reset_commands(self, robot: str) -> None:
         """Send reset commands to stop robot movement and center camera when streaming stops."""
@@ -403,9 +410,9 @@ class RobotBridgeNode(Node):
         audio_sub = self.audio_subscriptions.pop(robot, None)
         if audio_sub:
             self.destroy_subscription(audio_sub)
-        map_sub = self.map_subscriptions.pop(robot, None)
-        if map_sub:
-            self.destroy_subscription(map_sub)
+        scan_sub = self.scan_subscriptions.pop(robot, None)
+        if scan_sub:
+            self.destroy_subscription(scan_sub)
         self.streaming_robots.discard(robot)
         pc = self._peer_connections.pop(robot, None)
         if pc:
@@ -415,8 +422,8 @@ class RobotBridgeNode(Node):
         # Clean up data channels
         self._telemetry_channels.pop(robot, None)
         self._control_channels.pop(robot, None)
-        self._map_channels.pop(robot, None)
-        self.get_logger().info(f"Stopped streaming /{robot}/camera/image_raw + audio + map")
+        self._scan_channels.pop(robot, None)
+        self.get_logger().info(f"Stopped streaming /{robot}/camera/image_raw + audio + scan")
 
     def _handle_audio_webrtc(self, robot_id: str, msg: UInt8MultiArray) -> None:
         """Push incoming robot audio to the WebRTC audio track."""
@@ -432,40 +439,43 @@ class RobotBridgeNode(Node):
                 )
             track.push_audio(bytes(msg.data))
 
-    def _handle_map(self, robot_id: str, msg: OccupancyGrid) -> None:
-        """Send map data via data channel for minimap display."""
-        channel = self._map_channels.get(robot_id)
+    def _handle_scan(self, robot_id: str, msg: LaserScan) -> None:
+        """Send LaserScan data via data channel for SLAM processing on API server."""
+        channel = self._scan_channels.get(robot_id)
         if not channel or channel.readyState != "open":
             return
 
-        # OccupancyGrid.data is int8[] with values -1 (unknown), 0 (free), 100 (occupied)
-        # Convert to uint8: -1 -> 0, 0 -> 1, 100 -> 101 (add 1 to shift range)
-        map_bytes = bytes([(v + 1) & 0xFF for v in msg.data])
-        map_b64 = base64.b64encode(map_bytes).decode('ascii')
+        # Convert ranges to compact format (float32 array -> base64)
+        # Filter out inf/nan values, replace with max_range
+        ranges = np.array(msg.ranges, dtype=np.float32)
+        ranges = np.where(np.isfinite(ranges), ranges, msg.range_max)
+        ranges_b64 = base64.b64encode(ranges.tobytes()).decode('ascii')
 
         payload = {
-            "type": "map_update",
-            "width": msg.info.width,
-            "height": msg.info.height,
-            "resolution": msg.info.resolution,
-            "origin_x": msg.info.origin.position.x,
-            "origin_y": msg.info.origin.position.y,
-            "data": map_b64,
+            "type": "scan",
+            "timestamp": msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9,
+            "angle_min": msg.angle_min,
+            "angle_max": msg.angle_max,
+            "angle_increment": msg.angle_increment,
+            "range_min": msg.range_min,
+            "range_max": msg.range_max,
+            "ranges": ranges_b64,
         }
 
         try:
-            channel.send(json.dumps(payload))
-            # Log occasionally
-            if not hasattr(self, '_map_count'):
-                self._map_count = {}
-            self._map_count[robot_id] = self._map_count.get(robot_id, 0) + 1
-            if self._map_count[robot_id] % 10 == 1:
+            json_payload = json.dumps(payload)
+            # Must send from asyncio event loop - schedule it
+            self._aio_loop.call_soon_threadsafe(channel.send, json_payload)
+            if not hasattr(self, '_scan_count'):
+                self._scan_count = {}
+            self._scan_count[robot_id] = self._scan_count.get(robot_id, 0) + 1
+            if self._scan_count[robot_id] % 100 == 1:
                 self.get_logger().info(
-                    f"Map {self._map_count[robot_id]} for {robot_id}: "
-                    f"{msg.info.width}x{msg.info.height}, {len(map_b64)} bytes"
+                    f"Scan {self._scan_count[robot_id]} for {robot_id}: "
+                    f"{len(msg.ranges)} points, {len(ranges_b64)} bytes"
                 )
         except Exception as e:
-            self.get_logger().debug(f"Map channel send failed for {robot_id}: {e}")
+            self.get_logger().warning(f"Scan channel send failed for {robot_id}: {e}")
 
     # ── Frame handling ───────────────────────────────────────────────
 
@@ -554,7 +564,7 @@ class RobotBridgeNode(Node):
                 # Clean up data channels
                 self._telemetry_channels.pop(robot, None)
                 self._control_channels.pop(robot, None)
-                self._map_channels.pop(robot, None)
+                self._scan_channels.pop(robot, None)
                 # Critical: remove from streaming_robots so we can restart streaming
                 self.streaming_robots.discard(robot)
                 self.get_logger().info(f"Cleaned up streaming state for {robot}")
@@ -609,18 +619,18 @@ class RobotBridgeNode(Node):
             self.get_logger().info(f"Telemetry data channel closed for {robot}")
             self._telemetry_channels.pop(robot, None)
 
-        # Create map data channel (robot -> browser, for SLAM minimap)
-        map_channel = pc.createDataChannel("map", ordered=False)
-        self._map_channels[robot] = map_channel
+        # Create scan data channel (robot -> API, for SLAM processing)
+        scan_channel = pc.createDataChannel("scan", ordered=False)
+        self._scan_channels[robot] = scan_channel
 
-        @map_channel.on("open")
-        def _on_map_open() -> None:
-            self.get_logger().info(f"Map data channel open for {robot}")
+        @scan_channel.on("open")
+        def _on_scan_open() -> None:
+            self.get_logger().info(f"Scan data channel open for {robot}")
 
-        @map_channel.on("close")
-        def _on_map_close() -> None:
-            self.get_logger().info(f"Map data channel closed for {robot}")
-            self._map_channels.pop(robot, None)
+        @scan_channel.on("close")
+        def _on_scan_close() -> None:
+            self.get_logger().info(f"Scan data channel closed for {robot}")
+            self._scan_channels.pop(robot, None)
 
         offer = await pc.createOffer()
         await pc.setLocalDescription(offer)
@@ -812,7 +822,8 @@ class RobotBridgeNode(Node):
         try:
             # Add type field for data channel protocol
             dc_payload = {"type": "telemetry", **payload}
-            channel.send(json.dumps(dc_payload))
+            # Must send from asyncio event loop - schedule it
+            self._aio_loop.call_soon_threadsafe(channel.send, json.dumps(dc_payload))
             # Log occasionally
             if not hasattr(self, "_dc_telemetry_count"):
                 self._dc_telemetry_count = {}

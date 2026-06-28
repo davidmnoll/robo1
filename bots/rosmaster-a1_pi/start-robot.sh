@@ -23,6 +23,7 @@ echo "ROBOT_ID=$ROBOT_ID ROS_DOMAIN_ID=$ROS_DOMAIN_ID"
 exec docker exec -e ROS_DOMAIN_ID="$ROS_DOMAIN_ID" -e ROBOT_ID="$ROBOT_ID" "$CONTAINER_NAME" bash -c "
     source /opt/ros/humble/setup.bash
     source /root/share/install/setup.bash 2>/dev/null || true
+    source /root/ydlidar_humble/install/setup.bash 2>/dev/null || true
     cd $CONTAINER_DIR
     ros2 launch rosmaster_robot robot.launch.py robot_id:=$ROBOT_ID
 "

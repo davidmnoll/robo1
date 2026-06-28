@@ -4,6 +4,12 @@ REMOTE_DIR ?= /home/pi/share/rosmaster
 ROBOT_ID ?= rosmaster1
 ROS_DOMAIN_ID ?= 61
 
+# Docker image settings
+REGISTRY ?= 192.168.2.51:5000
+BASE_IMAGE ?= $(REGISTRY)/ros-humble-a1:2.1.3
+IMAGE_NAME ?= $(REGISTRY)/ros-humble-a1
+IMAGE_TAG ?= 2.3.0
+
 .PHONY: help deploy restart stop logs status ssh shell
 
 help:
@@ -21,8 +27,15 @@ help:
 	@echo "Config: PI_HOST=$(PI_HOST) ROBOT_ID=$(ROBOT_ID)"
 
 deploy:
+	@echo "==> Stopping robot first..."
+	@ssh $(PI_HOST) "sudo systemctl stop rosmaster.service 2>/dev/null" || true
+	@sleep 1
+	@echo ""
 	@echo "==> Syncing code..."
-	@rsync -avz --filter=':- .gitignore' ./ $(PI_HOST):$(REMOTE_DIR)/
+	@rsync -avz --checksum --filter=':- .gitignore' ./ $(PI_HOST):$(REMOTE_DIR)/
+	@echo ""
+	@echo "==> Configuring Pi..."
+	@ssh $(PI_HOST) "chmod +x $(REMOTE_DIR)/setup/configure-pi.sh && $(REMOTE_DIR)/setup/configure-pi.sh"
 	@echo ""
 	@echo "==> Setting up udev rules..."
 	@ssh $(PI_HOST) "sudo cp $(REMOTE_DIR)/setup/99-rosmaster-serial.rules /etc/udev/rules.d/ 2>/dev/null && sudo udevadm control --reload-rules && sudo udevadm trigger" || true
@@ -35,13 +48,14 @@ deploy:
 	@echo "==> Building ROS package..."
 	@ssh $(PI_HOST) "docker exec rosmaster bash -c '\
 		source /opt/ros/humble/setup.bash && \
-		cd /root/share && colcon build --packages-select rosmaster_robot --symlink-install'"
+		cd /root/share && \
+		colcon build --packages-select rosmaster_robot --symlink-install'"
 	@echo ""
 	@echo "==> Installing service..."
 	@ssh $(PI_HOST) "sudo cp $(REMOTE_DIR)/rosmaster.service /etc/systemd/system/ && sudo systemctl daemon-reload && sudo systemctl enable rosmaster.service"
 	@echo ""
 	@echo "==> Starting robot..."
-	@ssh $(PI_HOST) "sudo systemctl restart rosmaster.service"
+	@ssh $(PI_HOST) "sudo systemctl start rosmaster.service"
 	@sleep 3
 	@$(MAKE) status --no-print-directory
 
@@ -92,3 +106,29 @@ dev-deploy: deploy
 	@echo "Robot code deployed. To connect to dev API:"
 	@echo "  1. Get dev IP: make -C ../.. dev-ip"
 	@echo "  2. Run: make dev-ros-bridge DEV_API_IP=<ip>"
+
+# =============================================================================
+# Docker Image Build (run on Pi for ARM64)
+# =============================================================================
+.PHONY: build-image push-image
+
+build-image:
+	@echo "==> Syncing Dockerfile to Pi..."
+	@rsync -avz Dockerfile $(PI_HOST):$(REMOTE_DIR)/
+	@echo ""
+	@echo "==> Building image on Pi (this may take a while)..."
+	@ssh $(PI_HOST) "cd $(REMOTE_DIR) && docker build --build-arg BASE_IMAGE=$(BASE_IMAGE) -t $(IMAGE_NAME):$(IMAGE_TAG) ."
+	@echo ""
+	@echo "Built $(IMAGE_NAME):$(IMAGE_TAG)"
+
+push-image:
+	@echo "==> Pushing image to registry..."
+	@ssh $(PI_HOST) "docker push $(IMAGE_NAME):$(IMAGE_TAG)"
+	@echo ""
+	@echo "Pushed $(IMAGE_NAME):$(IMAGE_TAG)"
+	@echo "Update run-container.sh to use this image"
+
+build-and-push: build-image push-image
+	@echo ""
+	@echo "Done! Update ROS_IMAGE in run-container.sh to:"
+	@echo "  $(IMAGE_NAME):$(IMAGE_TAG)"

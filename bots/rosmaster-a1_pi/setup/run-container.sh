@@ -6,7 +6,7 @@
 
 set -e
 
-IMAGE="${ROS_IMAGE:-192.168.2.51:5000/ros-humble-a1:2.1.3}"
+IMAGE="${ROS_IMAGE:-192.168.2.51:5000/ros-humble-a1:2.3.0}"
 CONTAINER_NAME="${CONTAINER_NAME:-rosmaster}"
 
 # Stop existing container if running

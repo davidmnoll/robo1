@@ -14,6 +14,7 @@ attach:
 help:
 	@echo "Arena stack commands"
 	@echo ""
+	@echo "  make local-stack - Launch api + ros-bridge + web (no sim, ROS domain 61)"
 	@echo "  make dev        - Launch ros-bridge + web pointing to DEV servers"
 	@echo "  make dev-local  - Launch local api + ros-bridge + web (fully local)"
 	@echo "  make tmux-stack - Launch ros-core, sim, api, web in tmux"
@@ -24,9 +25,10 @@ help:
 	@echo "  make db-shell   - Open psql shell inside the db container"
 	@echo ""
 	@echo "Robot commands (Rosmaster A1 Pi):"
-	@echo "  make robot-push    - Push code to robot, build, and restart"
-	@echo "  make robot-pull    - Pull code/configs from robot"
-	@echo "  make robot-restart - Restart robot service"
+	@echo "  make robot-push        - Push code to robot, build, and restart"
+	@echo "  make robot-build-image - Build and push Docker image with dependencies"
+	@echo "  make robot-pull        - Pull code/configs from robot"
+	@echo "  make robot-restart     - Restart robot service"
 	@echo ""
 	@echo ""
 	@echo "Virtual lobby:"
@@ -126,6 +128,26 @@ dev-local:
 	@tmux new-window -t dev -n web "cd $(CURDIR) && ./web/run.sh; read"
 	@echo "Started tmux session 'dev' with [api] [ros-bridge] [web] (all local)"
 	@tmux attach -t dev
+
+# Run local stack without simulator (api + ros-bridge + web) with ROS_DOMAIN_ID=61
+local-stack:
+	@if ! command -v tmux >/dev/null 2>&1; then \
+		echo "tmux required. Install with: sudo apt install tmux"; exit 1; \
+	fi
+	@tmux kill-session -t arena 2>/dev/null || true
+	@echo "Starting local stack with ROS_DOMAIN_ID=$(ROS_DOMAIN_ID)..."
+	@tmux new-session -d -s arena -n api "cd $(CURDIR) && ./api/run.sh; read"
+	@sleep 2
+	@tmux new-window -t arena -n ros-bridge "cd $(CURDIR) && ROS_DOMAIN_ID=$(ROS_DOMAIN_ID) API_BASE_URL=http://localhost:8080/api LOBBY_KEY=local-dev-key ./ros-bridge/run.sh; read"
+	@tmux new-window -t arena -n web "cd $(CURDIR) && ./web/run.sh; read"
+	@echo ""
+	@echo "Started tmux session 'arena' with:"
+	@echo "  [api]        FastAPI gateway (localhost:8080)"
+	@echo "  [ros-bridge] ROS bridge + camera forwarder (ROS_DOMAIN_ID=$(ROS_DOMAIN_ID))"
+	@echo "  [web]        Vite dev server"
+	@echo ""
+	@echo "Attaching to session..."
+	@tmux attach -t arena
 
 # Build ros-bridge Humble container
 dev-ros-build:
@@ -381,10 +403,13 @@ virtual-lobby-local:
 # =============================================================================
 # Robot Commands (Rosmaster A1 Pi)
 # =============================================================================
-.PHONY: robot-push robot-pull robot-restart
+.PHONY: robot-push robot-pull robot-restart robot-build-image
 
 robot-push:
 	$(MAKE) -C bots/rosmaster-a1_pi deploy
+
+robot-build-image:
+	$(MAKE) -C bots/rosmaster-a1_pi build-and-push
 
 robot-pull:
 	@echo "Pulling code/configs from robot..."
