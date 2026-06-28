@@ -28,6 +28,10 @@ help:
 	@echo "  make robot-pull    - Pull code/configs from robot"
 	@echo "  make robot-restart - Restart robot service"
 	@echo ""
+	@echo ""
+	@echo "Virtual lobby:"
+	@echo "  make virtual-lobby - Run the Tauri 3D virtual lobby app"
+	@echo ""
 	@echo "Simulation commands:"
 	@echo "  make cloud-sim  - Headless container-based simulation"
 	@echo "  make sim-gui    - Container-based simulation with GUI (X11)"
@@ -353,6 +357,26 @@ dev-cloud-ros:
 		-e API_BASE_URL="https://$$DEV_IP.sslip.io/api" \
 		-e LOBBY_KEY=G-lV6Jrg0DW-m78AClMySQ \
 		ros-bridge-humble
+
+# =============================================================================
+# Virtual Lobby (Tauri App)
+# =============================================================================
+.PHONY: virtual-lobby virtual-lobby-local
+
+virtual-lobby:
+	@cd virtual-lobby && \
+	if [ ! -d node_modules ]; then npm install; fi && \
+	npm run tauri dev
+
+virtual-lobby-dev:
+	@cd virtual-lobby && \
+	if [ ! -d node_modules ]; then npm install; fi && \
+	VITE_API_BASE_URL=https://136.112.250.36.sslip.io npm run tauri dev
+
+virtual-lobby-local:
+	@cd virtual-lobby && \
+	if [ ! -d node_modules ]; then npm install; fi && \
+	VITE_API_BASE_URL=http://localhost:8080 npm run tauri dev
 
 # =============================================================================
 # Robot Commands (Rosmaster A1 Pi)

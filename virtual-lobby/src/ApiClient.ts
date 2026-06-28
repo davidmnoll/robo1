@@ -5,6 +5,7 @@
  * Syncs world state and relays player control/video.
  */
 
+/// <reference types="vite/client" />
 import { WorldState, VirtualElement, VirtualPlayer } from './WorldState';
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8080';
@@ -14,7 +15,7 @@ export class ApiClient {
   private worldState: WorldState;
   private ws: WebSocket | null = null;
   private connected = false;
-  private lobbyId: number | null = null;
+  public lobbyId: number | null = null;
 
   constructor(lobbyKey: string, worldState: WorldState) {
     this.lobbyKey = lobbyKey;

@@ -35,8 +35,19 @@ export class WorldState {
   elements: VirtualElement[] = [];
   players: VirtualPlayer[] = [];
   private listeners: UpdateCallback[] = [];
+  private nextLocalId = -1; // Negative IDs for locally-created elements
 
   constructor() {}
+
+  // Generate a local ID for offline-created elements
+  generateLocalId(): number {
+    return this.nextLocalId--;
+  }
+
+  // Check if an element was created locally (negative ID)
+  isLocalElement(element: VirtualElement): boolean {
+    return element.id < 0;
+  }
 
   onUpdate(callback: UpdateCallback) {
     this.listeners.push(callback);

@@ -67,7 +67,7 @@ export class Scene3D {
   }
 
   resize() {
-    const rect = this.canvas.parentElement?.getBoundingClientRect();
+    // Note: Using fixed size for preview window rather than parent size
     // Use fixed size for preview window
     const width = 320;
     const height = 240;

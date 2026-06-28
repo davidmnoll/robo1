@@ -1122,6 +1122,10 @@
               <option value="public">Public</option>
               <option value="private">Private</option>
             </select>
+            <label style="display:flex;align-items:center;gap:0.5rem;margin-top:0.5rem;">
+              <input type="checkbox" id="lobby-is-virtual">
+              Virtual lobby (allows spawning virtual players instead of robots)
+            </label>
             <div class="key-row" id="key-row" hidden>
               <div>
                 <label>Access key</label>
@@ -1252,6 +1256,7 @@
         const lobbyNameInput = document.getElementById('lobby-name');
         const lobbyDescInput = document.getElementById('lobby-desc');
         const lobbyVisibilityInput = document.getElementById('lobby-visibility');
+        const lobbyIsVirtualInput = document.getElementById('lobby-is-virtual');
         const lobbyMessage = document.getElementById('lobby-message');
         const keyRow = document.getElementById('key-row');
         const lobbyKeyEl = document.getElementById('lobby-key');
@@ -1320,6 +1325,95 @@
 
         const initialToken = localStorage.getItem('arenaToken') || sessionStorage.getItem('arenaToken') || '';
         const initialEmail = localStorage.getItem('arenaUserEmail') || sessionStorage.getItem('arenaUserEmail') || '';
+
+        // Pending changes storage for offline editing
+        const PENDING_CHANGES_KEY = 'arenaPendingChanges';
+        function loadPendingChanges() {
+          try {
+            return JSON.parse(localStorage.getItem(PENDING_CHANGES_KEY) || '{}');
+          } catch { return {}; }
+        }
+        function savePendingChanges(changes) {
+          localStorage.setItem(PENDING_CHANGES_KEY, JSON.stringify(changes));
+        }
+        function addPendingLobbyChange(lobbyId, changes) {
+          const pending = loadPendingChanges();
+          pending.lobbies = pending.lobbies || {};
+          pending.lobbies[lobbyId] = { ...pending.lobbies[lobbyId], ...changes, _timestamp: Date.now() };
+          savePendingChanges(pending);
+        }
+        function addPendingBotChange(botId, changes) {
+          const pending = loadPendingChanges();
+          pending.bots = pending.bots || {};
+          pending.bots[botId] = { ...pending.bots[botId], ...changes, _timestamp: Date.now() };
+          savePendingChanges(pending);
+        }
+        function removePendingLobbyChange(lobbyId) {
+          const pending = loadPendingChanges();
+          if (pending.lobbies) delete pending.lobbies[lobbyId];
+          savePendingChanges(pending);
+        }
+        function removePendingBotChange(botId) {
+          const pending = loadPendingChanges();
+          if (pending.bots) delete pending.bots[botId];
+          savePendingChanges(pending);
+        }
+        function getPendingLobbyChange(lobbyId) {
+          const pending = loadPendingChanges();
+          return pending.lobbies?.[lobbyId];
+        }
+        function getPendingBotChange(botId) {
+          const pending = loadPendingChanges();
+          return pending.bots?.[botId];
+        }
+
+        // Sync all pending changes when online
+        async function syncPendingChanges() {
+          if (!state.authToken) return;
+          const pending = loadPendingChanges();
+          let synced = 0;
+
+          // Sync lobby changes
+          for (const [lobbyId, changes] of Object.entries(pending.lobbies || {})) {
+            const { _timestamp, ...body } = changes;
+            try {
+              const resp = await authFetch(`${apiBase()}/lobbies/${lobbyId}`, {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body),
+              });
+              if (resp.ok) {
+                removePendingLobbyChange(lobbyId);
+                synced++;
+              }
+            } catch (err) {
+              console.error(`Failed to sync lobby ${lobbyId}:`, err);
+            }
+          }
+
+          // Sync bot changes
+          for (const [botId, changes] of Object.entries(pending.bots || {})) {
+            const { _timestamp, ...body } = changes;
+            try {
+              const resp = await authFetch(`${apiBase()}/bots/${botId}`, {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body),
+              });
+              if (resp.ok) {
+                removePendingBotChange(botId);
+                synced++;
+              }
+            } catch (err) {
+              console.error(`Failed to sync bot ${botId}:`, err);
+            }
+          }
+
+          if (synced > 0) {
+            console.log(`Synced ${synced} pending changes`);
+            fetchLobbies();  // Refresh lobby list
+          }
+        }
 
         // Generate unique client ID for this browser session (allows same user on multiple devices)
         const clientId = crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
@@ -1630,6 +1724,8 @@
             state.lobbies = items.filter(l => l.ros_connected);
             state.offlineLobbies = items.filter(l => !l.ros_connected);
             renderLobbies();
+            // Sync any pending offline changes now that we're online
+            syncPendingChanges();
           } catch (err) {
             if (err && err.name === 'AbortError') {
               return;
@@ -1864,6 +1960,9 @@
         }
 
         function renderAddVirtualPlayerButton(container) {
+          // Only show for virtual lobbies
+          if (!state.currentLobby?.is_virtual) return;
+
           const addCard = document.createElement('div');
           addCard.className = 'robot-card';
           addCard.style.cssText = 'border:2px dashed rgba(148,163,184,0.4);background:transparent;cursor:pointer;display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100px;';
@@ -2323,15 +2422,29 @@
           logTelemetry(state.speakerVoted ? 'Voted for speaker' : 'Removed speaker vote');
         }
 
+        let micEnableInProgress = false;  // Guard against concurrent mic enable attempts
+
         async function enableMicrophone() {
           console.log('[mic] enableMicrophone called (v2)');
+
+          // Guard against concurrent mic enable attempts
+          if (micEnableInProgress) {
+            console.log('[mic] mic enable already in progress, skipping');
+            return;
+          }
+
           // If mic track already exists, just enable it
-          if (state.micTrack) {
+          if (state.micTrack && state.micTrack.readyState === 'live') {
             console.log('[mic] reusing existing track');
             state.micTrack.enabled = true;
             // Don't set micEnabled - that's for group routing now
             logTelemetry('Microphone capture enabled');
             return;
+          }
+          // Clear dead track reference
+          if (state.micTrack && state.micTrack.readyState !== 'live') {
+            console.log('[mic] clearing dead mic track');
+            state.micTrack = null;
           }
 
           // First time: request mic access and add track to WebRTC
@@ -2340,6 +2453,31 @@
             return;
           }
 
+          // Wait for connection to be stable before renegotiating
+          if (state.pc.connectionState !== 'connected' || state.pc.signalingState !== 'stable') {
+            console.log('[mic] waiting for connection to stabilize (conn=%s, sig=%s)',
+                        state.pc.connectionState, state.pc.signalingState);
+            logTelemetry('Waiting for connection to stabilize...');
+            // Wait up to 5 seconds for stable state
+            for (let i = 0; i < 25; i++) {
+              await new Promise(r => setTimeout(r, 200));
+              if (state.pc && state.pc.connectionState === 'connected' && state.pc.signalingState === 'stable') {
+                console.log('[mic] connection now stable');
+                break;
+              }
+              if (!state.pc || state.pc.connectionState === 'failed' || state.pc.connectionState === 'closed') {
+                logTelemetry('Connection lost - cannot enable mic');
+                return;
+              }
+            }
+            if (!state.pc || state.pc.signalingState !== 'stable') {
+              logTelemetry('Connection did not stabilize - try again');
+              return;
+            }
+          }
+
+          // Set guard before starting renegotiation
+          micEnableInProgress = true;
           try {
             logTelemetry('Requesting microphone access...');
             // Try with constraints first, fall back to simple audio:true for iOS compatibility
@@ -2451,6 +2589,8 @@
           } catch (err) {
             console.error('[mic] failed to enable microphone:', err);
             logTelemetry(`Mic error: ${err.message}`);
+          } finally {
+            micEnableInProgress = false;
           }
         }
 
@@ -2713,38 +2853,44 @@
           const iceServers = await fetchIceServers();
           const pc = new RTCPeerConnection({ iceServers });
           state.pc = pc;
-          const inboundStream = new MediaStream();
+          const videoStream = new MediaStream();  // Only for video
+          const audioElements = [];  // Track audio elements for cleanup
+
           pc.addEventListener('track', (event) => {
-            const audioTracks = inboundStream.getAudioTracks();
-            const videoTracks = inboundStream.getVideoTracks();
-            console.info('[video] received track:', event.track.kind, 'id:', event.track.id,
-                         'existing audio:', audioTracks.length, 'existing video:', videoTracks.length);
-            inboundStream.addTrack(event.track);
-            videoElement.srcObject = inboundStream;
-            // Handle audio track - start unmuted so group audio can be heard
-            // (speaker vote only controls what gets sent TO the robot, not what you hear)
-            if (event.track.kind === 'audio') {
-              console.info('[video] audio track received, enabling audio playback');
-              videoElement.muted = false;
-              videoElement.volume = 1.0;
-              // Try to play - if blocked by autoplay policy, start muted then unmute on click
-              videoElement.play().then(() => {
-                console.info('[video] playback started with audio');
-              }).catch(e => {
-                console.warn('[video] autoplay blocked, starting muted:', e);
-                videoElement.muted = true;
-                videoElement.play().then(() => {
-                  console.info('[video] muted playback started, click to unmute');
-                  // Add click handler to unmute
-                  videoElement.onclick = () => {
-                    videoElement.muted = false;
-                    console.info('[video] unmuted after click');
-                    videoElement.onclick = null;
-                  };
-                }).catch(e2 => {
-                  console.error('[video] playback failed even muted:', e2);
+            console.info('[track] received:', event.track.kind, 'id:', event.track.id);
+
+            if (event.track.kind === 'video') {
+              // Video goes to the video element
+              videoStream.addTrack(event.track);
+              if (videoElement.srcObject !== videoStream) {
+                videoElement.srcObject = videoStream;
+                videoElement.muted = true;  // Video element muted - audio via separate elements
+                videoElement.play().catch(e => {
+                  console.warn('[video] autoplay blocked:', e);
                 });
+              }
+            } else if (event.track.kind === 'audio') {
+              // Each audio track gets its own audio element (browser mixes automatically)
+              console.info('[audio] creating audio element for track:', event.track.id);
+              const audioEl = document.createElement('audio');
+              audioEl.srcObject = new MediaStream([event.track]);
+              audioEl.autoplay = true;
+              audioEl.play().then(() => {
+                console.info('[audio] playing track:', event.track.id);
+              }).catch(e => {
+                console.warn('[audio] autoplay blocked for track:', event.track.id, e);
               });
+              audioElements.push({ el: audioEl, track: event.track });
+
+              // Clean up when track ends
+              event.track.onended = () => {
+                console.info('[audio] track ended:', event.track.id);
+                const idx = audioElements.findIndex(a => a.track === event.track);
+                if (idx >= 0) {
+                  audioElements[idx].el.srcObject = null;
+                  audioElements.splice(idx, 1);
+                }
+              };
             }
           });
 
@@ -2815,26 +2961,49 @@
                 } else if (data.type === 'camera_control') {
                   // Update ghost camera joystick for other users' camera inputs
                   updateGhostCameraJoystick(data.pan_delta, data.tilt_delta, data.user);
-                } else if (data.type === 'renegotiation_offer') {
-                  // Server is adding new tracks (e.g., new user joined)
-                  console.info('[reneg] received renegotiation offer from server');
-                  try {
-                    await state.pc.setRemoteDescription(new RTCSessionDescription({
-                      sdp: data.sdp,
-                      type: data.sdp_type || 'offer',
-                    }));
-                    console.info('[reneg] set remote description, creating answer');
-                    const answer = await state.pc.createAnswer();
-                    await state.pc.setLocalDescription(answer);
-                    console.info('[reneg] sending answer back to server');
-                    controlChannel.send(JSON.stringify({
-                      type: 'renegotiation_answer',
-                      sdp: state.pc.localDescription.sdp,
-                      sdp_type: state.pc.localDescription.type,
-                    }));
-                    console.info('[reneg] renegotiation complete');
-                  } catch (reneg_err) {
-                    console.error('[reneg] renegotiation failed:', reneg_err);
+                } else if (data.type === 'reconnect_needed') {
+                  // Server wants us to reconnect to get new audio tracks
+                  console.info('[reconnect] server requested reconnect, reason:', data.reason);
+                  // Close current PC and reconnect
+                  const namespace = state.activeRobot?.ros_namespace;
+                  if (namespace) {
+                    console.info('[reconnect] closing current connection and reconnecting...');
+                    // Remember mic state before reconnection
+                    const wasMicEnabled = state.micEnabled;
+                    const wasRobotMicEnabled = state.robotMicEnabled;
+                    // Small delay to let the message be processed
+                    setTimeout(async () => {
+                      // Clean up old mic track (it's dead now that PC is closing)
+                      if (state.micTrack) {
+                        console.info('[reconnect] stopping old mic track');
+                        state.micTrack.stop();
+                        state.micTrack = null;
+                      }
+                      if (state.micStream) {
+                        state.micStream.getTracks().forEach(t => t.stop());
+                        state.micStream = null;
+                      }
+                      if (state.pc) {
+                        state.pc.close();
+                        state.pc = null;
+                      }
+                      // Restart WebRTC connection
+                      startWebRTC(namespace);
+                      // Restore mic if it was enabled before reconnection
+                      if (wasMicEnabled || wasRobotMicEnabled) {
+                        console.info('[reconnect] will restore mic after connection stabilizes');
+                        // Wait for connection to be established before re-enabling mic
+                        const waitForConnection = () => {
+                          if (state.pc && state.pc.connectionState === 'connected' && state.pc.signalingState === 'stable') {
+                            console.info('[reconnect] connection stable, restoring mic');
+                            enableMicrophone();
+                          } else if (state.pc) {
+                            setTimeout(waitForConnection, 200);
+                          }
+                        };
+                        setTimeout(waitForConnection, 500);
+                      }
+                    }, 100);
                   }
                 }
               } catch (err) {
@@ -2846,9 +3015,15 @@
           // Request video from server (recvonly)
           pc.addTransceiver('video', { direction: 'recvonly' });
 
-          // Receive robot audio (recvonly initially - mic is added on button click)
+          // Receive robot audio (recvonly)
           pc.addTransceiver('audio', { direction: 'recvonly' });
-          console.info('[video] added recvonly audio transceiver');
+
+          // Add extra audio transceivers for group audio (up to 4 other users)
+          // These are recvonly and will be used by the server to send other users' audio
+          for (let i = 0; i < 4; i++) {
+            pc.addTransceiver('audio', { direction: 'recvonly' });
+          }
+          console.info('[video] added 5 recvonly audio transceivers (1 robot + 4 group)');
           pc.addEventListener('connectionstatechange', () => {
             console.info('[video] connection state changed:', pc.connectionState);
             if (pc.connectionState === 'connected') {
@@ -3677,10 +3852,29 @@
         }
 
         function populateLobbyForm(lobby) {
+          // Apply any pending offline changes on top of server data
+          let pendingChanges = null;
+          if (lobby?.id) {
+            pendingChanges = getPendingLobbyChange(lobby.id);
+            if (pendingChanges) {
+              lobby = { ...lobby, ...pendingChanges };
+            }
+          }
+
           lobbyNameInput.value = lobby?.name || '';
           lobbyDescInput.value = lobby?.description || '';
           lobbyVisibilityInput.value = lobby?.is_public ? 'public' : 'private';
-          lobbyMessage.textContent = '';
+          lobbyIsVirtualInput.checked = lobby?.is_virtual || false;
+
+          // Show pending changes indicator
+          if (pendingChanges) {
+            lobbyMessage.textContent = 'Has unsaved changes (will sync when online)';
+            lobbyMessage.style.color = '#f59e0b';
+          } else {
+            lobbyMessage.textContent = '';
+            lobbyMessage.style.color = '';
+          }
+
           if (lobby?.access_key) {
             keyRow.hidden = false;
             lobbyKeyEl.textContent = lobby.access_key;
@@ -3730,6 +3924,12 @@
         }
 
         function startBotEdit(bot) {
+          // Apply any pending offline changes
+          const pendingChanges = getPendingBotChange(bot.id);
+          if (pendingChanges) {
+            bot = { ...bot, ...pendingChanges };
+          }
+
           botForm.dataset.editingId = bot.id;
           botNameInput.value = bot.name;
           botNamespaceInput.value = bot.ros_namespace;
@@ -3746,7 +3946,11 @@
             botMuteBtn.textContent = '🔊';
             botMuteBtn.title = 'Mute robot';
           }
-          botMessage.textContent = `Editing ${bot.name}`;
+          botMessage.textContent = pendingChanges
+            ? `Editing ${bot.name} (has unsaved changes)`
+            : `Editing ${bot.name}`;
+          if (pendingChanges) botMessage.style.color = '#f59e0b';
+          else botMessage.style.color = '';
         }
 
         function resetBotForm() {
@@ -3762,25 +3966,43 @@
           botMessage.textContent = '';
         }
 
-        // Auto-save lobby fields on change
+        // Auto-save lobby fields on change (supports offline mode)
         async function autoSaveLobby() {
-          if (!state.authToken || !state.manageLobby) return;
-          lobbyMessage.textContent = 'Saving...';
+          if (!state.manageLobby) return;
+          const lobbyId = state.manageLobby.id;
           const body = {
             name: lobbyNameInput.value,
             description: lobbyDescInput.value || null,
             is_public: lobbyVisibilityInput.value === 'public',
+            is_virtual: lobbyIsVirtualInput.checked,
           };
+
+          // Update local state immediately
+          Object.assign(state.manageLobby, body);
+          if (state.currentLobby?.id === lobbyId) {
+            Object.assign(state.currentLobby, body);
+            renderLobbyDetail();
+          }
+
+          // Try to save to server
+          if (!state.authToken) {
+            addPendingLobbyChange(lobbyId, body);
+            lobbyMessage.textContent = 'Saved locally (offline)';
+            return;
+          }
+
+          lobbyMessage.textContent = 'Saving...';
           try {
-            const resp = await authFetch(`${apiBase()}/lobbies/${state.manageLobby.id}`, {
+            const resp = await authFetch(`${apiBase()}/lobbies/${lobbyId}`, {
               method: 'PATCH',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify(body),
             });
             if (!resp.ok) throw new Error(await resp.text());
             lobbyMessage.textContent = 'Saved';
+            removePendingLobbyChange(lobbyId);  // Clear any pending changes
             setTimeout(() => { if (lobbyMessage.textContent === 'Saved') lobbyMessage.textContent = ''; }, 1500);
-            const updated = await fetchLobbyDetail(state.manageLobby.id);
+            const updated = await fetchLobbyDetail(lobbyId);
             state.manageLobby = updated;
             if (state.currentLobby?.id === updated.id) {
               state.currentLobby = updated;
@@ -3791,7 +4013,10 @@
             fetchLobbies();
           } catch (err) {
             console.error(err);
-            lobbyMessage.textContent = 'Failed to save';
+            // Save locally on failure (offline)
+            addPendingLobbyChange(lobbyId, body);
+            lobbyMessage.textContent = 'Saved locally (will sync when online)';
+            setTimeout(() => { if (lobbyMessage.textContent.includes('locally')) lobbyMessage.textContent = ''; }, 2500);
           }
         }
 
@@ -3806,6 +4031,7 @@
         lobbyNameInput.addEventListener('blur', () => { if (state.manageLobby) autoSaveLobby(); });
         lobbyDescInput.addEventListener('blur', () => { if (state.manageLobby) autoSaveLobby(); });
         lobbyVisibilityInput.addEventListener('change', () => { if (state.manageLobby) autoSaveLobby(); });
+        lobbyIsVirtualInput.addEventListener('change', () => { if (state.manageLobby) autoSaveLobby(); });
 
         // For new lobbies, create on first field blur if name is filled
         lobbyForm.addEventListener('submit', async (event) => {
@@ -3822,6 +4048,7 @@
             name: lobbyNameInput.value,
             description: lobbyDescInput.value || null,
             is_public: lobbyVisibilityInput.value === 'public',
+            is_virtual: lobbyIsVirtualInput.checked,
           };
           try {
             const resp = await authFetch(`${apiBase()}/lobbies`, {
@@ -3930,12 +4157,18 @@
           updateMuteButtonIcon(vol);
         });
 
-        // Auto-save volume when slider is released (for existing robots)
+        // Auto-save volume when slider is released (for existing robots, supports offline)
         botVolumeInput.addEventListener('change', async () => {
-          if (!botForm.dataset.editingId) return;  // Only auto-save for existing robots
+          const botId = botForm.dataset.editingId;
+          if (!botId) return;  // Only auto-save for existing robots
           const vol = parseInt(botVolumeInput.value, 10) / 100;
+
+          // Update local state immediately
+          const bot = state.manageLobby?.bots?.find(b => String(b.id) === botId);
+          if (bot) bot.volume = vol;
+
           try {
-            const resp = await authFetch(`${apiBase()}/bots/${botForm.dataset.editingId}`, {
+            const resp = await authFetch(`${apiBase()}/bots/${botId}`, {
               method: 'PATCH',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ volume: vol }),
@@ -3943,10 +4176,13 @@
             if (resp.status === 401) return;
             if (!resp.ok) throw new Error(await resp.text());
             botMessage.textContent = 'Volume saved';
+            removePendingBotChange(botId);
             setTimeout(() => { if (botMessage.textContent === 'Volume saved') botMessage.textContent = ''; }, 1500);
           } catch (err) {
             console.error(err);
-            botMessage.textContent = 'Failed to save volume';
+            addPendingBotChange(botId, { volume: vol });
+            botMessage.textContent = 'Saved locally (will sync when online)';
+            setTimeout(() => { if (botMessage.textContent.includes('locally')) botMessage.textContent = ''; }, 2500);
           }
         });
 

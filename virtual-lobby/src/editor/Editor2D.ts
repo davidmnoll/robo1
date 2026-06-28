@@ -19,10 +19,18 @@ const COLORS = {
   selection: '#60a5fa',
 };
 
+// Callback type for syncing element changes with API
+export type ElementChangeCallback = (
+  action: 'add' | 'update' | 'remove',
+  element: VirtualElement | Partial<VirtualElement>,
+  id?: number
+) => void;
+
 export class Editor2D {
   private canvas: HTMLCanvasElement;
   private ctx: CanvasRenderingContext2D;
   private worldState: WorldState;
+  private onElementChange: ElementChangeCallback | null = null;
 
   // View state
   private panX = 0;
@@ -44,6 +52,11 @@ export class Editor2D {
     this.setupEventListeners();
   }
 
+  // Set callback for syncing changes with server (optional)
+  setOnElementChange(callback: ElementChangeCallback | null) {
+    this.onElementChange = callback;
+  }
+
   private setupEventListeners() {
     // Mouse events
     this.canvas.addEventListener('mousedown', this.onMouseDown.bind(this));
@@ -53,6 +66,21 @@ export class Editor2D {
 
     // Context menu (prevent default for right-click pan)
     this.canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+
+    // Keyboard events for delete
+    window.addEventListener('keydown', this.onKeyDown.bind(this));
+  }
+
+  private onKeyDown(e: KeyboardEvent) {
+    if ((e.key === 'Delete' || e.key === 'Backspace') && this.selectedElement) {
+      const id = this.selectedElement.id;
+      this.worldState.removeElement(id);
+      if (this.onElementChange) {
+        this.onElementChange('remove', this.selectedElement, id);
+      }
+      this.selectedElement = null;
+      this.render();
+    }
   }
 
   setTool(tool: string) {
@@ -118,7 +146,7 @@ export class Editor2D {
 
     // Left-click: tool action
     if (this.tool === 'select') {
-      this.selectedElement = this.worldState.getElementAt(worldPos.x, worldPos.y);
+      this.selectedElement = this.worldState.getElementAt(worldPos.x, worldPos.y) || null;
       if (this.selectedElement) {
         this.isDragging = true;
         this.dragStart = { x: worldPos.x, y: worldPos.y };
@@ -138,15 +166,22 @@ export class Editor2D {
       this.dragStart = { x: worldPos.x, y: worldPos.y };
     } else if (this.tool === 'fruit' || this.tool === 'note') {
       // Place immediately
-      const element: Partial<VirtualElement> = {
+      const element: VirtualElement = {
+        id: this.worldState.generateLocalId(),
         element_type: this.tool,
         x: worldPos.x,
         y: worldPos.y,
         z: 0.5,
+        width: 0.5,
+        height: 0.5,
         rotation: 0,
       };
-      // In a real implementation, this would call apiClient.addElement()
-      console.log('Would add element:', element);
+      // Add to local state
+      this.worldState.addElement(element);
+      // Notify API if connected
+      if (this.onElementChange) {
+        this.onElementChange('add', element);
+      }
     }
 
     this.render();
@@ -167,10 +202,13 @@ export class Editor2D {
 
     // Dragging selected element
     if (this.tool === 'select' && this.selectedElement) {
-      // In a real implementation, this would update via API
       this.selectedElement.x = worldPos.x;
       this.selectedElement.y = worldPos.y;
-      this.render();
+      this.worldState.updateElement(this.selectedElement.id, {
+        x: worldPos.x,
+        y: worldPos.y,
+      });
+      // Note: We'll notify API on mouse up to avoid spamming
       return;
     }
 
@@ -186,10 +224,36 @@ export class Editor2D {
     }
   }
 
-  private onMouseUp(e: MouseEvent) {
+  private onMouseUp(_e: MouseEvent) {
+    // Notify API of element position update after drag
+    if (this.tool === 'select' && this.selectedElement && this.isDragging) {
+      if (this.onElementChange) {
+        this.onElementChange('update', {
+          x: this.selectedElement.x,
+          y: this.selectedElement.y,
+        }, this.selectedElement.id);
+      }
+    }
+
     if (this.tool === 'wall' && this.drawingElement && this.drawingElement.width! > 0.1) {
-      // In a real implementation, this would call apiClient.addElement()
-      console.log('Would add wall:', this.drawingElement);
+      // Create the wall element with a local ID
+      const element: VirtualElement = {
+        id: this.worldState.generateLocalId(),
+        element_type: 'wall',
+        x: this.drawingElement.x!,
+        y: this.drawingElement.y!,
+        z: this.drawingElement.z || 0,
+        width: this.drawingElement.width,
+        height: this.drawingElement.height,
+        depth: this.drawingElement.depth || 2,
+        rotation: this.drawingElement.rotation || 0,
+      };
+      // Add to local state
+      this.worldState.addElement(element);
+      // Notify API if connected
+      if (this.onElementChange) {
+        this.onElementChange('add', element);
+      }
     }
 
     this.isDragging = false;

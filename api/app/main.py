@@ -124,6 +124,7 @@ class Lobby(Base):
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     owner_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     is_public = Column(Boolean, nullable=False, default=False, server_default=text("false"))
+    is_virtual = Column(Boolean, nullable=False, default=False, server_default=text("false"))
     is_deleted = Column(Boolean, nullable=False, default=False, server_default=text("false"))
 
     owner = relationship("User", back_populates="lobbies")
@@ -272,6 +273,8 @@ browser_audio_forward_tasks: Dict[str, asyncio.Task] = {}
 
 # Track browser PCs by user for renegotiation (key: "robot_id:user_email")
 browser_user_pcs: Dict[str, RTCPeerConnection] = {}
+# Locks for serializing signaling operations per user (key: "robot_id:user_email")
+user_signaling_locks: Dict[str, asyncio.Lock] = {}
 # Robot audio broadcasters - consumes Hop1 audio and broadcasts to Hop2 subscribers
 robot_audio_broadcasters: Dict[str, "RobotAudioBroadcaster"] = {}
 
@@ -878,95 +881,52 @@ def get_other_user_broadcasters(robot_id: str, exclude_user_key: str) -> list[Us
     return result
 
 
-async def add_user_audio_track_and_renegotiate(
-    target_user_key: str,
-    new_user_broadcaster: UserAudioBroadcaster,
-) -> bool:
-    """Add a new user's audio track to an existing user's PC and renegotiate.
+# Pending audio tracks to add during browser-initiated renegotiation
+# Key: user_pc_key, Value: list of UserAudioBroadcaster
+pending_audio_tracks: Dict[str, list] = {}
 
-    Returns True if successful, False otherwise.
-    """
-    pc = browser_user_pcs.get(target_user_key)
+
+def queue_track_for_user(target_user_key: str, broadcaster: UserAudioBroadcaster) -> None:
+    """Queue a new audio track to be added to a user's PC during browser-initiated renegotiation."""
+    if target_user_key not in pending_audio_tracks:
+        pending_audio_tracks[target_user_key] = []
+    pending_audio_tracks[target_user_key].append(broadcaster)
+    logger.info("Queued audio track %s for user %s (total pending: %d)",
+               broadcaster.user_key, target_user_key, len(pending_audio_tracks[target_user_key]))
+
+
+def notify_browser_to_reconnect(target_user_key: str) -> bool:
+    """Tell browser to reconnect to get new audio tracks (simpler than renegotiation)."""
     control_channel = user_control_channels.get(target_user_key)
-
-    if not pc or pc.connectionState != "connected":
-        logger.warning("Cannot renegotiate with %s: PC not connected (state=%s)",
-                      target_user_key, pc.connectionState if pc else "none")
-        return False
-
-    # Check signaling state - can only create offer in stable state
-    if pc.signalingState != "stable":
-        logger.warning("Cannot renegotiate with %s: signaling state=%s (not stable)",
-                      target_user_key, pc.signalingState)
-        return False
-
     if not control_channel or control_channel.readyState != "open":
-        logger.warning("Cannot renegotiate with %s: control channel not open",
-                      target_user_key)
+        logger.warning("Cannot notify %s to reconnect: control channel not open", target_user_key)
         return False
 
-    try:
-        # Subscribe to new user's broadcaster and create relay track
-        queue = new_user_broadcaster.subscribe()
-        relay_track = UserAudioRelayTrack(queue, new_user_broadcaster.user_key, target_user_key)
-        pc.addTrack(relay_track)
-        logger.info("Added track for %s -> %s, starting renegotiation",
-                   new_user_broadcaster.user_key, target_user_key)
+    msg = json.dumps({"type": "reconnect_needed", "reason": "new_audio_tracks"})
+    control_channel.send(msg)
+    logger.info("Notified %s to reconnect for new audio tracks", target_user_key)
+    return True
 
-        # Create new offer
-        offer = await pc.createOffer()
-        await pc.setLocalDescription(offer)
 
-        # Wait for ICE gathering to complete
-        if pc.iceGatheringState != "complete":
-            gathering_complete = asyncio.Event()
-
-            @pc.on("icegatheringstatechange")
-            def on_ice_gathering_state_change():
-                if pc.iceGatheringState == "complete":
-                    gathering_complete.set()
-
-            try:
-                await asyncio.wait_for(gathering_complete.wait(), timeout=5.0)
-            except asyncio.TimeoutError:
-                logger.warning("ICE gathering timeout for %s", target_user_key)
-
-        # Send offer to browser via control channel
-        offer_msg = json.dumps({
-            "type": "renegotiation_offer",
-            "sdp": pc.localDescription.sdp,
-            "sdp_type": pc.localDescription.type,
-        })
-        control_channel.send(offer_msg)
-        logger.info("Sent renegotiation offer to %s", target_user_key)
-
-        # Wait for answer (will be handled by control channel message handler)
-        future = asyncio.get_event_loop().create_future()
-        pending_renegotiations[target_user_key] = future
-
+def add_pending_tracks_to_pc(user_pc_key: str, pc: RTCPeerConnection) -> int:
+    """Add any pending audio tracks to a PC. Called when browser sends renegotiation offer."""
+    broadcasters = pending_audio_tracks.pop(user_pc_key, [])
+    added = 0
+    for broadcaster in broadcasters:
         try:
-            answer_data = await asyncio.wait_for(future, timeout=10.0)
-            await pc.setRemoteDescription(
-                RTCSessionDescription(sdp=answer_data["sdp"], type=answer_data["type"])
-            )
-            logger.info("Renegotiation complete for %s", target_user_key)
-            return True
-        except asyncio.TimeoutError:
-            logger.warning("Renegotiation answer timeout for %s, PC left in signaling state=%s",
-                          target_user_key, pc.signalingState)
-            # Note: PC is now stuck in "have-local-offer" state.
-            # Browser-initiated renegotiation will get 409 and retry later.
-            return False
-        finally:
-            pending_renegotiations.pop(target_user_key, None)
-
-    except Exception as e:
-        logger.error("Renegotiation failed for %s: %s", target_user_key, e)
-        return False
+            queue = broadcaster.subscribe()
+            relay_track = UserAudioRelayTrack(queue, broadcaster.user_key, user_pc_key)
+            pc.addTrack(relay_track)
+            logger.info("Added pending track %s -> %s", broadcaster.user_key, user_pc_key)
+            added += 1
+        except Exception as e:
+            logger.error("Failed to add pending track %s -> %s: %s",
+                        broadcaster.user_key, user_pc_key, e)
+    return added
 
 
 async def notify_existing_users_of_new_user(robot_id: str, new_user_key: str) -> None:
-    """When a new user joins, add their audio track to all existing users' PCs."""
+    """When a new user joins, notify existing users to reconnect to get the new audio track."""
     new_broadcaster = user_audio_broadcasters.get(new_user_key)
     if not new_broadcaster:
         logger.warning("No broadcaster for new user %s", new_user_key)
@@ -978,45 +938,18 @@ async def notify_existing_users_of_new_user(robot_id: str, new_user_key: str) ->
         if key.startswith(f"{robot_id}:") and key != new_user_key
     ]
 
-    logger.info("Notifying %d existing users of new user %s", len(other_users), new_user_key)
+    logger.info("Notifying %d existing users to reconnect for new user %s", len(other_users), new_user_key)
 
-    # Renegotiate with each existing user (in parallel)
-    tasks = [
-        add_user_audio_track_and_renegotiate(user_key, new_broadcaster)
-        for user_key in other_users
-    ]
-    if tasks:
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        success_count = sum(1 for r in results if r is True)
-        logger.info("Renegotiation results for new user %s: %d/%d successful",
-                   new_user_key, success_count, len(results))
+    # Notify each existing user to reconnect (they'll get all audio tracks on reconnect)
+    for user_key in other_users:
+        notify_browser_to_reconnect(user_key)
 
 
 async def add_existing_users_audio_to_new_user(robot_id: str, new_user_key: str) -> None:
-    """When a new user joins, add existing users' audio tracks to the new user via renegotiation."""
-    # Get all other users' broadcasters
-    other_broadcasters = get_other_user_broadcasters(robot_id, new_user_key)
-
-    if not other_broadcasters:
-        logger.info("No existing users to add audio for new user %s", new_user_key)
-        return
-
-    logger.info("Adding %d existing users' audio to new user %s",
-               len(other_broadcasters), new_user_key)
-
-    # Add each existing user's audio track to the new user (sequentially to avoid conflicts)
-    success_count = 0
-    for broadcaster in other_broadcasters:
-        try:
-            result = await add_user_audio_track_and_renegotiate(new_user_key, broadcaster)
-            if result:
-                success_count += 1
-        except Exception as e:
-            logger.error("Failed to add %s audio to new user %s: %s",
-                        broadcaster.user_key, new_user_key, e)
-
-    logger.info("Added %d/%d existing users' audio to new user %s",
-               success_count, len(other_broadcasters), new_user_key)
+    """No longer needed - existing users' audio is now added during initial connection."""
+    # Existing users' audio tracks are added during initial connection (pc.addTrack)
+    # This function is kept for compatibility but does nothing
+    logger.info("Existing users' audio already added during initial connection for %s", new_user_key)
 
 
 class GroupAudioRelayTrack(AudioStreamTrack):
@@ -1526,12 +1459,14 @@ class LobbyCreate(BaseModel):
     name: constr(min_length=1, strip_whitespace=True)
     description: Optional[str] = None
     is_public: bool = False
+    is_virtual: bool = False
 
 
 class LobbyUpdate(BaseModel):
     name: Optional[constr(min_length=1, strip_whitespace=True)] = None
     description: Optional[str] = None
     is_public: Optional[bool] = None
+    is_virtual: Optional[bool] = None
 
 
 class BotCreate(BaseModel):
@@ -1557,6 +1492,7 @@ class LobbyOut(BaseModel):
     owner_email: IdentifierStr
     created_at: datetime
     is_public: bool
+    is_virtual: bool
     is_deleted: bool
     is_owner: bool
     bot_count: int
@@ -1770,6 +1706,7 @@ async def create_lobby(
         access_key=access_key,
         owner_id=current_user.id,
         is_public=payload.is_public,
+        is_virtual=payload.is_virtual,
     )
     session.add(lobby)
     await session.commit()
@@ -1822,6 +1759,8 @@ async def update_lobby(
         lobby.description = payload.description
     if payload.is_public is not None:
         lobby.is_public = payload.is_public
+    if payload.is_virtual is not None:
+        lobby.is_virtual = payload.is_virtual
     await session.commit()
     await session.refresh(lobby)
     await session.refresh(lobby, attribute_names=["owner", "bots"])
@@ -2449,6 +2388,7 @@ def lobby_to_out(lobby: Lobby, current_user: User) -> LobbyOut:
         owner_email=owner_email,
         created_at=lobby.created_at,
         is_public=bool(lobby.is_public),
+        is_virtual=bool(getattr(lobby, "is_virtual", False)),
         is_deleted=bool(lobby.is_deleted),
         is_owner=is_owner,
         bot_count=bot_count,
@@ -3834,24 +3774,68 @@ async def start_webrtc(
     # Include client_id to allow same user on multiple devices
     client_id = offer.client_id or "default"
     user_pc_key = f"{robot_id}:{current_user.email}:{client_id}"
+
+    # Get or create a lock for this user to serialize signaling operations
+    if user_pc_key not in user_signaling_locks:
+        user_signaling_locks[user_pc_key] = asyncio.Lock()
+    signaling_lock = user_signaling_locks[user_pc_key]
+
+    # Try to acquire lock with timeout - if another request is processing, wait briefly
+    try:
+        async with asyncio.timeout(5.0):
+            await signaling_lock.acquire()
+    except asyncio.TimeoutError:
+        logger.warning("SFU Hop2: signaling lock timeout for %s", user_pc_key)
+        raise HTTPException(status_code=409, detail="Signaling busy, try again")
+
+    try:
+        return await _handle_browser_offer_inner(robot_id, offer, current_user, user_pc_key)
+    finally:
+        signaling_lock.release()
+
+
+async def _handle_browser_offer_inner(
+    robot_id: str,
+    offer: WebRTCOffer,
+    current_user: User,
+    user_pc_key: str,
+) -> dict[str, str]:
+    """Inner implementation of browser offer handling (called with lock held)."""
     existing_pc = browser_user_pcs.get(user_pc_key)
-    logger.info("SFU Hop2: offer for %s (user=%s, existing_pc=%s, state=%s)",
+    logger.info("SFU Hop2: offer for %s (user=%s, existing_pc=%s, state=%s, sig=%s)",
                 robot_id, current_user.email, existing_pc is not None,
-                existing_pc.connectionState if existing_pc else "none")
+                existing_pc.connectionState if existing_pc else "none",
+                existing_pc.signalingState if existing_pc else "none")
 
     # Only renegotiate if PC is fully connected and in stable signaling state
     if existing_pc and existing_pc.connectionState == "connected":
         # Check signaling state - can only accept offer in "stable" state
-        # If in "have-local-offer", we're doing server-initiated renegotiation
         if existing_pc.signalingState != "stable":
-            logger.warning("SFU Hop2: cannot renegotiate for %s, signaling state=%s (waiting for server renegotiation to complete)",
+            # PC is stuck in non-stable state (previous renegotiation might have failed)
+            # Close it and proceed to create a new one
+            logger.warning("SFU Hop2: closing stuck PC for %s (signaling state=%s, will create new)",
                           user_pc_key, existing_pc.signalingState)
-            raise HTTPException(status_code=409, detail="Renegotiation in progress, try again")
+            browser_user_pcs.pop(user_pc_key, None)
+            pcs = robot_browser_pcs.get(robot_id, [])
+            if existing_pc in pcs:
+                pcs.remove(existing_pc)
+            try:
+                await existing_pc.close()
+            except Exception:
+                pass
+            existing_pc = None  # Fall through to new PC creation
 
-        # Renegotiation: reuse existing PC
+    if existing_pc and existing_pc.connectionState == "connected":
+        # Renegotiation: reuse existing PC (signaling state is stable)
         logger.info("SFU Hop2: renegotiating for %s (user=%s)", robot_id, current_user.email)
         pc = existing_pc
         try:
+            # Add any pending audio tracks before processing the offer
+            added_tracks = add_pending_tracks_to_pc(user_pc_key, pc)
+            if added_tracks > 0:
+                logger.info("SFU Hop2: added %d pending tracks during renegotiation for %s",
+                           added_tracks, user_pc_key)
+
             await pc.setRemoteDescription(RTCSessionDescription(sdp=offer.sdp, type=offer.type))
             answer = await pc.createAnswer()
             await pc.setLocalDescription(answer)
@@ -4025,8 +4009,8 @@ async def start_webrtc(
                     active_robot_streams.get(robot_id))
         if state == "connected":
             # New user fully connected - set up bidirectional group audio
-            # Wait a moment for data channels to be ready
-            await asyncio.sleep(0.5)
+            # Wait for data channels to be fully ready
+            await asyncio.sleep(1.0)
             # 1. Add existing users' audio tracks to this new user
             asyncio.create_task(add_existing_users_audio_to_new_user(robot_id, user_pc_key))
             # 2. Add this new user's audio track to all existing users
@@ -4044,10 +4028,17 @@ async def start_webrtc(
                 old_task.cancel()
             # Note: data channels are cleaned up in their on_close handlers
             await pc.close()
-            # Clean up user's audio broadcaster
-            broadcaster = user_audio_broadcasters.pop(user_pc_key, None)
-            if broadcaster:
-                broadcaster.stop()
+            # Clean up user's audio broadcaster after a delay (allows for reconnection)
+            # If user reconnects within 5s, their broadcaster will be reused
+            async def delayed_broadcaster_cleanup():
+                await asyncio.sleep(5.0)
+                # Only stop if user hasn't reconnected (no new PC with same key)
+                if user_pc_key not in browser_user_pcs:
+                    broadcaster = user_audio_broadcasters.pop(user_pc_key, None)
+                    if broadcaster:
+                        broadcaster.stop()
+                        logger.info("Cleaned up broadcaster for %s after delay", user_pc_key)
+            asyncio.create_task(delayed_broadcaster_cleanup())
             # Clean up user from group audio mixer and control aggregator
             mixer = group_audio_mixers.get(robot_id)
             if mixer:
@@ -4078,14 +4069,19 @@ async def start_webrtc(
     # Create this user's audio broadcaster (for when they send audio to group)
     get_or_create_user_broadcaster(user_pc_key, robot_id)
 
-    # NOTE: We don't add other users' audio tracks during initial connection
-    # because the browser's offer only has m-lines for its own media (video recv + audio send).
-    # Adding extra tracks would cause aiortc's transceiver matching to fail.
-    # Instead, after this user's connection is established:
-    # 1. This user will receive other users' audio via renegotiation (add_tracks_for_existing_users)
-    # 2. Other users will receive this user's audio via renegotiation (notify_existing_users_of_new_user)
-    logger.info("SFU Hop2: user audio tracks will be added via renegotiation for %s (user=%s)",
-               robot_id, current_user.email)
+    # Add existing users' audio tracks (browser has extra recvonly audio transceivers for this)
+    other_broadcasters = get_other_user_broadcasters(robot_id, user_pc_key)
+    for broadcaster in other_broadcasters:
+        try:
+            queue = broadcaster.subscribe()
+            relay_track = UserAudioRelayTrack(queue, broadcaster.user_key, user_pc_key)
+            pc.addTrack(relay_track)
+            logger.info("SFU Hop2: added user audio track %s -> %s", broadcaster.user_key, user_pc_key)
+        except Exception as e:
+            logger.error("SFU Hop2: failed to add user audio track %s -> %s: %s",
+                        broadcaster.user_key, user_pc_key, e)
+    logger.info("SFU Hop2: added %d user audio tracks for %s (user=%s)",
+               len(other_broadcasters), robot_id, current_user.email)
 
     # Create telemetry data channel to send to browser
     telemetry_channel = pc.createDataChannel("telemetry", ordered=False)

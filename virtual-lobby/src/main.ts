@@ -5,10 +5,10 @@
  * can spawn "players" (cubes) and control them like robots.
  */
 
-import { Editor2D } from './editor/Editor2D';
+import { Editor2D, ElementChangeCallback } from './editor/Editor2D';
 import { Scene3D } from './renderer/Scene3D';
 import { ApiClient } from './ApiClient';
-import { WorldState } from './WorldState';
+import { WorldState, VirtualElement } from './WorldState';
 
 // State management
 const worldState = new WorldState();
@@ -17,6 +17,13 @@ let apiClient: ApiClient | null = null;
 // UI elements
 const lobbyKeyInput = document.getElementById('lobby-key') as HTMLInputElement;
 const connectBtn = document.getElementById('connect-btn') as HTMLButtonElement;
+
+// Persist lobby key in localStorage
+const LOBBY_KEY_STORAGE = 'virtual-lobby-key';
+const savedLobbyKey = localStorage.getItem(LOBBY_KEY_STORAGE);
+if (savedLobbyKey) {
+  lobbyKeyInput.value = savedLobbyKey;
+}
 const connectionStatus = document.getElementById('connection-status') as HTMLDivElement;
 const connectionLabel = document.getElementById('connection-label') as HTMLSpanElement;
 const elementCount = document.getElementById('element-count') as HTMLSpanElement;
@@ -32,6 +39,35 @@ const resetViewBtn = document.getElementById('reset-view') as HTMLButtonElement;
 // Initialize editor and renderer
 const editor = new Editor2D(editorCanvas, worldState);
 const scene = new Scene3D(rendererCanvas, worldState);
+
+// Element change callback - syncs with API when connected
+const elementChangeCallback: ElementChangeCallback = (action, element, id) => {
+  if (!apiClient?.isConnected()) {
+    console.log(`[offline] ${action} element:`, element);
+    return;
+  }
+
+  switch (action) {
+    case 'add':
+      // Send to server (server will assign real ID and broadcast back)
+      apiClient.addElement(element as Omit<VirtualElement, 'id'>);
+      break;
+    case 'update':
+      if (id !== undefined && id > 0) {
+        // Only sync server-created elements (positive IDs)
+        apiClient.updateElement(id, element as Partial<VirtualElement>);
+      }
+      break;
+    case 'remove':
+      if (id !== undefined && id > 0) {
+        apiClient.removeElement(id);
+      }
+      break;
+  }
+};
+
+// Wire up editor to sync changes
+editor.setOnElementChange(elementChangeCallback);
 
 // Tool selection
 let currentTool = 'select';
@@ -77,6 +113,8 @@ connectBtn.addEventListener('click', async () => {
     apiClient = new ApiClient(lobbyKey, worldState);
     await apiClient.connect();
 
+    // Save lobby key on successful connection
+    localStorage.setItem(LOBBY_KEY_STORAGE, lobbyKey);
     updateConnectionUI(true);
   } catch (error) {
     console.error('Connection failed:', error);
