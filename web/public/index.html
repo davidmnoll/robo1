@@ -4365,21 +4365,56 @@
           }
         }
 
+        // Pull a human-readable reason out of a FastAPI error response.
+        // Validation (422) errors come back as {detail: [{msg, loc}, ...]};
+        // most others as {detail: "..."}. Falls back to the raw text.
+        function describeAuthError(rawText, fallback) {
+          try {
+            const body = JSON.parse(rawText);
+            const detail = body && body.detail;
+            if (typeof detail === 'string') return detail;
+            if (Array.isArray(detail) && detail.length) {
+              return detail
+                .map((d) => {
+                  const field = Array.isArray(d.loc) ? d.loc[d.loc.length - 1] : '';
+                  const msg = (d.msg || '').replace(/^String /, '');
+                  return field && field !== 'body' ? `${field}: ${msg}` : msg;
+                })
+                .filter(Boolean)
+                .join('; ');
+            }
+          } catch (_) { /* not JSON */ }
+          return (rawText && rawText.trim()) || fallback;
+        }
+
         async function handleAuth(path) {
+          const email = authEmailInput.value.trim();
+          const password = authPasswordInput.value;
+          if (!email || !password) {
+            authMessage.textContent = 'Enter a username and password.';
+            return;
+          }
           authMessage.textContent = 'Working...';
           try {
             const resp = await fetch(`${apiBase()}/auth/${path}`, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ email: authEmailInput.value, password: authPasswordInput.value }),
+              body: JSON.stringify({ email, password }),
             });
-            if (!resp.ok) throw new Error(await resp.text());
+            if (!resp.ok) {
+              const reason = describeAuthError(
+                await resp.text(),
+                path === 'login' ? 'Invalid credentials.' : 'Could not create account.',
+              );
+              authMessage.textContent = reason;
+              return;
+            }
             const data = await resp.json();
             setAuth(data.access_token, data.user.email, rememberMeCheckbox.checked);
             authMessage.textContent = path === 'login' ? 'Welcome back!' : 'Account created.';
           } catch (err) {
             console.error(err);
-            authMessage.textContent = 'Authentication failed.';
+            authMessage.textContent = 'Could not reach the server. Check your connection and try again.';
           }
         }
 

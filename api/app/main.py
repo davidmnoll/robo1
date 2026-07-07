@@ -1961,7 +1961,7 @@ class TokenResponse(BaseModel):
 
 class RegisterRequest(BaseModel):
     email: Annotated[str, Field(min_length=3, description="Username (min 3 characters)")]
-    password: Annotated[str, Field(min_length=6, max_length=32, description="Password (6-32 characters)")]
+    password: Annotated[str, Field(min_length=6, max_length=72, description="Password (6-72 characters)")]
 
     @field_validator("email")
     @classmethod
@@ -1975,14 +1975,15 @@ class RegisterRequest(BaseModel):
     def validate_password(cls, v: str) -> str:
         if len(v) < 6:
             raise ValueError("Password must be at least 6 characters")
-        if len(v) > 32:
-            raise ValueError("Password must be at most 32 characters")
+        if len(v) > 72:
+            # 72 is bcrypt's hard limit; anything longer is silently truncated.
+            raise ValueError("Password must be at most 72 characters")
         return v
 
 
 class LoginRequest(BaseModel):
     email: IdentifierStr
-    password: constr(min_length=1, max_length=32)
+    password: constr(min_length=1, max_length=72)
 
 
 class LobbyOnlineRequest(BaseModel):
