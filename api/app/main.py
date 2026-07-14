@@ -10,7 +10,7 @@ import time as _time
 from collections import defaultdict
 from datetime import datetime, timedelta
 from enum import Enum
-from typing import Annotated, Any, Dict, Optional, TypeVar
+from typing import Annotated, Any, Dict, Optional, Set, TypeVar
 
 import numpy as np
 from aiortc import AudioStreamTrack, MediaStreamTrack, RTCDataChannel, RTCPeerConnection, RTCSessionDescription
@@ -48,7 +48,7 @@ with contextlib.suppress(ImportError):
 from passlib.context import CryptContext
 from pydantic import BaseModel, Field, ValidationError, constr, field_validator
 from pydantic_settings import BaseSettings
-from sqlalchemy import JSON, Boolean, Column, DateTime, Float, ForeignKey, Integer, String, Text, delete, or_, select, text
+from sqlalchemy import JSON, Boolean, Column, DateTime, Float, ForeignKey, Integer, LargeBinary, String, Text, UniqueConstraint, delete, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, relationship, selectinload
 
@@ -89,6 +89,10 @@ class Settings(BaseSettings):
     heartbeat_timeout_seconds: int = Field(30, alias="HEARTBEAT_TIMEOUT_SECONDS")
     command_retention_seconds: int = Field(120, alias="COMMAND_RETENTION_SECONDS")
     stun_server: str = Field("", alias="STUN_SERVER")
+    # SLAM map tuning: downsample factor for a lower-resolution map, and how
+    # often (in scans, ~0.1s each at 10Hz) to broadcast a map update.
+    slam_map_downsample: int = Field(4, alias="SLAM_MAP_DOWNSAMPLE")
+    slam_map_update_interval: int = Field(3, alias="SLAM_MAP_UPDATE_INTERVAL")
 
 
 settings = Settings()
@@ -154,6 +158,34 @@ class Bot(Base):
     is_deleted = Column(Boolean, nullable=False, default=False, server_default=text("false"))
 
     lobby = relationship("Lobby", back_populates="bots")
+
+
+class SlamPoseGraph(Base):
+    """Persisted slam_toolbox pose graph for a lobby.
+
+    slam_toolbox serialization produces two artifacts, a `.posegraph` and a
+    `.data` file; we store both as blobs. One row per lobby: sessions continue
+    from (and re-serialize into) the same graph so the map accumulates and can
+    be stitched across sessions. The `x-api-key` (lobby access key) scopes which
+    lobby a bridge reads/writes, so persistence is naturally per-lobby.
+    """
+
+    __tablename__ = "slam_pose_graphs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    lobby_id = Column(Integer, ForeignKey("lobbies.id"), nullable=False, index=True)
+    robot_namespace = Column(String(255), nullable=True, index=True)
+    posegraph = Column(LargeBinary, nullable=False)
+    data = Column(LargeBinary, nullable=False)
+    resolution = Column(Float, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False
+    )
+
+    lobby = relationship("Lobby")
+
+    __table_args__ = (UniqueConstraint("lobby_id", name="uq_slam_pose_graph_lobby"),)
 
 
 class RobotCommand(Base):
@@ -299,6 +331,10 @@ virtual_world_lock = asyncio.Lock()                       # serialize world setu
 hop1_telemetry_channels: Dict[str, RTCDataChannel] = {}  # robot_id -> channel from ros-bridge
 hop1_control_channels: Dict[str, RTCDataChannel] = {}    # robot_id -> channel to ros-bridge
 hop1_scan_channels: Dict[str, RTCDataChannel] = {}        # robot_id -> scan channel from ros-bridge
+hop1_slam_map_channels: Dict[str, RTCDataChannel] = {}    # robot_id -> slam_toolbox map channel from ros-bridge
+# Robots whose map comes from server-side slam_toolbox (Design B); suppresses the
+# built-in SlamProcessor broadcast so browsers don't get two competing maps.
+slam_toolbox_robots: Set[str] = set()
 # Hop2: API <-> Browser(s)
 hop2_telemetry_channels: Dict[str, list[RTCDataChannel]] = defaultdict(list)  # robot_id -> list of channels to browsers
 hop2_control_channels: Dict[str, list[RTCDataChannel]] = defaultdict(list)    # robot_id -> list of channels from browsers
@@ -344,12 +380,28 @@ class SlamProcessor:
     Uses scan matching for pose estimation (simplified ICP-like approach).
     """
 
-    def __init__(self, robot_id: str, map_size: int = 200, resolution: float = 0.05):
+    def __init__(
+        self,
+        robot_id: str,
+        map_size: int = 200,
+        resolution: float = 0.05,
+        downsample: int = 4,
+        map_update_interval: int = 3,
+    ):
         self.robot_id = robot_id
         self.map_size = map_size  # Grid cells
-        self.resolution = resolution  # Meters per cell
+        self.resolution = resolution  # Meters per cell (internal/fine grid)
         self.map_width = map_size
         self.map_height = map_size
+
+        # Lower the resolution of the broadcast map by aggregating fine cells into
+        # coarse blocks of `downsample` x `downsample`. Scan points are also
+        # aggregated to one representative per coarse cell so we don't integrate
+        # every lidar point. downsample=1 disables aggregation.
+        self.downsample = max(1, int(downsample))
+
+        # Emit a map update every N scans (~N*0.1s at 10Hz). Lower = more frequent.
+        self.map_update_interval = max(1, int(map_update_interval))
 
         # Occupancy grid: -1 = unknown, 0 = free, 100 = occupied
         self.grid = np.full((map_size, map_size), -1, dtype=np.int16)
@@ -365,8 +417,12 @@ class SlamProcessor:
         self.scan_count = 0
         self.last_map_update = 0
 
-        logger.info("SlamProcessor created for %s: %dx%d grid, %.2fm resolution",
-                    robot_id, map_size, map_size, resolution)
+        logger.info(
+            "SlamProcessor created for %s: %dx%d grid, %.2fm res, downsample=%d "
+            "(->%.2fm), update every %d scans",
+            robot_id, map_size, map_size, resolution, self.downsample,
+            resolution * self.downsample, self.map_update_interval,
+        )
 
     def process_scan(self, scan_data: dict) -> Optional[dict]:
         """Process a laser scan and update the map.
@@ -409,11 +465,22 @@ class SlamProcessor:
             x_world = self.pose[0] + x_robot * cos_theta - y_robot * sin_theta
             y_world = self.pose[1] + x_robot * sin_theta + y_robot * cos_theta
 
+            # Aggregate points: keep one representative per coarse cell so we don't
+            # integrate every lidar return (cheaper ray-tracing, lower-res map).
+            if self.downsample > 1 and x_world.size > 0:
+                cell_size = self.resolution * self.downsample
+                cells = np.stack(
+                    [np.floor(x_world / cell_size), np.floor(y_world / cell_size)],
+                    axis=1,
+                )
+                _, keep = np.unique(cells, axis=0, return_index=True)
+                x_world, y_world = x_world[keep], y_world[keep]
+
             # Update occupancy grid
             self._update_grid(x_world, y_world)
 
-            # Send map update every 10 scans (~1 second at 10Hz)
-            if self.scan_count - self.last_map_update >= 10:
+            # Send map update every `map_update_interval` scans (~0.1s each at 10Hz)
+            if self.scan_count - self.last_map_update >= self.map_update_interval:
                 self.last_map_update = self.scan_count
                 return self._get_map_update()
 
@@ -458,19 +525,43 @@ class SlamProcessor:
                             if curr < 50:  # Don't clear if strongly occupied
                                 self.grid[cy, cx] = max(0, curr - 5) if curr >= 0 else 0
 
+    @staticmethod
+    def downsample_grid(grid: np.ndarray, factor: int) -> np.ndarray:
+        """Aggregate an occupancy grid into coarse blocks of `factor` x `factor`.
+
+        Block priority is occupied (100) > free (0) > unknown (-1): an obstacle
+        anywhere in a block marks the whole block occupied (conservative for a
+        minimap). Since occupied > free > unknown numerically, a block-max does
+        exactly this. Reusable for any occupancy grid (e.g. slam_toolbox output).
+        """
+        if factor <= 1:
+            return grid
+        h, w = grid.shape
+        # Crop to a whole multiple of `factor` so the reshape is exact.
+        h2, w2 = (h // factor) * factor, (w // factor) * factor
+        if h2 == 0 or w2 == 0:
+            return grid
+        cropped = grid[:h2, :w2]
+        blocks = cropped.reshape(h2 // factor, factor, w2 // factor, factor)
+        return blocks.max(axis=(1, 3))
+
     def _get_map_update(self) -> dict:
-        """Generate map update message for browsers."""
+        """Generate map update message for browsers (downsampled / lower-res)."""
+        out_grid = self.downsample_grid(self.grid, self.downsample)
+        out_h, out_w = out_grid.shape
+        out_resolution = self.resolution * self.downsample
+
         # Convert grid to uint8: -1 -> 0 (unknown), 0 -> 1 (free), 100 -> 101 (occupied)
         # Clamp values to valid range before converting
-        grid_clamped = np.clip(self.grid.flatten(), -1, 100)
+        grid_clamped = np.clip(out_grid.flatten(), -1, 100)
         grid_uint8 = (grid_clamped + 1).astype(np.uint8)
         map_b64 = base64.b64encode(grid_uint8.tobytes()).decode('ascii')
 
         return {
             "type": "map_update",
-            "width": self.map_width,
-            "height": self.map_height,
-            "resolution": self.resolution,
+            "width": out_w,
+            "height": out_h,
+            "resolution": out_resolution,
             "origin_x": self.origin_x,
             "origin_y": self.origin_y,
             "robot_x": self.pose[0],
@@ -1958,6 +2049,14 @@ class TelemetryPayload(BaseModel):
     linear_speed: float = 0.0
     angular_speed: float = 0.0
     timestamp: float | None = None
+
+
+class PoseGraphPayload(BaseModel):
+    """slam_toolbox serialized pose graph, base64-encoded, from the bridge."""
+    posegraph_b64: str
+    data_b64: str
+    robot_namespace: str | None = None
+    resolution: float | None = None
 
 
 class UserOut(BaseModel):
@@ -3803,6 +3902,72 @@ async def ingest_telemetry(
     return {"robot": robot_id, "status": "ok"}
 
 
+@app.post("/api/internal/slam/pose-graph")
+async def upload_pose_graph(
+    payload: PoseGraphPayload,
+    x_api_key: str = Header(default=""),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    """Persist a lobby's slam_toolbox pose graph (upsert). The api key scopes the lobby."""
+    lobby_id = await require_internal_api_key(x_api_key, session)
+    try:
+        posegraph_bytes = base64.b64decode(payload.posegraph_b64)
+        data_bytes = base64.b64decode(payload.data_b64)
+    except Exception:
+        raise HTTPException(status_code=400, detail="invalid base64 pose graph")
+    if not posegraph_bytes or not data_bytes:
+        raise HTTPException(status_code=400, detail="empty pose graph")
+
+    existing = (
+        await session.execute(
+            select(SlamPoseGraph).where(SlamPoseGraph.lobby_id == lobby_id)
+        )
+    ).scalar_one_or_none()
+    if existing is not None:
+        existing.posegraph = posegraph_bytes
+        existing.data = data_bytes
+        existing.robot_namespace = payload.robot_namespace
+        existing.resolution = payload.resolution
+    else:
+        session.add(
+            SlamPoseGraph(
+                lobby_id=lobby_id,
+                robot_namespace=payload.robot_namespace,
+                posegraph=posegraph_bytes,
+                data=data_bytes,
+                resolution=payload.resolution,
+            )
+        )
+    await session.commit()
+    total = len(posegraph_bytes) + len(data_bytes)
+    logger.info("Stored slam pose graph for lobby %s (%d bytes)", lobby_id, total)
+    return {"lobby_id": lobby_id, "status": "ok", "bytes": total}
+
+
+@app.get("/api/internal/slam/pose-graph")
+async def download_pose_graph(
+    x_api_key: str = Header(default=""),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    """Return a lobby's stored pose graph so the bridge can deserialize/continue it."""
+    lobby_id = await require_internal_api_key(x_api_key, session)
+    row = (
+        await session.execute(
+            select(SlamPoseGraph).where(SlamPoseGraph.lobby_id == lobby_id)
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        raise HTTPException(status_code=404, detail="no pose graph for lobby")
+    return {
+        "lobby_id": lobby_id,
+        "robot_namespace": row.robot_namespace,
+        "resolution": row.resolution,
+        "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+        "posegraph_b64": base64.b64encode(row.posegraph).decode("ascii"),
+        "data_b64": base64.b64encode(row.data).decode("ascii"),
+    }
+
+
 async def broadcast_telemetry(robot_id: str, data: Dict[str, Any]) -> None:
     """Broadcast telemetry to all subscribed websockets."""
     payload = {"type": "telemetry", "robot": robot_id, **data}
@@ -4317,6 +4482,8 @@ async def handle_forwarder_offer(ws: WebSocket, message: dict) -> None:
     hop1_telemetry_channels.pop(robot, None)
     hop1_control_channels.pop(robot, None)
     hop1_scan_channels.pop(robot, None)
+    hop1_slam_map_channels.pop(robot, None)
+    slam_toolbox_robots.discard(robot)
 
     pc = RTCPeerConnection()
     robot_forwarder_pcs[robot] = pc
@@ -4370,7 +4537,11 @@ async def handle_forwarder_offer(ws: WebSocket, message: dict) -> None:
 
             # Create SLAM processor for this robot if not exists
             if robot not in slam_processors:
-                slam_processors[robot] = SlamProcessor(robot)
+                slam_processors[robot] = SlamProcessor(
+                    robot,
+                    downsample=settings.slam_map_downsample,
+                    map_update_interval=settings.slam_map_update_interval,
+                )
                 logger.info("SFU Hop1: created SlamProcessor for %s", robot)
 
             # Create the handler once with closure over robot
@@ -4387,7 +4558,9 @@ async def handle_forwarder_offer(ws: WebSocket, message: dict) -> None:
                     processor = slam_processors.get(robot)
                     if processor:
                         map_update = processor.process_scan(scan_data)
-                        if map_update:
+                        # If slam_toolbox is providing this robot's map (Design B),
+                        # let it win — don't also broadcast the fallback grid.
+                        if map_update and robot not in slam_toolbox_robots:
                             logger.info("SFU Hop1: sending map update for %s (scan %d)", robot, processor.scan_count)
                             _relay_map_to_browsers(robot, json.dumps(map_update))
                     else:
@@ -4403,6 +4576,28 @@ async def handle_forwarder_offer(ws: WebSocket, message: dict) -> None:
             def on_scan_close() -> None:
                 logger.info("SFU Hop1: scan data channel closed for %s", robot)
                 hop1_scan_channels.pop(robot, None)
+
+        elif channel.label == "slam_map":
+            # Map produced by server-side slam_toolbox (in ros-bridge). Relay it
+            # straight to browsers and mark the robot so the scan-based fallback
+            # SlamProcessor stops broadcasting.
+            hop1_slam_map_channels[robot] = channel
+            slam_toolbox_robots.add(robot)
+            logger.info("SFU Hop1: slam_map channel received for %s", robot)
+
+            @channel.on("message")
+            def on_slam_map_message(message: str) -> None:
+                _relay_map_to_browsers(robot, message)
+
+            @channel.on("open")
+            def on_slam_map_open() -> None:
+                logger.info("SFU Hop1: slam_map data channel open for %s", robot)
+
+            @channel.on("close")
+            def on_slam_map_close() -> None:
+                logger.info("SFU Hop1: slam_map data channel closed for %s", robot)
+                hop1_slam_map_channels.pop(robot, None)
+                slam_toolbox_robots.discard(robot)
 
     @pc.on("connectionstatechange")
     async def on_state() -> None:

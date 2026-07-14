@@ -10,6 +10,7 @@ RUN apt-get update && apt-get install -y \
     pkg-config \
     ros-humble-rosbridge-server \
     ros-humble-rmw-fastrtps-cpp \
+    ros-humble-slam-toolbox \
     && rm -rf /var/lib/apt/lists/*
 
 # Set FastRTPS as the RMW implementation

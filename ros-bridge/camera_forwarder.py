@@ -26,6 +26,13 @@ from sensor_msgs.msg import Image, LaserScan
 from std_msgs.msg import String, UInt8MultiArray, Int32MultiArray
 import base64
 
+try:
+    from slam_manager import SlamManager
+    _HAVE_SLAM = True
+except Exception as _slam_import_err:  # pragma: no cover - missing ROS SLAM deps
+    SlamManager = None
+    _HAVE_SLAM = False
+
 
 _CAMERA_TOPIC_RE = re.compile(r"^/([^/]+)/camera/image_raw$")
 _TELEMETRY_TOPIC_RE = re.compile(r"^/([^/]+)/telemetry$")
@@ -244,6 +251,8 @@ class RobotBridgeNode(Node):
         # Map handling
         self.scan_subscriptions: Dict[str, Subscription] = {}
         self._scan_channels: Dict[str, RTCDataChannel] = {}
+        # slam_toolbox map forwarded up to the API (Design B), robot -> channel
+        self._slam_map_channels: Dict[str, RTCDataChannel] = {}
 
         # SFU: one track and one PC per robot (forwarder -> server)
         self._video_tracks: Dict[str, RosVideoTrack] = {}
@@ -265,7 +274,35 @@ class RobotBridgeNode(Node):
         self.ws_thread = threading.Thread(target=self._run_command_socket, daemon=True)
         self.ws_thread.start()
 
+        # Server-side pose-graph SLAM (slam_toolbox per robot). Optional so the
+        # bridge still runs if the SLAM deps are unavailable.
+        self.slam_manager = None
+        if _HAVE_SLAM and os.getenv("ENABLE_SLAM", "1") != "0":
+            try:
+                self.slam_manager = SlamManager(
+                    node=self,
+                    api_base=self.api_base,
+                    headers=self.headers,
+                    http_session=self.http_session,
+                    map_sender=self._send_slam_map,
+                )
+                self.get_logger().info("SlamManager enabled (server-side slam_toolbox)")
+            except Exception as e:  # noqa: BLE001
+                self.get_logger().warning(f"SlamManager init failed, SLAM disabled: {e}")
+        else:
+            self.get_logger().info("SlamManager disabled (deps missing or ENABLE_SLAM=0)")
+
         self.get_logger().info("RobotBridge started — discovering robots dynamically")
+
+    def _send_slam_map(self, robot: str, json_str: str) -> None:
+        """Forward a slam_toolbox map_update up to the API over the slam_map channel."""
+        channel = self._slam_map_channels.get(robot)
+        if not channel or channel.readyState != "open":
+            return
+        try:
+            self._aio_loop.call_soon_threadsafe(channel.send, json_str)
+        except Exception as e:  # noqa: BLE001
+            self.get_logger().warning(f"slam_map channel send failed for {robot}: {e}")
 
     # ── Topic discovery ──────────────────────────────────────────────
 
@@ -367,6 +404,13 @@ class RobotBridgeNode(Node):
             _SCAN_QOS,
         )
 
+        # Start server-side pose-graph SLAM for this robot (slam_toolbox).
+        if self.slam_manager is not None:
+            try:
+                self.slam_manager.start(robot)
+            except Exception as e:  # noqa: BLE001
+                self.get_logger().warning(f"slam_manager.start failed for {robot}: {e}")
+
         if not self._ice_servers_fetched:
             self._fetch_ice_servers()
 
@@ -404,6 +448,13 @@ class RobotBridgeNode(Node):
         # Send reset commands to stop the robot when all streams stop
         self._send_reset_commands(robot)
 
+        # Tear down server-side SLAM (serializes + uploads the pose graph first).
+        if self.slam_manager is not None:
+            try:
+                self.slam_manager.stop(robot)
+            except Exception as e:  # noqa: BLE001
+                self.get_logger().warning(f"slam_manager.stop failed for {robot}: {e}")
+
         sub = self.camera_subscriptions.pop(robot, None)
         if sub:
             self.destroy_subscription(sub)
@@ -423,6 +474,7 @@ class RobotBridgeNode(Node):
         self._telemetry_channels.pop(robot, None)
         self._control_channels.pop(robot, None)
         self._scan_channels.pop(robot, None)
+        self._slam_map_channels.pop(robot, None)
         self.get_logger().info(f"Stopped streaming /{robot}/camera/image_raw + audio + scan")
 
     def _handle_audio_webrtc(self, robot_id: str, msg: UInt8MultiArray) -> None:
@@ -631,6 +683,20 @@ class RobotBridgeNode(Node):
         def _on_scan_close() -> None:
             self.get_logger().info(f"Scan data channel closed for {robot}")
             self._scan_channels.pop(robot, None)
+
+        # Create slam_map data channel (robot -> API): forwards slam_toolbox's
+        # OccupancyGrid + drift-corrected pose for the API to relay to browsers.
+        slam_map_channel = pc.createDataChannel("slam_map", ordered=False)
+        self._slam_map_channels[robot] = slam_map_channel
+
+        @slam_map_channel.on("open")
+        def _on_slam_map_open() -> None:
+            self.get_logger().info(f"Slam map data channel open for {robot}")
+
+        @slam_map_channel.on("close")
+        def _on_slam_map_close() -> None:
+            self.get_logger().info(f"Slam map data channel closed for {robot}")
+            self._slam_map_channels.pop(robot, None)
 
         offer = await pc.createOffer()
         await pc.setLocalDescription(offer)
@@ -981,6 +1047,11 @@ def main() -> None:
     try:
         rclpy.spin(node)
     finally:
+        if getattr(node, "slam_manager", None) is not None:
+            try:
+                node.slam_manager.shutdown()
+            except Exception:  # noqa: BLE001
+                pass
         node.destroy_node()
         rclpy.shutdown()
         aio_loop.call_soon_threadsafe(aio_loop.stop)

@@ -616,18 +616,50 @@
 
       /* SLAM Minimap HUD */
       .hud-minimap {
+        position: relative;
         width: 150px;
         height: 150px;
         background: rgba(0,0,0,0.7);
         border: 1px solid rgba(148,163,184,0.5);
         border-radius: 8px;
-        pointer-events: none;
+        pointer-events: auto;
+        cursor: pointer;
+        transition: width 0.15s ease, height 0.15s ease;
+      }
+      .hud-minimap.expanded {
+        position: fixed;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        width: min(80vh, 80vw);
+        height: min(80vh, 80vw);
+        z-index: 60;
+        box-shadow: 0 10px 40px rgba(0,0,0,0.6);
       }
       #minimap-canvas {
         width: 100%;
         height: 100%;
         border-radius: 8px;
       }
+      .minimap-expand-btn {
+        position: absolute;
+        top: 4px;
+        right: 4px;
+        width: 22px;
+        height: 22px;
+        padding: 0;
+        line-height: 1;
+        font-size: 13px;
+        border: none;
+        border-radius: 5px;
+        background: rgba(15,23,42,0.7);
+        color: #e2e8f0;
+        cursor: pointer;
+        pointer-events: auto;
+        opacity: 0.6;
+        transition: opacity 0.15s ease;
+      }
+      .hud-minimap:hover .minimap-expand-btn { opacity: 1; }
       @media (max-width: 600px) {
         .hud-minimap {
           width: 100px;
@@ -1064,8 +1096,9 @@
                     <button id="robot-mic-btn" class="ghost mic-btn speaker-vote vote-none" type="button" title="Voice to robot speaker">🔊</button>
                     <button id="video-fullscreen-btn" class="ghost" type="button" aria-label="Toggle fullscreen">⤢</button>
                   </div>
-                  <div class="hud-minimap" id="hud-minimap">
+                  <div class="hud-minimap" id="hud-minimap" title="Click or press M to expand">
                     <canvas id="minimap-canvas" width="150" height="150"></canvas>
+                    <button id="minimap-expand-btn" class="minimap-expand-btn" type="button" aria-label="Expand map (M)" title="Expand map (M)">⤢</button>
                   </div>
                 </div>
                 <button class="mobile-exit-btn" id="mobile-exit-btn" type="button">✕ Exit</button>
@@ -2358,9 +2391,9 @@
             state.mapChannel.close();
             state.mapChannel = null;
           }
-          // Clear minimap
+          // Clear minimap and collapse it if expanded
           state.mapData = null;
-          clearMinimap();
+          setMinimapExpanded(false);
           if (state.pc) {
             state.pc.close();
             state.pc = null;
@@ -3346,22 +3379,43 @@
           tmpCanvas.height = map.height;
           tmpCanvas.getContext('2d').putImageData(imgData, 0, 0);
 
-          // Clear and draw scaled
+          // Clear and draw scaled. The occupancy grid is row-major with row 0 at
+          // the map origin (minimum y, ROS y-up), but putImageData places row 0 at
+          // the top, so flip vertically to render a conventional y-up map. The
+          // robot marker below assumes this orientation.
           ctx.clearRect(0, 0, canvas.width, canvas.height);
+          ctx.save();
+          ctx.translate(0, canvas.height);
+          ctx.scale(1, -1);
           ctx.drawImage(tmpCanvas, 0, 0, canvas.width, canvas.height);
+          ctx.restore();
 
-          // Draw robot position indicator (center for now - TODO: use odometry)
+          // Robot position: map pose (world metres) -> grid cell -> canvas px.
+          // Falls back to map centre if pose fields are absent (older sources).
+          const res = map.resolution || 0.05;
+          let rx = canvas.width / 2;
+          let ry = canvas.height / 2;
+          if (typeof map.robot_x === 'number' && typeof map.origin_x === 'number') {
+            const cellX = (map.robot_x - map.origin_x) / res;
+            const cellY = (map.robot_y - map.origin_y) / res;
+            rx = (cellX / map.width) * canvas.width;
+            // Grid is row-major from origin (y up); canvas y is down -> flip.
+            ry = canvas.height - (cellY / map.height) * canvas.height;
+          }
+          const theta = typeof map.robot_theta === 'number' ? map.robot_theta : Math.PI / 2;
+
           ctx.fillStyle = '#3b82f6';
           ctx.beginPath();
-          ctx.arc(canvas.width / 2, canvas.height / 2, 4, 0, 2 * Math.PI);
+          ctx.arc(rx, ry, 4, 0, 2 * Math.PI);
           ctx.fill();
 
-          // Draw direction indicator
+          // Direction indicator (theta measured CCW from +x; canvas y is flipped).
+          const len = 10;
           ctx.strokeStyle = '#3b82f6';
           ctx.lineWidth = 2;
           ctx.beginPath();
-          ctx.moveTo(canvas.width / 2, canvas.height / 2);
-          ctx.lineTo(canvas.width / 2, canvas.height / 2 - 8);
+          ctx.moveTo(rx, ry);
+          ctx.lineTo(rx + len * Math.cos(theta), ry - len * Math.sin(theta));
           ctx.stroke();
         }
 
@@ -3375,6 +3429,29 @@
           ctx.font = '10px sans-serif';
           ctx.textAlign = 'center';
           ctx.fillText('No map', canvas.width / 2, canvas.height / 2);
+        }
+
+        function setMinimapExpanded(expanded) {
+          const hud = document.getElementById('hud-minimap');
+          const canvas = document.getElementById('minimap-canvas');
+          if (!hud || !canvas) return;
+          state.minimapExpanded = expanded;
+          hud.classList.toggle('expanded', expanded);
+          // Use a larger drawing buffer when expanded so the map stays crisp.
+          const size = expanded ? 600 : 150;
+          if (canvas.width !== size) {
+            canvas.width = size;
+            canvas.height = size;
+          }
+          if (state.mapData) {
+            renderMinimap();
+          } else {
+            clearMinimap();
+          }
+        }
+
+        function toggleMinimap() {
+          setMinimapExpanded(!state.minimapExpanded);
         }
 
         function updateTeleopKeyState() {
@@ -3769,6 +3846,28 @@
 
         window.addEventListener('keydown', (event) => handleKey(event, true));
         window.addEventListener('keyup', (event) => handleKey(event, false));
+
+        // Expand/collapse the SLAM minimap via the button, clicking it, or "M".
+        const minimapExpandBtn = document.getElementById('minimap-expand-btn');
+        if (minimapExpandBtn) {
+          minimapExpandBtn.addEventListener('click', (event) => {
+            event.stopPropagation();
+            toggleMinimap();
+          });
+        }
+        const hudMinimap = document.getElementById('hud-minimap');
+        if (hudMinimap) {
+          hudMinimap.addEventListener('click', () => toggleMinimap());
+        }
+        window.addEventListener('keydown', (event) => {
+          if (event.key.toLowerCase() !== 'm') return;
+          const el = document.activeElement;
+          const tag = (el && el.tagName) || '';
+          if (tag === 'INPUT' || tag === 'TEXTAREA' || (el && el.isContentEditable)) return;
+          if (state.view !== 'detail') return;
+          event.preventDefault();
+          toggleMinimap();
+        });
 
         // ── Ghost Joystick for Other Users' Inputs ──────────────────────
         const ghostMoveJoystick = document.getElementById('ghost-move-joystick');
