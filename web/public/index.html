@@ -1122,9 +1122,15 @@
               <option value="public">Public</option>
               <option value="private">Private</option>
             </select>
-            <label style="display:flex;align-items:center;gap:0.5rem;margin-top:0.5rem;">
-              <input type="checkbox" id="lobby-is-virtual">
-              Virtual lobby (allows spawning virtual players instead of robots)
+            <label for="lobby-style">Style</label>
+            <select id="lobby-style">
+              <option value="remote">Remote (external robots)</option>
+              <option value="raycast">Raycast (first-person world)</option>
+              <option value="dom" disabled>DOM (coming soon)</option>
+            </select>
+            <label id="spawn-toggle-row" style="display:none;align-items:center;gap:0.5rem;margin-top:0.5rem;">
+              <input type="checkbox" id="lobby-allow-spawn">
+              Allow players to spawn (enables the "Add Player" request)
             </label>
             <div class="key-row" id="key-row" hidden>
               <div>
@@ -1256,7 +1262,14 @@
         const lobbyNameInput = document.getElementById('lobby-name');
         const lobbyDescInput = document.getElementById('lobby-desc');
         const lobbyVisibilityInput = document.getElementById('lobby-visibility');
-        const lobbyIsVirtualInput = document.getElementById('lobby-is-virtual');
+        const lobbyStyleInput = document.getElementById('lobby-style');
+        const lobbyAllowSpawnInput = document.getElementById('lobby-allow-spawn');
+        const spawnToggleRow = document.getElementById('spawn-toggle-row');
+        const VIRTUAL_GAME_STYLES = ['raycast', 'dom'];
+        function isVirtualStyle(style) { return VIRTUAL_GAME_STYLES.includes(style); }
+        function updateSpawnToggleVisibility() {
+          spawnToggleRow.style.display = isVirtualStyle(lobbyStyleInput.value) ? 'flex' : 'none';
+        }
         const lobbyMessage = document.getElementById('lobby-message');
         const keyRow = document.getElementById('key-row');
         const lobbyKeyEl = document.getElementById('lobby-key');
@@ -1422,6 +1435,8 @@
           authToken: initialToken,
           userEmail: initialEmail,
           clientId: clientId,
+          spawnRequestInProgress: false,
+          spawnRequestTimeout: null,
           lobbies: [],
           offlineLobbies: [],
           offlineCollapsed: true,
@@ -1525,7 +1540,7 @@
                   appendChatMessage(msg.message);
                 }
               } else if (msg.type === 'virtual_player_created') {
-                // Handle new virtual player
+                // Handle new virtual player (the response to our spawn request)
                 if (state.currentLobby && state.currentLobby.id === msg.lobby_id && msg.player) {
                   if (!state.currentLobby.virtual_players) {
                     state.currentLobby.virtual_players = [];
@@ -1533,8 +1548,8 @@
                   // Avoid duplicates
                   if (!state.currentLobby.virtual_players.some(p => p.id === msg.player.id)) {
                     state.currentLobby.virtual_players.push(msg.player);
-                    renderLobbyRobots();
                   }
+                  setSpawnRequestInProgress(false);  // clears pending + re-renders
                 }
               } else if (msg.type === 'virtual_player_deleted') {
                 // Handle deleted virtual player
@@ -1960,23 +1975,63 @@
         }
 
         function renderAddVirtualPlayerButton(container) {
-          // Only show for virtual lobbies
-          if (!state.currentLobby?.is_virtual) return;
+          const lobby = state.currentLobby;
+          if (!lobby) return;
+
+          // The "Add Player" control fires a request event to the game. It's only
+          // active when the game has registered the matching listener (and the
+          // lobby is virtual). For non-virtual lobbies it's shown but disabled.
+          const hasSpawnListener = (lobby.game_listeners || []).includes('spawn_player');
+          const enabled = !!lobby.is_virtual && hasSpawnListener;
+          const inProgress = !!state.spawnRequestInProgress;
 
           const addCard = document.createElement('div');
-          addCard.className = 'robot-card';
-          addCard.style.cssText = 'border:2px dashed rgba(148,163,184,0.4);background:transparent;cursor:pointer;display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100px;';
-          addCard.innerHTML = `
-            <span style="font-size:2rem;color:#64748b;">+</span>
-            <span style="color:#94a3b8;font-size:0.9rem;">Add Virtual Player</span>
-          `;
-          addCard.addEventListener('click', () => createVirtualPlayer());
+          addCard.className = 'robot-card add-player-card';
+          const base = 'background:transparent;display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100px;';
+          if (inProgress) {
+            addCard.style.cssText = base + 'border:2px solid #f59e0b;cursor:wait;';
+            addCard.innerHTML = `
+              <span style="font-size:1.6rem;color:#f59e0b;">⟳</span>
+              <span style="color:#f59e0b;font-size:0.9rem;">Requesting…</span>
+            `;
+          } else if (enabled) {
+            addCard.style.cssText = base + 'border:2px dashed rgba(148,163,184,0.4);cursor:pointer;';
+            addCard.innerHTML = `
+              <span style="font-size:2rem;color:#64748b;">+</span>
+              <span style="color:#94a3b8;font-size:0.9rem;">Add Player</span>
+            `;
+            addCard.addEventListener('click', () => createVirtualPlayer());
+          } else {
+            addCard.style.cssText = base + 'border:2px dashed rgba(148,163,184,0.25);cursor:not-allowed;opacity:0.5;';
+            addCard.title = 'Spawning players is not enabled for this lobby';
+            addCard.innerHTML = `
+              <span style="font-size:2rem;color:#475569;">+</span>
+              <span style="color:#64748b;font-size:0.9rem;">Add Player</span>
+            `;
+          }
           container.appendChild(addCard);
+        }
+
+        // Track an in-flight "request" event (e.g. spawn_player) so the button can
+        // show a pending state until the game responds. Generalizes to other
+        // request/response listeners later.
+        function setSpawnRequestInProgress(on) {
+          state.spawnRequestInProgress = on;
+          if (state.spawnRequestTimeout) {
+            clearTimeout(state.spawnRequestTimeout);
+            state.spawnRequestTimeout = null;
+          }
+          if (on) {
+            // Safety timeout so the button recovers if no response arrives.
+            state.spawnRequestTimeout = setTimeout(() => setSpawnRequestInProgress(false), 10000);
+          }
+          renderLobbyRobots();
         }
 
         function createVirtualPlayer() {
           const lobby = state.currentLobby;
           if (!lobby) return;
+          if (state.spawnRequestInProgress) return;  // one request at a time
 
           const name = prompt('Enter name for virtual player:', `Player ${(lobby.virtual_players?.length || 0) + 1}`);
           if (!name) return;
@@ -1984,7 +2039,8 @@
           const colors = ['#3b82f6', '#ef4444', '#22c55e', '#f59e0b', '#8b5cf6', '#ec4899'];
           const color = colors[Math.floor(Math.random() * colors.length)];
 
-          // Send request via WebSocket
+          // Send request event to the game via WebSocket; the game's listener
+          // responds with a virtual_player_created event that clears the pending state.
           const ws = state.lobbyStatusWs;
           if (ws && ws.readyState === WebSocket.OPEN) {
             ws.send(JSON.stringify({
@@ -1994,10 +2050,10 @@
               color,
             }));
             console.log('[virtual-player] Requested new player via WebSocket');
+            setSpawnRequestInProgress(true);
           } else {
             alert('Not connected to server. Please refresh the page.');
           }
-          // Player will be added via WebSocket event (virtual_player_created)
         }
 
         function deleteVirtualPlayer(namespace) {
@@ -2018,9 +2074,14 @@
         }
 
         function selectVirtualPlayer(player) {
-          // For now, virtual players can only be viewed when Tauri host is streaming
-          // TODO: Connect to Tauri host's video stream for this virtual player
-          alert(`Virtual player "${player.name}" is ready.\n\nTo see the view, run the Virtual Lobby desktop app and connect with the lobby key.`);
+          // Virtual players stream a server-generated first-person view over the
+          // same WebRTC path as robots. Treat the player as a bot keyed by its
+          // namespace and reuse the normal teleop/streaming components.
+          selectRobot({
+            id: `virtual:${player.id}`,
+            name: player.name,
+            ros_namespace: player.namespace,
+          }, false);
         }
 
         // ---- Chat Functions ----
@@ -3978,7 +4039,9 @@
           lobbyNameInput.value = lobby?.name || '';
           lobbyDescInput.value = lobby?.description || '';
           lobbyVisibilityInput.value = lobby?.is_public ? 'public' : 'private';
-          lobbyIsVirtualInput.checked = lobby?.is_virtual || false;
+          lobbyStyleInput.value = lobby?.game_style || 'remote';
+          lobbyAllowSpawnInput.checked = (lobby?.game_listeners || []).includes('spawn_player');
+          updateSpawnToggleVisibility();
 
           // Show pending changes indicator
           if (pendingChanges) {
@@ -4084,17 +4147,25 @@
         async function autoSaveLobby() {
           if (!state.manageLobby) return;
           const lobbyId = state.manageLobby.id;
+          const style = lobbyStyleInput.value;
+          const allowSpawn = lobbyAllowSpawnInput.checked;
           const body = {
             name: lobbyNameInput.value,
             description: lobbyDescInput.value || null,
             is_public: lobbyVisibilityInput.value === 'public',
-            is_virtual: lobbyIsVirtualInput.checked,
+            game_style: style,
+            allow_spawn_players: allowSpawn,
+          };
+          // Mirror server-derived fields locally for immediate UI feedback
+          const derived = {
+            is_virtual: isVirtualStyle(style),
+            game_listeners: allowSpawn ? ['spawn_player'] : [],
           };
 
           // Update local state immediately
-          Object.assign(state.manageLobby, body);
+          Object.assign(state.manageLobby, body, derived);
           if (state.currentLobby?.id === lobbyId) {
-            Object.assign(state.currentLobby, body);
+            Object.assign(state.currentLobby, body, derived);
             renderLobbyDetail();
           }
 
@@ -4145,7 +4216,8 @@
         lobbyNameInput.addEventListener('blur', () => { if (state.manageLobby) autoSaveLobby(); });
         lobbyDescInput.addEventListener('blur', () => { if (state.manageLobby) autoSaveLobby(); });
         lobbyVisibilityInput.addEventListener('change', () => { if (state.manageLobby) autoSaveLobby(); });
-        lobbyIsVirtualInput.addEventListener('change', () => { if (state.manageLobby) autoSaveLobby(); });
+        lobbyStyleInput.addEventListener('change', () => { updateSpawnToggleVisibility(); if (state.manageLobby) autoSaveLobby(); });
+        lobbyAllowSpawnInput.addEventListener('change', () => { if (state.manageLobby) autoSaveLobby(); });
 
         // For new lobbies, create on first field blur if name is filled
         lobbyForm.addEventListener('submit', async (event) => {
@@ -4162,7 +4234,8 @@
             name: lobbyNameInput.value,
             description: lobbyDescInput.value || null,
             is_public: lobbyVisibilityInput.value === 'public',
-            is_virtual: lobbyIsVirtualInput.checked,
+            game_style: lobbyStyleInput.value,
+            allow_spawn_players: lobbyAllowSpawnInput.checked,
           };
           try {
             const resp = await authFetch(`${apiBase()}/lobbies`, {

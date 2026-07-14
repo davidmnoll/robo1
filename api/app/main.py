@@ -16,6 +16,8 @@ import numpy as np
 from aiortc import AudioStreamTrack, MediaStreamTrack, RTCDataChannel, RTCPeerConnection, RTCSessionDescription
 from aiortc.contrib.media import MediaRelay
 from av import AudioFrame
+
+from app.virtual_world import RaycastCameraTrack, VirtualWorld
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from jose import JWTError, jwt
@@ -46,7 +48,7 @@ with contextlib.suppress(ImportError):
 from passlib.context import CryptContext
 from pydantic import BaseModel, Field, ValidationError, constr, field_validator
 from pydantic_settings import BaseSettings
-from sqlalchemy import Boolean, Column, DateTime, Float, ForeignKey, Integer, String, Text, delete, or_, select, text
+from sqlalchemy import JSON, Boolean, Column, DateTime, Float, ForeignKey, Integer, String, Text, delete, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, relationship, selectinload
 
@@ -127,6 +129,10 @@ class Lobby(Base):
     is_public = Column(Boolean, nullable=False, default=False, server_default=text("false"))
     is_virtual = Column(Boolean, nullable=False, default=False, server_default=text("false"))
     is_deleted = Column(Boolean, nullable=False, default=False, server_default=text("false"))
+    # Virtual-lobby game style ("remote" = external robots, "raycast", "dom"…)
+    game_style = Column(String(32), nullable=False, default="remote", server_default=text("'remote'"))
+    # Active event listeners registered with the game (e.g. ["spawn_player"]).
+    game_listeners = Column(JSON, nullable=False, default=list, server_default=text("'[]'"))
 
     owner = relationship("User", back_populates="lobbies")
     bots = relationship("Bot", back_populates="lobby", cascade="all, delete-orphan")
@@ -281,6 +287,12 @@ browser_user_pcs: Dict[str, RTCPeerConnection] = {}
 user_signaling_locks: Dict[str, asyncio.Lock] = {}
 # Robot audio broadcasters - consumes Hop1 audio and broadcasts to Hop2 subscribers
 robot_audio_broadcasters: Dict[str, "RobotAudioBroadcaster"] = {}
+
+# Internal "virtual lobby" game state (server-generated frames when offline).
+# One VirtualWorld per lobby_id; a namespace->world map for control routing.
+active_virtual_worlds: Dict[int, VirtualWorld] = {}       # lobby_id -> world
+virtual_ns_world: Dict[str, VirtualWorld] = {}            # player namespace -> world
+virtual_world_lock = asyncio.Lock()                       # serialize world setup/teardown
 
 # Data channels for control and telemetry relay
 # Hop1: ros-bridge <-> API
@@ -1990,18 +2002,25 @@ class LobbyOnlineRequest(BaseModel):
     access_key: constr(min_length=1, max_length=255)
 
 
+# Game styles that are server-simulated "virtual" lobbies (is_virtual=True).
+# "remote" = robots/frames handled by an external machine (relay); not virtual.
+VIRTUAL_GAME_STYLES = {"raycast", "dom"}
+
+
 class LobbyCreate(BaseModel):
     name: constr(min_length=1, strip_whitespace=True)
     description: Optional[str] = None
     is_public: bool = False
-    is_virtual: bool = False
+    game_style: str = "remote"
+    allow_spawn_players: bool = True
 
 
 class LobbyUpdate(BaseModel):
     name: Optional[constr(min_length=1, strip_whitespace=True)] = None
     description: Optional[str] = None
     is_public: Optional[bool] = None
-    is_virtual: Optional[bool] = None
+    game_style: Optional[str] = None
+    allow_spawn_players: Optional[bool] = None
 
 
 class BotCreate(BaseModel):
@@ -2028,6 +2047,8 @@ class LobbyOut(BaseModel):
     created_at: datetime
     is_public: bool
     is_virtual: bool
+    game_style: str
+    game_listeners: list[str]
     is_deleted: bool
     is_owner: bool
     bot_count: int
@@ -2237,6 +2258,10 @@ async def create_lobby(
     session: AsyncSession = Depends(get_session),
 ) -> LobbyOut:
     access_key = secrets.token_urlsafe(16)
+    style = payload.game_style or "remote"
+    is_virtual = style in VIRTUAL_GAME_STYLES
+    # Seed the hardcoded spawn_player listener for virtual games when allowed.
+    listeners = ["spawn_player"] if (is_virtual and payload.allow_spawn_players) else []
     lobby = Lobby(
         name=payload.name.strip(),
         ros_host="internal",
@@ -2245,7 +2270,9 @@ async def create_lobby(
         access_key=access_key,
         owner_id=current_user.id,
         is_public=payload.is_public,
-        is_virtual=payload.is_virtual,
+        is_virtual=is_virtual,
+        game_style=style,
+        game_listeners=listeners,
     )
     session.add(lobby)
     await session.commit()
@@ -2298,8 +2325,16 @@ async def update_lobby(
         lobby.description = payload.description
     if payload.is_public is not None:
         lobby.is_public = payload.is_public
-    if payload.is_virtual is not None:
-        lobby.is_virtual = payload.is_virtual
+    if payload.game_style is not None:
+        lobby.game_style = payload.game_style
+        lobby.is_virtual = payload.game_style in VIRTUAL_GAME_STYLES
+    if payload.allow_spawn_players is not None:
+        listeners = list(lobby.game_listeners or [])
+        if payload.allow_spawn_players and "spawn_player" not in listeners:
+            listeners.append("spawn_player")
+        elif not payload.allow_spawn_players:
+            listeners = [name for name in listeners if name != "spawn_player"]
+        lobby.game_listeners = listeners
     await session.commit()
     await session.refresh(lobby)
     await session.refresh(lobby, attribute_names=["owner", "bots"])
@@ -2424,14 +2459,17 @@ async def create_virtual_player_ws(lobby_id: int, name: str, color: str) -> Opti
             # Generate unique namespace
             namespace = f"virtual_{secrets.token_hex(8)}"
 
+            # Random spawn on create (persisted; loaded as-is on future connects)
+            spawn_x, spawn_y, spawn_yaw = await _random_spawn_for_lobby(session, lobby_id)
+
             player = VirtualPlayer(
                 lobby_id=lobby_id,
                 namespace=namespace,
                 name=name.strip() if name else "Player",
-                x=0.0,
-                y=0.0,
+                x=spawn_x,
+                y=spawn_y,
                 z=0.5,
-                yaw=0.0,
+                yaw=spawn_yaw,
                 color=color if color else "#3b82f6",
             )
             session.add(player)
@@ -2749,6 +2787,103 @@ async def update_virtual_player_state(lobby_id: int, message: dict) -> None:
         logger.error("Failed to update virtual player state: %s", e)
 
 
+# --- Internal virtual-lobby game: lifecycle helpers ------------------------
+VIRTUAL_SPAWN_HALF_EXTENT = 6.0  # players spawn within [-6, 6] world units
+
+
+async def _load_wall_dicts(session: AsyncSession, lobby_id: int) -> list[dict]:
+    """Load a lobby's world elements as plain dicts for VirtualWorld."""
+    result = await session.execute(
+        select(VirtualWorldElement).where(VirtualWorldElement.lobby_id == lobby_id)
+    )
+    return [
+        {
+            "element_type": e.element_type,
+            "x": e.x,
+            "y": e.y,
+            "width": e.width,
+            "height": e.height,
+            "rotation": e.rotation,
+        }
+        for e in result.scalars().all()
+    ]
+
+
+async def _random_spawn_for_lobby(session: AsyncSession, lobby_id: int) -> tuple[float, float, float]:
+    """Pick a random (x, y, yaw) that isn't inside a wall. Used on player create."""
+    tmp = VirtualWorld(lobby_id)
+    tmp.set_walls_from_elements(await _load_wall_dicts(session, lobby_id))
+    for _ in range(30):
+        x = float(np.random.uniform(-VIRTUAL_SPAWN_HALF_EXTENT, VIRTUAL_SPAWN_HALF_EXTENT))
+        y = float(np.random.uniform(-VIRTUAL_SPAWN_HALF_EXTENT, VIRTUAL_SPAWN_HALF_EXTENT))
+        if not tmp._blocked(x, y):
+            return x, y, float(np.random.uniform(-np.pi, np.pi))
+    return 0.0, 0.0, 0.0
+
+
+async def ensure_virtual_source(robot_id: str) -> bool:
+    """If robot_id is a virtual player, start server-side frame generation.
+
+    Registers a server-generated camera track into robot_incoming_tracks so the
+    existing Hop 2 relay path streams it like a forwarder. Returns True when a
+    virtual source is active for this namespace. A real forwarder track (if
+    present) always takes precedence over the internal game.
+    """
+    if robot_id in virtual_ns_world:
+        return True
+    if robot_id in robot_incoming_tracks:
+        return False
+    async with virtual_world_lock:
+        if robot_id in virtual_ns_world:
+            return True
+        if robot_id in robot_incoming_tracks:
+            return False
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                select(VirtualPlayer).where(
+                    VirtualPlayer.namespace == robot_id,
+                    VirtualPlayer.is_deleted.is_(False),
+                )
+            )
+            player = result.scalar_one_or_none()
+            if player is None:
+                return False
+            lobby_id = player.lobby_id
+            world = active_virtual_worlds.get(lobby_id)
+            if world is None:
+                world = VirtualWorld(lobby_id)
+                world.set_walls_from_elements(await _load_wall_dicts(session, lobby_id))
+                world.start()
+                active_virtual_worlds[lobby_id] = world
+                logger.info("VirtualWorld started for lobby %s (%d walls)", lobby_id, len(world.walls))
+            world.add_player(robot_id, player.x, player.y, player.yaw, player.color)
+        # No robot audio track: virtual bots are silent; browser group audio is unaffected.
+        robot_incoming_tracks[robot_id] = RaycastCameraTrack(world, robot_id)
+        virtual_ns_world[robot_id] = world
+        logger.info("Virtual source active for %s (lobby %s)", robot_id, world.lobby_id)
+        return True
+
+
+async def teardown_virtual_source(robot_id: str) -> None:
+    """Persist a virtual player's pose and stop its world if no players remain."""
+    async with virtual_world_lock:
+        world = virtual_ns_world.pop(robot_id, None)
+        if world is None:
+            return
+        snap = world.snapshot_player(robot_id)
+        world.remove_player(robot_id)
+        robot_incoming_tracks.pop(robot_id, None)
+        lobby_id = world.lobby_id
+        if not world.players:
+            world.stop()
+            active_virtual_worlds.pop(lobby_id, None)
+            logger.info("VirtualWorld stopped for lobby %s", lobby_id)
+    if snap is not None:
+        x, y, yaw = snap
+        await update_virtual_player_state(lobby_id, {"namespace": robot_id, "x": x, "y": y, "yaw": yaw})
+        logger.info("Persisted virtual player %s pose (%.2f, %.2f, %.2f)", robot_id, x, y, yaw)
+
+
 @app.get("/api/bots")
 async def list_bots(
     lobby_id: Optional[int] = None,
@@ -2928,6 +3063,8 @@ def lobby_to_out(lobby: Lobby, current_user: User) -> LobbyOut:
         created_at=lobby.created_at,
         is_public=bool(lobby.is_public),
         is_virtual=bool(getattr(lobby, "is_virtual", False)),
+        game_style=getattr(lobby, "game_style", "remote") or "remote",
+        game_listeners=list(getattr(lobby, "game_listeners", []) or []),
         is_deleted=bool(lobby.is_deleted),
         is_owner=is_owner,
         bot_count=bot_count,
@@ -3201,6 +3338,16 @@ async def prepare_database(max_attempts: int = 60, delay: int = 5) -> None:
                 await conn.execute(
                     text(
                         "ALTER TABLE bots ADD COLUMN IF NOT EXISTS volume FLOAT NOT NULL DEFAULT 1.0"
+                    )
+                )
+                await conn.execute(
+                    text(
+                        "ALTER TABLE lobbies ADD COLUMN IF NOT EXISTS game_style VARCHAR(32) NOT NULL DEFAULT 'remote'"
+                    )
+                )
+                await conn.execute(
+                    text(
+                        "ALTER TABLE lobbies ADD COLUMN IF NOT EXISTS game_listeners JSON NOT NULL DEFAULT '[]'"
                     )
                 )
             logger.info("Database connection established after %s attempt(s)", attempt + 1)
@@ -3788,10 +3935,14 @@ async def robot_command_bridge(websocket: WebSocket) -> None:
                             )
                         )
                         if existing.scalar_one_or_none() is None:
+                            sx, sy, syaw = await _random_spawn_for_lobby(session, lobby_id)
                             player = VirtualPlayer(
                                 lobby_id=lobby_id,
                                 namespace=namespace,
                                 name=name,
+                                x=sx,
+                                y=sy,
+                                yaw=syaw,
                                 color=color,
                             )
                             session.add(player)
@@ -4447,6 +4598,12 @@ async def _handle_browser_offer_inner(
     if was_empty:
         await notify_bridge_stream(robot_id, True)
 
+    # Internal virtual lobby: if this namespace is a virtual player and no real
+    # forwarder is producing, generate the first-person view server-side. This
+    # registers a camera track into robot_incoming_tracks so the relay path below
+    # streams it exactly like a forwarder track.
+    await ensure_virtual_source(robot_id)
+
     # Wait for forwarder track if not yet available
     incoming_track = robot_incoming_tracks.get(robot_id)
     if not incoming_track:
@@ -4560,6 +4717,17 @@ async def _handle_browser_offer_inner(
                         return
                 except json.JSONDecodeError:
                     pass
+                # Internal virtual lobby: drive the server-side sim directly
+                # instead of relaying the joystick to a (non-existent) robot.
+                world = virtual_ns_world.get(robot_id)
+                if world is not None:
+                    try:
+                        jd = json.loads(message)
+                        if jd.get("type") == "joy":
+                            world.set_command_from_joy(robot_id, jd.get("axes") or [])
+                    except json.JSONDecodeError:
+                        pass
+                    return
                 # Otherwise it's a joystick command
                 aggregator.push_command(user_pc_key, message)
 
@@ -4669,6 +4837,8 @@ async def _handle_browser_offer_inner(
             if not remaining:
                 logger.info("SFU Hop2: no viewers for %s, stopping robot stream", robot_id)
                 await notify_bridge_stream(robot_id, False)
+                # Internal virtual lobby: persist final pose and stop the sim.
+                await teardown_virtual_source(robot_id)
 
     pc.addTrack(relayed_video_track)
 
