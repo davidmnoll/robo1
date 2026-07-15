@@ -569,6 +569,27 @@
         border-color: rgba(34,197,94,0.5) !important;
         color: #22c55e !important;
       }
+      /* Capability widgets (rendered from manifests; see renderCapWidgets) */
+      .cap-widgets {
+        display: flex;
+        flex-direction: column;
+        gap: 0.35rem;
+        align-items: flex-end;
+        margin-top: 0.35rem;
+      }
+      .cap-widget {
+        display: flex;
+        align-items: center;
+        gap: 0.4rem;
+        background: rgba(0,0,0,0.45);
+        border-radius: 6px;
+        padding: 0.2rem 0.5rem;
+        font-size: 0.75rem;
+        color: #e5e7eb;
+      }
+      .cap-widget input[type="range"] { width: 90px; }
+      .cap-widget.cap-pending { opacity: 0.6; } /* goal in flight, no proof yet */
+      .cap-widget .cap-value { min-width: 2.5ch; text-align: right; }
       .volume-slider {
         flex: 1;
         min-width: 100px;
@@ -1093,9 +1114,13 @@
                 <div class="video-controls-top-right">
                   <div class="top-right-buttons">
                     <button id="mic-toggle-btn" class="ghost mic-btn muted" type="button" title="Voice to other streamers">🎤</button>
-                    <button id="robot-mic-btn" class="ghost mic-btn speaker-vote vote-none" type="button" title="Voice to robot speaker">🔊</button>
+                    <button id="robot-mic-btn" class="ghost mic-btn speaker-vote vote-none" type="button" title="Voice to robot speaker" hidden>🔊</button>
                     <button id="video-fullscreen-btn" class="ghost" type="button" aria-label="Toggle fullscreen">⤢</button>
                   </div>
+                  <!-- Capability widgets, rendered from declared manifests by
+                       type shape (slider for ranged floats, toggle for bools).
+                       Empty until the robot's capabilities arrive. -->
+                  <div class="cap-widgets" id="cap-widgets"></div>
                   <div class="hud-minimap" id="hud-minimap" title="Click or press M to expand">
                     <canvas id="minimap-canvas" width="150" height="150"></canvas>
                     <button id="minimap-expand-btn" class="minimap-expand-btn" type="button" aria-label="Expand map (M)" title="Expand map (M)">⤢</button>
@@ -1196,16 +1221,9 @@
               </div>
               <label for="bot-desc">Description</label>
               <textarea id="bot-desc" placeholder="Optional summary"></textarea>
-              <div class="form-row">
-                <div style="flex:1;">
-                  <label for="bot-volume">Volume</label>
-                  <div style="display:flex;align-items:center;gap:0.5rem;">
-                    <button type="button" id="bot-mute-btn" class="ghost" title="Mute robot">🔊</button>
-                    <input type="range" id="bot-volume" min="0" max="100" value="100" style="flex:1;">
-                    <span id="bot-volume-label" style="min-width:3ch;">100</span>%
-                  </div>
-                </div>
-              </div>
+              <!-- Volume/mute moved to the live robot view: they are capability
+                   widgets (bot:<ns>/audio/*) rendered from manifests, not bot
+                   metadata. See renderCapWidgets(). -->
               <div class="lobby-actions">
                 <button type="submit" id="save-bot-btn">Save robot</button>
                 <button type="button" id="cancel-bot-edit" class="secondary">Cancel edit</button>
@@ -1314,11 +1332,7 @@
         const botNameInput = document.getElementById('bot-name');
         const botNamespaceInput = document.getElementById('bot-namespace');
         const botDescInput = document.getElementById('bot-desc');
-        const botVolumeInput = document.getElementById('bot-volume');
-        const botVolumeLabel = document.getElementById('bot-volume-label');
-        const botMuteBtn = document.getElementById('bot-mute-btn');
         const botMessage = document.getElementById('bot-message');
-        let botPreviousVolume = 100;  // Store volume before muting
         const cancelBotEditBtn = document.getElementById('cancel-bot-edit');
         // Chat elements
         const chatMessages = document.getElementById('chat-messages');
@@ -1494,8 +1508,7 @@
           micTrack: null,
           // Audio playback state (robot -> browser)
           speakerEnabled: false,
-          speakerVoted: false,  // Has current user voted to enable speaker
-          speakerState: { total: 0, votes: 0, enabled: false, voters: [] },  // Server state
+          speakerVoted: false,  // My vote intent (local; witness confirms)
           playbackContext: null,
           playbackQueue: [],
           playbackPlaying: false,
@@ -1503,6 +1516,11 @@
           controlChannel: null,
           telemetryChannel: null,
           mapChannel: null,
+          // Capability layer (goal/proof envelopes, shared/capability.proto)
+          capChannel: null,
+          caps: {},        // path -> merged fact {manifest, value, citation, ...}
+          capHeads: {},    // path -> my goal-chain head (hash of my last goal wire)
+          capPending: {},  // path -> my last unconfirmed goal body (gap affordance)
           // SLAM map data
           mapData: null,
           // Joystick state (axes and buttons)
@@ -2362,12 +2380,10 @@
           state.activeRobot = null;
           state.viewOnly = false;
           state.speakerVoted = false;
-          state.speakerState = { total: 0, votes: 0, enabled: false, voters: [] };
           activeRobotLabel.textContent = '';
           setTeleopAvailability(false);
           resetJoy();
           stopMicrophone();
-          updateSpeakerButton();
           stopGamepadPolling();
           destroyTouchJoysticks();
           teleopPane.hidden = true;
@@ -2383,6 +2399,10 @@
             state.controlChannel.close();
             state.controlChannel = null;
           }
+          if (state.capChannel) {
+            state.capChannel.close();
+          }
+          resetCapState();
           if (state.telemetryChannel) {
             state.telemetryChannel.close();
             state.telemetryChannel = null;
@@ -2427,7 +2447,7 @@
           micToggleBtn.classList.toggle('muted', !state.micEnabled);
           micToggleBtn.classList.toggle('active', state.micEnabled);
           micToggleBtn.title = state.micEnabled ? 'Mute to streamers' : 'Unmute to streamers';
-          // Robot mic button styling is handled by updateSpeakerButton (vote colors)
+          // Robot mic button styling is handled by updateSpeakerButtonFromCaps (vote colors)
           micVolumeSlider.disabled = true; // Volume control not yet implemented for WebRTC
         }
 
@@ -2446,73 +2466,204 @@
           }
         }
 
-        function sendSpeakerVote() {
-          // Send speaker vote to server via control channel
-          const vote = {
-            type: 'speaker_vote',
-            vote: state.speakerVoted,
-          };
-          if (state.controlChannel && state.controlChannel.readyState === 'open') {
-            state.controlChannel.send(JSON.stringify(vote));
-            console.info('[speaker] SENT vote:', vote);
+        // ── Capability layer (goal/proof envelopes, shared/capability.proto) ──
+        //
+        // Facts arrive as proofs on the 'cap' data channel and merge into
+        // state.caps; widgets render from manifests by type shape. Outcomes
+        // (satisfied / diverged) are judged here by comparing evidence to our
+        // own goals — the wire carries no status fields.
+
+        async function sha256Hex(s) {
+          const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(s));
+          return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, '0')).join('');
+        }
+
+        function capPrefix() {
+          return state.activeRobot ? `bot:${state.activeRobot.ros_namespace}/` : null;
+        }
+
+        // My writer key as the API sees it (user_pc_key) — used to recognize
+        // my own vote witness among votes/*.
+        function capWriterKey() {
+          return `${state.activeRobot?.ros_namespace}:${state.user?.email}:${state.clientId}`;
+        }
+
+        // Goals are serialized through a promise queue so prev-chains never
+        // interleave (hashing is async).
+        let capSendQueue = Promise.resolve();
+        function sendCapGoal(suffix, body) {
+          capSendQueue = capSendQueue.then(async () => {
+            const prefix = capPrefix();
+            if (!prefix || !state.capChannel || state.capChannel.readyState !== 'open') return;
+            const path = prefix + suffix;
+            const wire = JSON.stringify({ path, verb: 'goal', body, prev: state.capHeads[path] || '' });
+            state.capHeads[path] = await sha256Hex(wire);
+            state.capPending[path] = body;
+            state.capChannel.send(wire);
+          }).catch((err) => console.warn('[cap] send failed:', err));
+          return capSendQueue;
+        }
+
+        function handleCapMessage(wire) {
+          let msg;
+          try { msg = JSON.parse(wire); } catch { return; }
+          if (msg.verb !== 'proof' || !msg.path) return;
+          const body = msg.body || {};
+          if (body.tombstone) {
+            delete state.caps[msg.path];
           } else {
-            console.warn('[speaker] vote NOT sent (channel not ready):', vote);
+            const fact = state.caps[msg.path] || (state.caps[msg.path] = {});
+            for (const k of ['manifest', 'value', 'citation', 'provenance']) {
+              if (k in body) fact[k] = body[k];
+            }
           }
+          // Judge my pending goal against the evidence: equal → satisfied.
+          if (msg.path in state.capPending && body.value === state.capPending[msg.path]) {
+            delete state.capPending[msg.path];
+          }
+          renderCapWidgets();
         }
 
-        function handleSpeakerState(data) {
-          // Update local speaker state from server
-          state.speakerState = {
-            total: data.total_streamers || 0,
-            votes: data.votes || 0,
-            enabled: data.enabled || false,
-            voters: data.voters || [],
-          };
-          console.info('[speaker] state update:', state.speakerState);
-          updateSpeakerButton();
-          // NOTE: Don't mute video based on speaker vote - that would also mute group audio
-          // The speaker vote is advisory; audio routing controls what actually gets sent
-          // to the robot. The video element should always be unmuted to receive audio.
-          const videoElement = document.getElementById('robot-video');
-          if (videoElement && videoElement.muted) {
-            // Unmute on first interaction (autoplay policy workaround)
-            videoElement.muted = false;
-            console.info('[speaker] video unmuted for audio');
-          }
+        function resetCapState() {
+          state.caps = {};
+          state.capHeads = {};
+          state.capPending = {};
+          state.capChannel = null;
+          renderCapWidgets();
         }
 
-        function updateSpeakerButton() {
+        // Widget table: manifest type shape -> widget. Rendering is
+        // presence-driven: no manifest, no widget.
+        function renderCapWidgets() {
+          const container = document.getElementById('cap-widgets');
+          const prefix = capPrefix();
+          if (!container) return;
+          if (!prefix) { container.innerHTML = ''; updateSpeakerButtonFromCaps(); return; }
+
+          const seen = new Set();
+          for (const [path, fact] of Object.entries(state.caps)) {
+            if (!path.startsWith(prefix) || !fact.manifest) continue;
+            const m = fact.manifest;
+            // Per-peer bools bind the dedicated vote button; read-only facts
+            // surface through it too (enabled state) — skip generic rendering.
+            if (m.key === 'PEER' || m.readOnly) continue;
+            const suffix = path.slice(prefix.length);
+            const id = `cap-${suffix.replace(/\//g, '-')}`;
+            seen.add(id);
+            let el = document.getElementById(id);
+            const pending = path in state.capPending;
+            if ((m.schema || {}).type === 'FLOAT') {
+              const min = m.schema.min ?? 0, max = m.schema.max ?? 1;
+              if (!el) {
+                el = document.createElement('div');
+                el.id = id;
+                el.className = 'cap-widget';
+                el.innerHTML = `<span class="cap-label"></span>
+                  <input type="range" min="0" max="100" class="volume-slider">
+                  <span class="cap-value"></span>`;
+                el.querySelector('.cap-label').textContent = suffix.split('/').pop();
+                const slider = el.querySelector('input');
+                const sliderValue = () => {
+                  const v = min + (max - min) * (parseInt(slider.value, 10) / 100);
+                  return Math.round(v * 100) / 100;
+                };
+                let sendTimer = null;
+                slider.addEventListener('input', () => {
+                  el.dataset.dragging = '1';
+                  // Trailing throttle (~12Hz): latest value wins, no backlog.
+                  if (!sendTimer) {
+                    sendTimer = setTimeout(() => {
+                      sendTimer = null;
+                      sendCapGoal(suffix, sliderValue());
+                    }, 80);
+                  }
+                });
+                slider.addEventListener('change', () => {
+                  delete el.dataset.dragging;
+                  if (sendTimer) { clearTimeout(sendTimer); sendTimer = null; }
+                  sendCapGoal(suffix, sliderValue());  // final value, immediately
+                });
+                container.appendChild(el);
+              }
+              // Show confirmed value; never yank the thumb mid-drag.
+              if (!el.dataset.dragging && typeof fact.value === 'number') {
+                el.querySelector('input').value = Math.round(((fact.value - min) / (max - min)) * 100);
+              }
+              if (typeof fact.value === 'number') {
+                el.querySelector('.cap-value').textContent = `${Math.round(fact.value * 100)}%`;
+              }
+            } else if ((m.schema || {}).type === 'BOOL') {
+              if (!el) {
+                el = document.createElement('div');
+                el.id = id;
+                el.className = 'cap-widget';
+                el.innerHTML = `<button type="button" class="ghost"></button>`;
+                el.querySelector('button').addEventListener('click', () => {
+                  const current = (state.caps[path] || {}).value;
+                  sendCapGoal(suffix, !current);
+                });
+                container.appendChild(el);
+              }
+              const btn = el.querySelector('button');
+              btn.textContent = fact.value ? '🔇' : '🔊';
+              btn.title = (m.description || suffix) + (fact.value ? ' (muted)' : '');
+            } else {
+              seen.delete(id);
+              continue;
+            }
+            el.classList.toggle('cap-pending', pending);
+          }
+          // Drop widgets whose capability vanished
+          for (const el of [...container.children]) {
+            if (!seen.has(el.id)) el.remove();
+          }
+          updateSpeakerButtonFromCaps();
+        }
+
+        // The speaker vote button is the widget for the per-peer vote
+        // capability: presence follows the manifest; colors derive from the
+        // resolver's tally citation + the bridge-proved gate.
+        function updateSpeakerButtonFromCaps() {
           if (!robotMicBtn) return;
-          const { total, votes, enabled, voters } = state.speakerState;
-          const userKey = `${state.activeRobot?.ros_namespace}:${state.user?.email}`;
-          const userVoted = voters.includes(userKey) || state.speakerVoted;
+          const prefix = capPrefix();
+          const voteFact = prefix ? state.caps[`${prefix}audio/speaker/vote`] : null;
+          if (!voteFact || !voteFact.manifest) {
+            robotMicBtn.hidden = true;
+            return;
+          }
+          robotMicBtn.hidden = false;
+          const citation = voteFact.citation || { votes: [], connected: [] };
+          const votes = (citation.votes || []).length;
+          const total = (citation.connected || []).length;
+          const enabled = !!(state.caps[`${prefix}audio/speaker/enabled`] || {}).value;
+          const myWitness = state.caps[`${prefix}audio/speaker/votes/${capWriterKey()}`];
+          const userVoted = !!(myWitness && myWitness.value) || state.speakerVoted;
+          state.speakerEnabled = enabled;
 
-          // Remove all vote classes
           robotMicBtn.classList.remove('vote-none', 'vote-partial', 'vote-pending', 'vote-enabled', 'muted', 'active');
-
           if (enabled) {
-            // Green: everyone has voted yes
             robotMicBtn.classList.add('vote-enabled');
             robotMicBtn.title = `Speaker enabled (${votes}/${total} votes)`;
           } else if (votes === 0) {
-            // Red: nobody has voted
             robotMicBtn.classList.add('vote-none');
             robotMicBtn.title = `Vote to enable speaker (0/${total} votes)`;
           } else if (userVoted) {
-            // Yellow: current user voted but not everyone
             robotMicBtn.classList.add('vote-pending');
             robotMicBtn.title = `Waiting for others (${votes}/${total} votes)`;
           } else {
-            // Orange: some people voted but not current user
             robotMicBtn.classList.add('vote-partial');
             robotMicBtn.title = `Others want speaker (${votes}/${total} votes) - click to vote`;
           }
+          // Autoplay policy workaround (was in handleSpeakerState): make sure
+          // the video element is unmuted once real speaker facts flow.
+          const videoElement = document.getElementById('robot-video');
+          if (videoElement && videoElement.muted) videoElement.muted = false;
         }
 
         function toggleSpeakerVote() {
           state.speakerVoted = !state.speakerVoted;
-          sendSpeakerVote();
-          updateSpeakerButton();
+          sendCapGoal('audio/speaker/vote', state.speakerVoted);
+          updateSpeakerButtonFromCaps();
           logTelemetry(state.speakerVoted ? 'Voted for speaker' : 'Removed speaker vote');
         }
 
@@ -2819,11 +2970,8 @@
                 if (typeof data.linear_speed === 'number') {
                   state.linearSpeed = data.linear_speed;
                 }
-                if (typeof data.angular_speed === 'number') {
-                  state.angularSpeed = data.angular_speed;
-                }
                 updateSpeedIndicators();
-                logTelemetry(`vel: lin=${state.linearSpeed.toFixed(2)} ang=${state.angularSpeed.toFixed(2)}`);
+                logTelemetry(`vel: lin=${state.linearSpeed.toFixed(2)}`);
               } else {
                 logTelemetry(JSON.stringify(data));
               }
@@ -3080,8 +3228,6 @@
               logTelemetry('Control data channel connected');
               // Send current audio routing state in case buttons were clicked before channel opened
               sendAudioRouting();
-              // Send current speaker vote state
-              sendSpeakerVote();
             };
             controlChannel.onclose = () => {
               console.info('[data] control channel closed');
@@ -3094,9 +3240,7 @@
               // Handle incoming messages from server (speaker state, aggregated control, renegotiation, etc.)
               try {
                 const data = JSON.parse(event.data);
-                if (data.type === 'speaker_state') {
-                  handleSpeakerState(data);
-                } else if (data.type === 'aggregated_control') {
+                if (data.type === 'aggregated_control') {
                   // Update ghost joysticks to show other users' inputs
                   updateGhostJoysticks(data.axes, data.users);
                 } else if (data.type === 'camera_control') {
@@ -3150,6 +3294,22 @@
               } catch (err) {
                 console.warn('[data] control channel message parse error:', err);
               }
+            };
+
+            // Capability channel: goal/proof envelopes (ordered+reliable —
+            // unlike joy traffic, prev-chains want in-order delivery).
+            const capChannel = pc.createDataChannel('cap', { ordered: true });
+            state.capChannel = capChannel;
+            capChannel.onopen = () => {
+              console.info('[cap] channel open');
+              // Re-assert my vote intent across reconnects (votes are
+              // connection-scoped facts on the server side).
+              if (state.speakerVoted) sendCapGoal('audio/speaker/vote', true);
+            };
+            capChannel.onmessage = (event) => handleCapMessage(event.data);
+            capChannel.onclose = () => {
+              console.info('[cap] channel closed');
+              if (state.capChannel === capChannel) state.capChannel = null;
             };
           }
 
@@ -3285,11 +3445,10 @@
             const data = JSON.parse(message);
             if (data.type === 'telemetry') {
               // Update actual speed from robot telemetry
+              // (robot sends linear_speed + steering; there is no
+              // angular_speed field — the old read of it was dead code)
               if (typeof data.linear_speed === 'number') {
                 state.linearSpeed = data.linear_speed;
-              }
-              if (typeof data.angular_speed === 'number') {
-                state.angularSpeed = data.angular_speed;
               }
               updateSpeedIndicators();
               // Update front distance display
@@ -4210,18 +4369,6 @@
           botNameInput.value = bot.name;
           botNamespaceInput.value = bot.ros_namespace;
           botDescInput.value = bot.description || '';
-          const vol = Math.round((bot.volume ?? 1.0) * 100);
-          botVolumeInput.value = vol;
-          botVolumeLabel.textContent = vol;
-          botPreviousVolume = vol > 0 ? vol : 100;  // Store for unmute
-          // Update mute button icon
-          if (vol === 0) {
-            botMuteBtn.textContent = '🔇';
-            botMuteBtn.title = 'Unmute robot';
-          } else {
-            botMuteBtn.textContent = '🔊';
-            botMuteBtn.title = 'Mute robot';
-          }
           botMessage.textContent = pendingChanges
             ? `Editing ${bot.name} (has unsaved changes)`
             : `Editing ${bot.name}`;
@@ -4234,11 +4381,6 @@
           botNameInput.value = '';
           botNamespaceInput.value = '';
           botDescInput.value = '';
-          botVolumeInput.value = 100;
-          botVolumeLabel.textContent = '100';
-          botMuteBtn.textContent = '🔊';
-          botMuteBtn.title = 'Mute robot';
-          botPreviousVolume = 100;
           botMessage.textContent = '';
         }
 
@@ -4396,7 +4538,6 @@
             name: botNameInput.value,
             ros_namespace: botNamespaceInput.value,
             description: botDescInput.value || null,
-            volume: parseInt(botVolumeInput.value, 10) / 100,
           };
           try {
             if (botForm.dataset.editingId) {
@@ -4436,86 +4577,9 @@
           resetBotForm();
         });
 
-        // Volume slider - update label and auto-save for existing robots
-        botVolumeInput.addEventListener('input', () => {
-          const vol = parseInt(botVolumeInput.value, 10);
-          botVolumeLabel.textContent = vol;
-          updateMuteButtonIcon(vol);
-        });
-
-        // Auto-save volume when slider is released (for existing robots, supports offline)
-        botVolumeInput.addEventListener('change', async () => {
-          const botId = botForm.dataset.editingId;
-          if (!botId) return;  // Only auto-save for existing robots
-          const vol = parseInt(botVolumeInput.value, 10) / 100;
-
-          // Update local state immediately
-          const bot = state.manageLobby?.bots?.find(b => String(b.id) === botId);
-          if (bot) bot.volume = vol;
-
-          try {
-            const resp = await authFetch(`${apiBase()}/bots/${botId}`, {
-              method: 'PATCH',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ volume: vol }),
-            });
-            if (resp.status === 401) return;
-            if (!resp.ok) throw new Error(await resp.text());
-            botMessage.textContent = 'Volume saved';
-            removePendingBotChange(botId);
-            setTimeout(() => { if (botMessage.textContent === 'Volume saved') botMessage.textContent = ''; }, 1500);
-          } catch (err) {
-            console.error(err);
-            addPendingBotChange(botId, { volume: vol });
-            botMessage.textContent = 'Saved locally (will sync when online)';
-            setTimeout(() => { if (botMessage.textContent.includes('locally')) botMessage.textContent = ''; }, 2500);
-          }
-        });
-
-        // Mute button
-        function updateMuteButtonIcon(vol) {
-          if (vol === 0) {
-            botMuteBtn.textContent = '🔇';
-            botMuteBtn.title = 'Unmute robot';
-          } else {
-            botMuteBtn.textContent = '🔊';
-            botMuteBtn.title = 'Mute robot';
-          }
-        }
-
-        botMuteBtn.addEventListener('click', async () => {
-          const currentVol = parseInt(botVolumeInput.value, 10);
-          let newVol;
-          if (currentVol > 0) {
-            // Mute: save current volume and set to 0
-            botPreviousVolume = currentVol;
-            newVol = 0;
-          } else {
-            // Unmute: restore previous volume
-            newVol = botPreviousVolume || 100;
-          }
-          botVolumeInput.value = newVol;
-          botVolumeLabel.textContent = newVol;
-          updateMuteButtonIcon(newVol);
-
-          // Auto-save if editing existing robot
-          if (botForm.dataset.editingId) {
-            try {
-              const resp = await authFetch(`${apiBase()}/bots/${botForm.dataset.editingId}`, {
-                method: 'PATCH',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ volume: newVol / 100 }),
-              });
-              if (resp.status === 401) return;
-              if (!resp.ok) throw new Error(await resp.text());
-              botMessage.textContent = newVol === 0 ? 'Muted' : 'Unmuted';
-              setTimeout(() => { if (botMessage.textContent === 'Muted' || botMessage.textContent === 'Unmuted') botMessage.textContent = ''; }, 1500);
-            } catch (err) {
-              console.error(err);
-              botMessage.textContent = 'Failed to save';
-            }
-          }
-        });
+        // Volume and mute are capability widgets on the live robot view now
+        // (bot:<ns>/audio/gain and /audio/muted goals over the cap channel);
+        // the REST volume write path is gone.
 
         async function deleteBot(botId) {
           if (!confirm('Archive this robot?')) return;
