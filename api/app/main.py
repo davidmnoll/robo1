@@ -17,6 +17,7 @@ from aiortc import AudioStreamTrack, MediaStreamTrack, RTCDataChannel, RTCPeerCo
 from aiortc.contrib.media import MediaRelay
 from av import AudioFrame
 
+from app.capabilities import Broker
 from app.virtual_world import RaycastCameraTrack, VirtualWorld
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -344,13 +345,44 @@ hop2_map_channels: Dict[str, list[RTCDataChannel]] = defaultdict(list)        # 
 # Value: {"to_group": bool, "to_robot": bool}
 user_audio_routing: Dict[str, dict] = {}
 
-# Speaker votes per robot - tracks which users have voted to enable speaker
-# Key: robot_id, Value: set of user_pc_keys who voted yes
-speaker_votes: Dict[str, set] = defaultdict(set)
-
 # Connected users per robot (for counting total streamers)
 # Key: robot_id, Value: set of user_pc_keys
 connected_streamers: Dict[str, set] = defaultdict(set)
+
+
+# ── Capability broker (goal/proof envelopes on "cap" data channels) ──
+# Speaker voting lives here now as the broker's vote resolver; the legacy
+# speaker_votes/broadcast_speaker_state path is gone.
+
+async def _persist_confirmed_gain(robot_id: str, value: float) -> None:
+    """Store the bridge-confirmed speaker gain as the durable actual."""
+    async with AsyncSessionLocal() as session:
+        await session.execute(
+            Bot.__table__.update()
+            .where(Bot.ros_namespace == robot_id)
+            .where(Bot.is_deleted == False)  # noqa: E712
+            .values(volume=max(0.0, min(1.0, value)))
+        )
+        await session.commit()
+
+
+async def _load_confirmed_gain(robot_id: str) -> float:
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(Bot.volume)
+            .where(Bot.ros_namespace == robot_id)
+            .where(Bot.is_deleted == False)  # noqa: E712
+            .limit(1)
+        )
+        value = result.scalar_one_or_none()
+    return 1.0 if value is None else float(value)
+
+
+capability_broker = Broker(
+    get_connected=lambda robot_id: connected_streamers[robot_id],
+    persist_gain=_persist_confirmed_gain,
+    load_gain=_load_confirmed_gain,
+)
 
 # Control channels per user (for server-initiated renegotiation)
 # Key: user_pc_key, Value: RTCDataChannel
@@ -2127,14 +2159,15 @@ class BotCreate(BaseModel):
     name: constr(min_length=1, strip_whitespace=True)
     ros_namespace: constr(min_length=1, strip_whitespace=True)
     description: Optional[str] = None
-    volume: Optional[float] = 1.0
+    # NOTE: volume is not writable over REST — it is the durable *confirmed*
+    # speaker gain, written only when the bridge proves an applied value
+    # (see capabilities.py). Set it via a goal on bot:<ns>/audio/gain.
 
 
 class BotUpdate(BaseModel):
     name: Optional[constr(min_length=1, strip_whitespace=True)] = None
     ros_namespace: Optional[constr(min_length=1, strip_whitespace=True)] = None
     description: Optional[str] = None
-    volume: Optional[float] = None
 
 
 class LobbyOut(BaseModel):
@@ -3027,7 +3060,6 @@ async def create_bot(
     if bot and bot.is_deleted:
         bot.name = payload.name.strip()
         bot.description = payload.description
-        bot.volume = payload.volume if payload.volume is not None else 1.0
         bot.lobby_id = lobby.id
         bot.is_deleted = False
     else:
@@ -3035,7 +3067,6 @@ async def create_bot(
             name=payload.name.strip(),
             ros_namespace=normalized_namespace,
             description=payload.description,
-            volume=payload.volume if payload.volume is not None else 1.0,
             lobby_id=lobby.id,
         )
         session.add(bot)
@@ -3072,8 +3103,6 @@ async def update_bot(
             if ns_bot and ns_bot.id != bot.id:
                 raise HTTPException(status_code=400, detail="ROS namespace already registered in this lobby")
             bot.ros_namespace = new_ns
-    if payload.volume is not None:
-        bot.volume = max(0.0, min(1.0, payload.volume))
     await session.commit()
     await session.refresh(bot)
     bot.lobby = lobby
@@ -4222,33 +4251,6 @@ async def broadcast_chat_message(lobby_id: int, message: "ChatMessage") -> None:
             chat_subscribers.pop(lobby_id, None)
 
 
-async def broadcast_speaker_state(robot_id: str) -> None:
-    """Broadcast speaker voting state to all connected streamers for a robot."""
-    total_streamers = len(connected_streamers.get(robot_id, set()))
-    votes = len(speaker_votes.get(robot_id, set()))
-    voters = list(speaker_votes.get(robot_id, set()))
-
-    payload = json.dumps({
-        "type": "speaker_state",
-        "total_streamers": total_streamers,
-        "votes": votes,
-        "voters": voters,  # List of user_pc_keys who voted yes
-        "enabled": total_streamers > 0 and votes == total_streamers,
-    })
-
-    # Send to all control channels for this robot
-    channels = hop2_control_channels.get(robot_id, [])
-    for channel in channels:
-        try:
-            if channel.readyState == "open":
-                channel.send(payload)
-        except Exception as e:
-            logger.warning("Failed to send speaker state to channel: %s", e)
-
-    logger.info("Broadcast speaker state for %s: votes=%d/%d, enabled=%s",
-               robot_id, votes, total_streamers, total_streamers > 0 and votes == total_streamers)
-
-
 async def create_system_message(lobby_id: int, content: str) -> None:
     """Create and broadcast a system message for a lobby."""
     async with AsyncSessionLocal() as session:
@@ -4616,6 +4618,7 @@ async def handle_forwarder_offer(ws: WebSocket, message: dict) -> None:
             # Clean up data channels
             hop1_telemetry_channels.pop(robot, None)
             hop1_control_channels.pop(robot, None)
+            capability_broker.hop1_closed(robot)
             hop1_scan_channels.pop(robot, None)
             hop2_telemetry_channels.pop(robot, None)
             hop2_control_channels.pop(robot, None)
@@ -4661,6 +4664,11 @@ async def handle_forwarder_offer(ws: WebSocket, message: dict) -> None:
     def on_control_close() -> None:
         logger.info("SFU Hop1: control data channel closed for %s", robot)
         hop1_control_channels.pop(robot, None)
+
+    # Create capability data channel (goal/proof envelopes; ordered+reliable —
+    # prev-chains rely on it far less than joy traffic relies on latency)
+    cap_channel = pc.createDataChannel("cap")
+    capability_broker.hop1_open(robot, cap_channel)
 
     answer = await pc.createAnswer()
     await pc.setLocalDescription(answer)
@@ -4857,7 +4865,9 @@ async def _handle_browser_offer_inner(
         """Handle incoming data channels from browser (control commands)."""
         logger.info("SFU Hop2: received data channel '%s' from browser for %s (user=%s, state=%s)",
                     channel.label, robot_id, current_user.email, channel.readyState)
-        if channel.label == "control":
+        if channel.label == "cap":
+            capability_broker.browser_open(robot_id, user_pc_key, channel)
+        elif channel.label == "control":
             hop2_control_channels[robot_id].append(channel)
             # Store channel for this user (for server-initiated renegotiation)
             user_control_channels[user_pc_key] = channel
@@ -4870,8 +4880,8 @@ async def _handle_browser_offer_inner(
                 connected_streamers[robot_id].add(user_pc_key)
                 logger.info("SFU Hop2: added %s to connected_streamers (now %d)",
                            user_pc_key, len(connected_streamers[robot_id]))
-                # Send current speaker state to the newly connected user
-                asyncio.create_task(broadcast_speaker_state(robot_id))
+                # Connected set feeds the speaker-vote unanimity rule
+                capability_broker.streamers_changed(robot_id)
 
             @channel.on("message")
             def on_control_message(message: str) -> None:
@@ -4886,19 +4896,6 @@ async def _handle_browser_offer_inner(
                         }
                         logger.info("Audio routing for %s: to_group=%s, to_robot=%s",
                                    user_pc_key, data.get("to_group"), data.get("to_robot"))
-                        return
-                    if data.get("type") == "speaker_vote":
-                        # Handle speaker vote
-                        vote = data.get("vote", False)
-                        if vote:
-                            speaker_votes[robot_id].add(user_pc_key)
-                        else:
-                            speaker_votes[robot_id].discard(user_pc_key)
-                        logger.info("Speaker vote for %s: user=%s vote=%s (total=%d/%d)",
-                                   robot_id, user_pc_key, vote,
-                                   len(speaker_votes[robot_id]), len(connected_streamers[robot_id]))
-                        # Broadcast speaker state to all connected clients
-                        asyncio.create_task(broadcast_speaker_state(robot_id))
                         return
                     if data.get("type") == "renegotiation_answer":
                         # Handle renegotiation answer from browser
@@ -4932,7 +4929,7 @@ async def _handle_browser_offer_inner(
                 # Ensure user is tracked (redundant but safe)
                 if user_pc_key not in connected_streamers[robot_id]:
                     connected_streamers[robot_id].add(user_pc_key)
-                    asyncio.create_task(broadcast_speaker_state(robot_id))
+                    capability_broker.streamers_changed(robot_id)
 
             @channel.on("close")
             def on_close() -> None:
@@ -4943,11 +4940,10 @@ async def _handle_browser_offer_inner(
                 user_control_channels.pop(user_pc_key, None)
                 # Remove user from aggregator
                 aggregator.remove_user(user_pc_key)
-                # Remove user from connected streamers and speaker votes
+                # Remove user from connected streamers; the broker retracts
+                # their connection-scoped facts (votes) and re-resolves
                 connected_streamers[robot_id].discard(user_pc_key)
-                speaker_votes[robot_id].discard(user_pc_key)
-                # Broadcast updated speaker state
-                asyncio.create_task(broadcast_speaker_state(robot_id))
+                capability_broker.streamers_changed(robot_id)
 
     # Track if we've already handled the "connected" state for this PC
     pc_connected_handled = False

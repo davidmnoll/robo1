@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import fractions
+import hashlib
 import json
 import os
 import queue
@@ -264,6 +265,13 @@ class RobotBridgeNode(Node):
         # Data channels for control and telemetry
         self._telemetry_channels: Dict[str, RTCDataChannel] = {}
         self._control_channels: Dict[str, RTCDataChannel] = {}
+
+        # Capability channel state (goal/proof envelopes; shared/capability.proto).
+        # The bridge is the provider of the audio capabilities: it applies
+        # goals to _audio_state and emits proofs of the applied values.
+        self._cap_channels: Dict[str, RTCDataChannel] = {}
+        self._cap_heads: Dict[str, str] = {}  # path -> our proof-chain head
+        self._audio_state: Dict[str, dict] = {}  # robot -> {gain, muted, speaker_enabled}
 
         # Timers
         self.create_timer(0.1, self.flush_command_queue)
@@ -650,6 +658,25 @@ class RobotBridgeNode(Node):
                 def on_close() -> None:
                     self.get_logger().info(f"Control data channel closed for {robot}")
                     self._control_channels.pop(robot, None)
+            elif channel.label == "cap":
+                self._cap_channels[robot] = channel
+
+                @channel.on("message")
+                def on_cap_message(message: str) -> None:
+                    self._handle_cap_message(robot, message)
+
+                @channel.on("open")
+                def on_cap_open() -> None:
+                    self.get_logger().info(f"Cap data channel open for {robot}")
+                    self._send_cap_declarations(robot)
+
+                @channel.on("close")
+                def on_cap_close() -> None:
+                    self.get_logger().info(f"Cap data channel closed for {robot}")
+                    self._cap_channels.pop(robot, None)
+
+                if channel.readyState == "open":
+                    self._send_cap_declarations(robot)
 
         # Send video and robot audio
         pc.addTrack(video_track)
@@ -768,6 +795,18 @@ class RobotBridgeNode(Node):
                 if len(samples) == 1920:
                     samples = samples[::2]  # Extract left channel (960 samples)
 
+                # Capability enforcement at the actuator: the speaker gate
+                # (unanimous vote) and mute drop the audio; gain scales it.
+                # What we prove on the cap channel is exactly what we apply.
+                audio = self._cap_state(robot)
+                if not audio["speaker_enabled"] or audio["muted"]:
+                    continue
+                gain = audio["gain"]
+                if gain < 1.0:
+                    samples = np.clip(
+                        samples.astype(np.float32) * gain, -32768, 32767
+                    ).astype(np.int16)
+
                 # Convert to bytes and publish
                 audio_bytes = samples.tobytes()
                 msg = UInt8MultiArray()
@@ -781,6 +820,96 @@ class RobotBridgeNode(Node):
                     )
         except Exception as e:
             self.get_logger().info(f"Browser audio consumer ended for {robot}: {e}")
+
+    # ── Capability handling (goal/proof envelopes, see shared/capability.proto) ──
+    #
+    # The bridge provides the audio capabilities: it is the single writer of
+    # their proofs, and what it proves is what it actually applies to the
+    # audio path (refl — the reported value IS the applied value).
+
+    _CAP_MANIFESTS = {
+        "audio/gain": {
+            "mode": "PERSISTENT", "key": "CONST",
+            "schema": {"type": "FLOAT", "min": 0.0, "max": 1.0},
+            "readOnly": False,
+            "description": "Robot speaker gain",
+        },
+        "audio/muted": {
+            "mode": "PERSISTENT", "key": "CONST",
+            "schema": {"type": "BOOL"},
+            "readOnly": False,
+            "description": "Robot speaker mute",
+        },
+        "audio/speaker/enabled": {
+            "mode": "PERSISTENT", "key": "CONST",
+            "schema": {"type": "BOOL"},
+            "readOnly": True,  # written by the API vote resolver, not browsers
+            "description": "Speaker gate (set by unanimous viewer vote)",
+        },
+    }
+
+    def _cap_state(self, robot: str) -> dict:
+        return self._audio_state.setdefault(
+            robot, {"gain": 1.0, "muted": False, "speaker_enabled": False}
+        )
+
+    def _cap_send(self, robot: str, suffix: str, evidence: dict) -> None:
+        channel = self._cap_channels.get(robot)
+        if channel is None or channel.readyState != "open":
+            return
+        path = f"bot:{robot}/{suffix}"
+        wire = json.dumps({
+            "path": path,
+            "verb": "proof",
+            "body": evidence,
+            "prev": self._cap_heads.get(path, ""),
+        })
+        self._cap_heads[path] = hashlib.sha256(wire.encode("utf-8")).hexdigest()
+        try:
+            channel.send(wire)
+        except Exception as exc:
+            self.get_logger().warning(f"cap send failed for {path}: {exc}")
+
+    def _send_cap_declarations(self, robot: str) -> None:
+        """Declare provided capabilities + current values (facts at their paths)."""
+        state = self._cap_state(robot)
+        values = {
+            "audio/gain": state["gain"],
+            "audio/muted": state["muted"],
+            "audio/speaker/enabled": state["speaker_enabled"],
+        }
+        for suffix, manifest in self._CAP_MANIFESTS.items():
+            self._cap_send(robot, suffix, {"manifest": manifest, "value": values[suffix]})
+
+    def _handle_cap_message(self, robot: str, message: str) -> None:
+        try:
+            msg = json.loads(message)
+        except json.JSONDecodeError:
+            self.get_logger().warning(f"cap: undecodable message for {robot}")
+            return
+        if msg.get("verb") != "goal":
+            return
+        path = msg.get("path") or ""
+        prefix = f"bot:{robot}/"
+        if not path.startswith(prefix):
+            return
+        suffix = path[len(prefix):]
+        body = msg.get("body")
+        state = self._cap_state(robot)
+        if suffix == "audio/gain":
+            try:
+                state["gain"] = max(0.0, min(1.0, float(body)))
+            except (TypeError, ValueError):
+                return
+            self._cap_send(robot, suffix, {"value": state["gain"]})
+        elif suffix == "audio/muted":
+            state["muted"] = bool(body)
+            self._cap_send(robot, suffix, {"value": state["muted"]})
+        elif suffix == "audio/speaker/enabled":
+            state["speaker_enabled"] = bool(body)
+            self._cap_send(robot, suffix, {"value": state["speaker_enabled"]})
+        else:
+            self.get_logger().info(f"cap: goal for unknown capability {path}")
 
     # ── Control message handling (via data channel) ─────────────────
 
