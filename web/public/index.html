@@ -2518,8 +2518,14 @@
             }
           }
           // Judge my pending goal against the evidence: equal → satisfied.
-          if (msg.path in state.capPending && body.value === state.capPending[msg.path]) {
-            delete state.capPending[msg.path];
+          // (Numbers compare with epsilon — the provider may clamp/round.)
+          if (msg.path in state.capPending) {
+            const pending = state.capPending[msg.path];
+            const v = body.value;
+            const satisfied = (typeof pending === 'number' && typeof v === 'number')
+              ? Math.abs(pending - v) < 0.005
+              : v === pending;
+            if (satisfied) delete state.capPending[msg.path];
           }
           renderCapWidgets();
         }
