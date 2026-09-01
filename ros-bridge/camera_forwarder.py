@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import fractions
+import hashlib
 import json
 import os
 import queue
@@ -25,6 +26,13 @@ from rclpy.subscription import Subscription
 from sensor_msgs.msg import Image, LaserScan
 from std_msgs.msg import String, UInt8MultiArray, Int32MultiArray
 import base64
+
+try:
+    from slam_manager import SlamManager
+    _HAVE_SLAM = True
+except Exception as _slam_import_err:  # pragma: no cover - missing ROS SLAM deps
+    SlamManager = None
+    _HAVE_SLAM = False
 
 
 _CAMERA_TOPIC_RE = re.compile(r"^/([^/]+)/camera/image_raw$")
@@ -244,6 +252,8 @@ class RobotBridgeNode(Node):
         # Map handling
         self.scan_subscriptions: Dict[str, Subscription] = {}
         self._scan_channels: Dict[str, RTCDataChannel] = {}
+        # slam_toolbox map forwarded up to the API (Design B), robot -> channel
+        self._slam_map_channels: Dict[str, RTCDataChannel] = {}
 
         # SFU: one track and one PC per robot (forwarder -> server)
         self._video_tracks: Dict[str, RosVideoTrack] = {}
@@ -256,6 +266,13 @@ class RobotBridgeNode(Node):
         self._telemetry_channels: Dict[str, RTCDataChannel] = {}
         self._control_channels: Dict[str, RTCDataChannel] = {}
 
+        # Capability channel state (goal/proof envelopes; shared/capability.proto).
+        # The bridge is the provider of the audio capabilities: it applies
+        # goals to _audio_state and emits proofs of the applied values.
+        self._cap_channels: Dict[str, RTCDataChannel] = {}
+        self._cap_heads: Dict[str, str] = {}  # path -> our proof-chain head
+        self._audio_state: Dict[str, dict] = {}  # robot -> {gain, muted, speaker_enabled}
+
         # Timers
         self.create_timer(0.1, self.flush_command_queue)
         self.create_timer(self.heartbeat_interval, self.send_heartbeats)
@@ -265,7 +282,35 @@ class RobotBridgeNode(Node):
         self.ws_thread = threading.Thread(target=self._run_command_socket, daemon=True)
         self.ws_thread.start()
 
+        # Server-side pose-graph SLAM (slam_toolbox per robot). Optional so the
+        # bridge still runs if the SLAM deps are unavailable.
+        self.slam_manager = None
+        if _HAVE_SLAM and os.getenv("ENABLE_SLAM", "1") != "0":
+            try:
+                self.slam_manager = SlamManager(
+                    node=self,
+                    api_base=self.api_base,
+                    headers=self.headers,
+                    http_session=self.http_session,
+                    map_sender=self._send_slam_map,
+                )
+                self.get_logger().info("SlamManager enabled (server-side slam_toolbox)")
+            except Exception as e:  # noqa: BLE001
+                self.get_logger().warning(f"SlamManager init failed, SLAM disabled: {e}")
+        else:
+            self.get_logger().info("SlamManager disabled (deps missing or ENABLE_SLAM=0)")
+
         self.get_logger().info("RobotBridge started — discovering robots dynamically")
+
+    def _send_slam_map(self, robot: str, json_str: str) -> None:
+        """Forward a slam_toolbox map_update up to the API over the slam_map channel."""
+        channel = self._slam_map_channels.get(robot)
+        if not channel or channel.readyState != "open":
+            return
+        try:
+            self._aio_loop.call_soon_threadsafe(channel.send, json_str)
+        except Exception as e:  # noqa: BLE001
+            self.get_logger().warning(f"slam_map channel send failed for {robot}: {e}")
 
     # ── Topic discovery ──────────────────────────────────────────────
 
@@ -367,6 +412,13 @@ class RobotBridgeNode(Node):
             _SCAN_QOS,
         )
 
+        # Start server-side pose-graph SLAM for this robot (slam_toolbox).
+        if self.slam_manager is not None:
+            try:
+                self.slam_manager.start(robot)
+            except Exception as e:  # noqa: BLE001
+                self.get_logger().warning(f"slam_manager.start failed for {robot}: {e}")
+
         if not self._ice_servers_fetched:
             self._fetch_ice_servers()
 
@@ -404,6 +456,13 @@ class RobotBridgeNode(Node):
         # Send reset commands to stop the robot when all streams stop
         self._send_reset_commands(robot)
 
+        # Tear down server-side SLAM (serializes + uploads the pose graph first).
+        if self.slam_manager is not None:
+            try:
+                self.slam_manager.stop(robot)
+            except Exception as e:  # noqa: BLE001
+                self.get_logger().warning(f"slam_manager.stop failed for {robot}: {e}")
+
         sub = self.camera_subscriptions.pop(robot, None)
         if sub:
             self.destroy_subscription(sub)
@@ -423,6 +482,7 @@ class RobotBridgeNode(Node):
         self._telemetry_channels.pop(robot, None)
         self._control_channels.pop(robot, None)
         self._scan_channels.pop(robot, None)
+        self._slam_map_channels.pop(robot, None)
         self.get_logger().info(f"Stopped streaming /{robot}/camera/image_raw + audio + scan")
 
     def _handle_audio_webrtc(self, robot_id: str, msg: UInt8MultiArray) -> None:
@@ -598,6 +658,25 @@ class RobotBridgeNode(Node):
                 def on_close() -> None:
                     self.get_logger().info(f"Control data channel closed for {robot}")
                     self._control_channels.pop(robot, None)
+            elif channel.label == "cap":
+                self._cap_channels[robot] = channel
+
+                @channel.on("message")
+                def on_cap_message(message: str) -> None:
+                    self._handle_cap_message(robot, message)
+
+                @channel.on("open")
+                def on_cap_open() -> None:
+                    self.get_logger().info(f"Cap data channel open for {robot}")
+                    self._send_cap_declarations(robot)
+
+                @channel.on("close")
+                def on_cap_close() -> None:
+                    self.get_logger().info(f"Cap data channel closed for {robot}")
+                    self._cap_channels.pop(robot, None)
+
+                if channel.readyState == "open":
+                    self._send_cap_declarations(robot)
 
         # Send video and robot audio
         pc.addTrack(video_track)
@@ -631,6 +710,20 @@ class RobotBridgeNode(Node):
         def _on_scan_close() -> None:
             self.get_logger().info(f"Scan data channel closed for {robot}")
             self._scan_channels.pop(robot, None)
+
+        # Create slam_map data channel (robot -> API): forwards slam_toolbox's
+        # OccupancyGrid + drift-corrected pose for the API to relay to browsers.
+        slam_map_channel = pc.createDataChannel("slam_map", ordered=False)
+        self._slam_map_channels[robot] = slam_map_channel
+
+        @slam_map_channel.on("open")
+        def _on_slam_map_open() -> None:
+            self.get_logger().info(f"Slam map data channel open for {robot}")
+
+        @slam_map_channel.on("close")
+        def _on_slam_map_close() -> None:
+            self.get_logger().info(f"Slam map data channel closed for {robot}")
+            self._slam_map_channels.pop(robot, None)
 
         offer = await pc.createOffer()
         await pc.setLocalDescription(offer)
@@ -702,6 +795,18 @@ class RobotBridgeNode(Node):
                 if len(samples) == 1920:
                     samples = samples[::2]  # Extract left channel (960 samples)
 
+                # Capability enforcement at the actuator: the speaker gate
+                # (unanimous vote) and mute drop the audio; gain scales it.
+                # What we prove on the cap channel is exactly what we apply.
+                audio = self._cap_state(robot)
+                if not audio["speaker_enabled"] or audio["muted"]:
+                    continue
+                gain = audio["gain"]
+                if gain < 1.0:
+                    samples = np.clip(
+                        samples.astype(np.float32) * gain, -32768, 32767
+                    ).astype(np.int16)
+
                 # Convert to bytes and publish
                 audio_bytes = samples.tobytes()
                 msg = UInt8MultiArray()
@@ -715,6 +820,96 @@ class RobotBridgeNode(Node):
                     )
         except Exception as e:
             self.get_logger().info(f"Browser audio consumer ended for {robot}: {e}")
+
+    # ── Capability handling (goal/proof envelopes, see shared/capability.proto) ──
+    #
+    # The bridge provides the audio capabilities: it is the single writer of
+    # their proofs, and what it proves is what it actually applies to the
+    # audio path (refl — the reported value IS the applied value).
+
+    _CAP_MANIFESTS = {
+        "audio/gain": {
+            "mode": "PERSISTENT", "key": "CONST",
+            "schema": {"type": "FLOAT", "min": 0.0, "max": 1.0},
+            "readOnly": False,
+            "description": "Robot speaker gain",
+        },
+        "audio/muted": {
+            "mode": "PERSISTENT", "key": "CONST",
+            "schema": {"type": "BOOL"},
+            "readOnly": False,
+            "description": "Robot speaker mute",
+        },
+        "audio/speaker/enabled": {
+            "mode": "PERSISTENT", "key": "CONST",
+            "schema": {"type": "BOOL"},
+            "readOnly": True,  # written by the API vote resolver, not browsers
+            "description": "Speaker gate (set by unanimous viewer vote)",
+        },
+    }
+
+    def _cap_state(self, robot: str) -> dict:
+        return self._audio_state.setdefault(
+            robot, {"gain": 1.0, "muted": False, "speaker_enabled": False}
+        )
+
+    def _cap_send(self, robot: str, suffix: str, evidence: dict) -> None:
+        channel = self._cap_channels.get(robot)
+        if channel is None or channel.readyState != "open":
+            return
+        path = f"bot:{robot}/{suffix}"
+        wire = json.dumps({
+            "path": path,
+            "verb": "proof",
+            "body": evidence,
+            "prev": self._cap_heads.get(path, ""),
+        })
+        self._cap_heads[path] = hashlib.sha256(wire.encode("utf-8")).hexdigest()
+        try:
+            channel.send(wire)
+        except Exception as exc:
+            self.get_logger().warning(f"cap send failed for {path}: {exc}")
+
+    def _send_cap_declarations(self, robot: str) -> None:
+        """Declare provided capabilities + current values (facts at their paths)."""
+        state = self._cap_state(robot)
+        values = {
+            "audio/gain": state["gain"],
+            "audio/muted": state["muted"],
+            "audio/speaker/enabled": state["speaker_enabled"],
+        }
+        for suffix, manifest in self._CAP_MANIFESTS.items():
+            self._cap_send(robot, suffix, {"manifest": manifest, "value": values[suffix]})
+
+    def _handle_cap_message(self, robot: str, message: str) -> None:
+        try:
+            msg = json.loads(message)
+        except json.JSONDecodeError:
+            self.get_logger().warning(f"cap: undecodable message for {robot}")
+            return
+        if msg.get("verb") != "goal":
+            return
+        path = msg.get("path") or ""
+        prefix = f"bot:{robot}/"
+        if not path.startswith(prefix):
+            return
+        suffix = path[len(prefix):]
+        body = msg.get("body")
+        state = self._cap_state(robot)
+        if suffix == "audio/gain":
+            try:
+                state["gain"] = max(0.0, min(1.0, float(body)))
+            except (TypeError, ValueError):
+                return
+            self._cap_send(robot, suffix, {"value": state["gain"]})
+        elif suffix == "audio/muted":
+            state["muted"] = bool(body)
+            self._cap_send(robot, suffix, {"value": state["muted"]})
+        elif suffix == "audio/speaker/enabled":
+            state["speaker_enabled"] = bool(body)
+            self._cap_send(robot, suffix, {"value": state["speaker_enabled"]})
+        else:
+            self.get_logger().info(f"cap: goal for unknown capability {path}")
 
     # ── Control message handling (via data channel) ─────────────────
 
@@ -981,6 +1176,11 @@ def main() -> None:
     try:
         rclpy.spin(node)
     finally:
+        if getattr(node, "slam_manager", None) is not None:
+            try:
+                node.slam_manager.shutdown()
+            except Exception:  # noqa: BLE001
+                pass
         node.destroy_node()
         rclpy.shutdown()
         aio_loop.call_soon_threadsafe(aio_loop.stop)

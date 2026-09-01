@@ -569,6 +569,27 @@
         border-color: rgba(34,197,94,0.5) !important;
         color: #22c55e !important;
       }
+      /* Capability widgets (rendered from manifests; see renderCapWidgets) */
+      .cap-widgets {
+        display: flex;
+        flex-direction: column;
+        gap: 0.35rem;
+        align-items: flex-end;
+        margin-top: 0.35rem;
+      }
+      .cap-widget {
+        display: flex;
+        align-items: center;
+        gap: 0.4rem;
+        background: rgba(0,0,0,0.45);
+        border-radius: 6px;
+        padding: 0.2rem 0.5rem;
+        font-size: 0.75rem;
+        color: #e5e7eb;
+      }
+      .cap-widget input[type="range"] { width: 90px; }
+      .cap-widget.cap-pending { opacity: 0.6; } /* goal in flight, no proof yet */
+      .cap-widget .cap-value { min-width: 2.5ch; text-align: right; }
       .volume-slider {
         flex: 1;
         min-width: 100px;
@@ -616,18 +637,50 @@
 
       /* SLAM Minimap HUD */
       .hud-minimap {
+        position: relative;
         width: 150px;
         height: 150px;
         background: rgba(0,0,0,0.7);
         border: 1px solid rgba(148,163,184,0.5);
         border-radius: 8px;
-        pointer-events: none;
+        pointer-events: auto;
+        cursor: pointer;
+        transition: width 0.15s ease, height 0.15s ease;
+      }
+      .hud-minimap.expanded {
+        position: fixed;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        width: min(80vh, 80vw);
+        height: min(80vh, 80vw);
+        z-index: 60;
+        box-shadow: 0 10px 40px rgba(0,0,0,0.6);
       }
       #minimap-canvas {
         width: 100%;
         height: 100%;
         border-radius: 8px;
       }
+      .minimap-expand-btn {
+        position: absolute;
+        top: 4px;
+        right: 4px;
+        width: 22px;
+        height: 22px;
+        padding: 0;
+        line-height: 1;
+        font-size: 13px;
+        border: none;
+        border-radius: 5px;
+        background: rgba(15,23,42,0.7);
+        color: #e2e8f0;
+        cursor: pointer;
+        pointer-events: auto;
+        opacity: 0.6;
+        transition: opacity 0.15s ease;
+      }
+      .hud-minimap:hover .minimap-expand-btn { opacity: 1; }
       @media (max-width: 600px) {
         .hud-minimap {
           width: 100px;
@@ -1061,11 +1114,16 @@
                 <div class="video-controls-top-right">
                   <div class="top-right-buttons">
                     <button id="mic-toggle-btn" class="ghost mic-btn muted" type="button" title="Voice to other streamers">🎤</button>
-                    <button id="robot-mic-btn" class="ghost mic-btn speaker-vote vote-none" type="button" title="Voice to robot speaker">🔊</button>
+                    <button id="robot-mic-btn" class="ghost mic-btn speaker-vote vote-none" type="button" title="Voice to robot speaker" hidden>🔊</button>
                     <button id="video-fullscreen-btn" class="ghost" type="button" aria-label="Toggle fullscreen">⤢</button>
                   </div>
-                  <div class="hud-minimap" id="hud-minimap">
+                  <!-- Capability widgets, rendered from declared manifests by
+                       type shape (slider for ranged floats, toggle for bools).
+                       Empty until the robot's capabilities arrive. -->
+                  <div class="cap-widgets" id="cap-widgets"></div>
+                  <div class="hud-minimap" id="hud-minimap" title="Click or press M to expand">
                     <canvas id="minimap-canvas" width="150" height="150"></canvas>
+                    <button id="minimap-expand-btn" class="minimap-expand-btn" type="button" aria-label="Expand map (M)" title="Expand map (M)">⤢</button>
                   </div>
                 </div>
                 <button class="mobile-exit-btn" id="mobile-exit-btn" type="button">✕ Exit</button>
@@ -1122,9 +1180,15 @@
               <option value="public">Public</option>
               <option value="private">Private</option>
             </select>
-            <label style="display:flex;align-items:center;gap:0.5rem;margin-top:0.5rem;">
-              <input type="checkbox" id="lobby-is-virtual">
-              Virtual lobby (allows spawning virtual players instead of robots)
+            <label for="lobby-style">Style</label>
+            <select id="lobby-style">
+              <option value="remote">Remote (external robots)</option>
+              <option value="raycast">Raycast (first-person world)</option>
+              <option value="dom" disabled>DOM (coming soon)</option>
+            </select>
+            <label id="spawn-toggle-row" style="display:none;align-items:center;gap:0.5rem;margin-top:0.5rem;">
+              <input type="checkbox" id="lobby-allow-spawn">
+              Allow players to spawn (enables the "Add Player" request)
             </label>
             <div class="key-row" id="key-row" hidden>
               <div>
@@ -1157,16 +1221,9 @@
               </div>
               <label for="bot-desc">Description</label>
               <textarea id="bot-desc" placeholder="Optional summary"></textarea>
-              <div class="form-row">
-                <div style="flex:1;">
-                  <label for="bot-volume">Volume</label>
-                  <div style="display:flex;align-items:center;gap:0.5rem;">
-                    <button type="button" id="bot-mute-btn" class="ghost" title="Mute robot">🔊</button>
-                    <input type="range" id="bot-volume" min="0" max="100" value="100" style="flex:1;">
-                    <span id="bot-volume-label" style="min-width:3ch;">100</span>%
-                  </div>
-                </div>
-              </div>
+              <!-- Volume/mute moved to the live robot view: they are capability
+                   widgets (bot:<ns>/audio/*) rendered from manifests, not bot
+                   metadata. See renderCapWidgets(). -->
               <div class="lobby-actions">
                 <button type="submit" id="save-bot-btn">Save robot</button>
                 <button type="button" id="cancel-bot-edit" class="secondary">Cancel edit</button>
@@ -1256,7 +1313,14 @@
         const lobbyNameInput = document.getElementById('lobby-name');
         const lobbyDescInput = document.getElementById('lobby-desc');
         const lobbyVisibilityInput = document.getElementById('lobby-visibility');
-        const lobbyIsVirtualInput = document.getElementById('lobby-is-virtual');
+        const lobbyStyleInput = document.getElementById('lobby-style');
+        const lobbyAllowSpawnInput = document.getElementById('lobby-allow-spawn');
+        const spawnToggleRow = document.getElementById('spawn-toggle-row');
+        const VIRTUAL_GAME_STYLES = ['raycast', 'dom'];
+        function isVirtualStyle(style) { return VIRTUAL_GAME_STYLES.includes(style); }
+        function updateSpawnToggleVisibility() {
+          spawnToggleRow.style.display = isVirtualStyle(lobbyStyleInput.value) ? 'flex' : 'none';
+        }
         const lobbyMessage = document.getElementById('lobby-message');
         const keyRow = document.getElementById('key-row');
         const lobbyKeyEl = document.getElementById('lobby-key');
@@ -1268,11 +1332,7 @@
         const botNameInput = document.getElementById('bot-name');
         const botNamespaceInput = document.getElementById('bot-namespace');
         const botDescInput = document.getElementById('bot-desc');
-        const botVolumeInput = document.getElementById('bot-volume');
-        const botVolumeLabel = document.getElementById('bot-volume-label');
-        const botMuteBtn = document.getElementById('bot-mute-btn');
         const botMessage = document.getElementById('bot-message');
-        let botPreviousVolume = 100;  // Store volume before muting
         const cancelBotEditBtn = document.getElementById('cancel-bot-edit');
         // Chat elements
         const chatMessages = document.getElementById('chat-messages');
@@ -1422,6 +1482,8 @@
           authToken: initialToken,
           userEmail: initialEmail,
           clientId: clientId,
+          spawnRequestInProgress: false,
+          spawnRequestTimeout: null,
           lobbies: [],
           offlineLobbies: [],
           offlineCollapsed: true,
@@ -1446,8 +1508,7 @@
           micTrack: null,
           // Audio playback state (robot -> browser)
           speakerEnabled: false,
-          speakerVoted: false,  // Has current user voted to enable speaker
-          speakerState: { total: 0, votes: 0, enabled: false, voters: [] },  // Server state
+          speakerVoted: false,  // My vote intent (local; witness confirms)
           playbackContext: null,
           playbackQueue: [],
           playbackPlaying: false,
@@ -1455,6 +1516,11 @@
           controlChannel: null,
           telemetryChannel: null,
           mapChannel: null,
+          // Capability layer (goal/proof envelopes, shared/capability.proto)
+          capChannel: null,
+          caps: {},        // path -> merged fact {manifest, value, citation, ...}
+          capHeads: {},    // path -> my goal-chain head (hash of my last goal wire)
+          capPending: {},  // path -> my last unconfirmed goal body (gap affordance)
           // SLAM map data
           mapData: null,
           // Joystick state (axes and buttons)
@@ -1525,7 +1591,7 @@
                   appendChatMessage(msg.message);
                 }
               } else if (msg.type === 'virtual_player_created') {
-                // Handle new virtual player
+                // Handle new virtual player (the response to our spawn request)
                 if (state.currentLobby && state.currentLobby.id === msg.lobby_id && msg.player) {
                   if (!state.currentLobby.virtual_players) {
                     state.currentLobby.virtual_players = [];
@@ -1533,8 +1599,8 @@
                   // Avoid duplicates
                   if (!state.currentLobby.virtual_players.some(p => p.id === msg.player.id)) {
                     state.currentLobby.virtual_players.push(msg.player);
-                    renderLobbyRobots();
                   }
+                  setSpawnRequestInProgress(false);  // clears pending + re-renders
                 }
               } else if (msg.type === 'virtual_player_deleted') {
                 // Handle deleted virtual player
@@ -1960,23 +2026,63 @@
         }
 
         function renderAddVirtualPlayerButton(container) {
-          // Only show for virtual lobbies
-          if (!state.currentLobby?.is_virtual) return;
+          const lobby = state.currentLobby;
+          if (!lobby) return;
+
+          // The "Add Player" control fires a request event to the game. It's only
+          // active when the game has registered the matching listener (and the
+          // lobby is virtual). For non-virtual lobbies it's shown but disabled.
+          const hasSpawnListener = (lobby.game_listeners || []).includes('spawn_player');
+          const enabled = !!lobby.is_virtual && hasSpawnListener;
+          const inProgress = !!state.spawnRequestInProgress;
 
           const addCard = document.createElement('div');
-          addCard.className = 'robot-card';
-          addCard.style.cssText = 'border:2px dashed rgba(148,163,184,0.4);background:transparent;cursor:pointer;display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100px;';
-          addCard.innerHTML = `
-            <span style="font-size:2rem;color:#64748b;">+</span>
-            <span style="color:#94a3b8;font-size:0.9rem;">Add Virtual Player</span>
-          `;
-          addCard.addEventListener('click', () => createVirtualPlayer());
+          addCard.className = 'robot-card add-player-card';
+          const base = 'background:transparent;display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100px;';
+          if (inProgress) {
+            addCard.style.cssText = base + 'border:2px solid #f59e0b;cursor:wait;';
+            addCard.innerHTML = `
+              <span style="font-size:1.6rem;color:#f59e0b;">⟳</span>
+              <span style="color:#f59e0b;font-size:0.9rem;">Requesting…</span>
+            `;
+          } else if (enabled) {
+            addCard.style.cssText = base + 'border:2px dashed rgba(148,163,184,0.4);cursor:pointer;';
+            addCard.innerHTML = `
+              <span style="font-size:2rem;color:#64748b;">+</span>
+              <span style="color:#94a3b8;font-size:0.9rem;">Add Player</span>
+            `;
+            addCard.addEventListener('click', () => createVirtualPlayer());
+          } else {
+            addCard.style.cssText = base + 'border:2px dashed rgba(148,163,184,0.25);cursor:not-allowed;opacity:0.5;';
+            addCard.title = 'Spawning players is not enabled for this lobby';
+            addCard.innerHTML = `
+              <span style="font-size:2rem;color:#475569;">+</span>
+              <span style="color:#64748b;font-size:0.9rem;">Add Player</span>
+            `;
+          }
           container.appendChild(addCard);
+        }
+
+        // Track an in-flight "request" event (e.g. spawn_player) so the button can
+        // show a pending state until the game responds. Generalizes to other
+        // request/response listeners later.
+        function setSpawnRequestInProgress(on) {
+          state.spawnRequestInProgress = on;
+          if (state.spawnRequestTimeout) {
+            clearTimeout(state.spawnRequestTimeout);
+            state.spawnRequestTimeout = null;
+          }
+          if (on) {
+            // Safety timeout so the button recovers if no response arrives.
+            state.spawnRequestTimeout = setTimeout(() => setSpawnRequestInProgress(false), 10000);
+          }
+          renderLobbyRobots();
         }
 
         function createVirtualPlayer() {
           const lobby = state.currentLobby;
           if (!lobby) return;
+          if (state.spawnRequestInProgress) return;  // one request at a time
 
           const name = prompt('Enter name for virtual player:', `Player ${(lobby.virtual_players?.length || 0) + 1}`);
           if (!name) return;
@@ -1984,7 +2090,8 @@
           const colors = ['#3b82f6', '#ef4444', '#22c55e', '#f59e0b', '#8b5cf6', '#ec4899'];
           const color = colors[Math.floor(Math.random() * colors.length)];
 
-          // Send request via WebSocket
+          // Send request event to the game via WebSocket; the game's listener
+          // responds with a virtual_player_created event that clears the pending state.
           const ws = state.lobbyStatusWs;
           if (ws && ws.readyState === WebSocket.OPEN) {
             ws.send(JSON.stringify({
@@ -1994,10 +2101,10 @@
               color,
             }));
             console.log('[virtual-player] Requested new player via WebSocket');
+            setSpawnRequestInProgress(true);
           } else {
             alert('Not connected to server. Please refresh the page.');
           }
-          // Player will be added via WebSocket event (virtual_player_created)
         }
 
         function deleteVirtualPlayer(namespace) {
@@ -2018,9 +2125,14 @@
         }
 
         function selectVirtualPlayer(player) {
-          // For now, virtual players can only be viewed when Tauri host is streaming
-          // TODO: Connect to Tauri host's video stream for this virtual player
-          alert(`Virtual player "${player.name}" is ready.\n\nTo see the view, run the Virtual Lobby desktop app and connect with the lobby key.`);
+          // Virtual players stream a server-generated first-person view over the
+          // same WebRTC path as robots. Treat the player as a bot keyed by its
+          // namespace and reuse the normal teleop/streaming components.
+          selectRobot({
+            id: `virtual:${player.id}`,
+            name: player.name,
+            ros_namespace: player.namespace,
+          }, false);
         }
 
         // ---- Chat Functions ----
@@ -2268,12 +2380,10 @@
           state.activeRobot = null;
           state.viewOnly = false;
           state.speakerVoted = false;
-          state.speakerState = { total: 0, votes: 0, enabled: false, voters: [] };
           activeRobotLabel.textContent = '';
           setTeleopAvailability(false);
           resetJoy();
           stopMicrophone();
-          updateSpeakerButton();
           stopGamepadPolling();
           destroyTouchJoysticks();
           teleopPane.hidden = true;
@@ -2289,6 +2399,10 @@
             state.controlChannel.close();
             state.controlChannel = null;
           }
+          if (state.capChannel) {
+            state.capChannel.close();
+          }
+          resetCapState();
           if (state.telemetryChannel) {
             state.telemetryChannel.close();
             state.telemetryChannel = null;
@@ -2297,9 +2411,9 @@
             state.mapChannel.close();
             state.mapChannel = null;
           }
-          // Clear minimap
+          // Clear minimap and collapse it if expanded
           state.mapData = null;
-          clearMinimap();
+          setMinimapExpanded(false);
           if (state.pc) {
             state.pc.close();
             state.pc = null;
@@ -2333,7 +2447,7 @@
           micToggleBtn.classList.toggle('muted', !state.micEnabled);
           micToggleBtn.classList.toggle('active', state.micEnabled);
           micToggleBtn.title = state.micEnabled ? 'Mute to streamers' : 'Unmute to streamers';
-          // Robot mic button styling is handled by updateSpeakerButton (vote colors)
+          // Robot mic button styling is handled by updateSpeakerButtonFromCaps (vote colors)
           micVolumeSlider.disabled = true; // Volume control not yet implemented for WebRTC
         }
 
@@ -2352,73 +2466,210 @@
           }
         }
 
-        function sendSpeakerVote() {
-          // Send speaker vote to server via control channel
-          const vote = {
-            type: 'speaker_vote',
-            vote: state.speakerVoted,
-          };
-          if (state.controlChannel && state.controlChannel.readyState === 'open') {
-            state.controlChannel.send(JSON.stringify(vote));
-            console.info('[speaker] SENT vote:', vote);
+        // ── Capability layer (goal/proof envelopes, shared/capability.proto) ──
+        //
+        // Facts arrive as proofs on the 'cap' data channel and merge into
+        // state.caps; widgets render from manifests by type shape. Outcomes
+        // (satisfied / diverged) are judged here by comparing evidence to our
+        // own goals — the wire carries no status fields.
+
+        async function sha256Hex(s) {
+          const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(s));
+          return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, '0')).join('');
+        }
+
+        function capPrefix() {
+          return state.activeRobot ? `bot:${state.activeRobot.ros_namespace}/` : null;
+        }
+
+        // My writer key as the API sees it (user_pc_key) — used to recognize
+        // my own vote witness among votes/*.
+        function capWriterKey() {
+          return `${state.activeRobot?.ros_namespace}:${state.user?.email}:${state.clientId}`;
+        }
+
+        // Goals are serialized through a promise queue so prev-chains never
+        // interleave (hashing is async).
+        let capSendQueue = Promise.resolve();
+        function sendCapGoal(suffix, body) {
+          capSendQueue = capSendQueue.then(async () => {
+            const prefix = capPrefix();
+            if (!prefix || !state.capChannel || state.capChannel.readyState !== 'open') return;
+            const path = prefix + suffix;
+            const wire = JSON.stringify({ path, verb: 'goal', body, prev: state.capHeads[path] || '' });
+            state.capHeads[path] = await sha256Hex(wire);
+            state.capPending[path] = body;
+            state.capChannel.send(wire);
+          }).catch((err) => console.warn('[cap] send failed:', err));
+          return capSendQueue;
+        }
+
+        function handleCapMessage(wire) {
+          let msg;
+          try { msg = JSON.parse(wire); } catch { return; }
+          if (msg.verb !== 'proof' || !msg.path) return;
+          const body = msg.body || {};
+          if (body.tombstone) {
+            delete state.caps[msg.path];
           } else {
-            console.warn('[speaker] vote NOT sent (channel not ready):', vote);
+            const fact = state.caps[msg.path] || (state.caps[msg.path] = {});
+            for (const k of ['manifest', 'value', 'citation', 'provenance']) {
+              if (k in body) fact[k] = body[k];
+            }
           }
+          // Judge my pending goal against the evidence: equal → satisfied.
+          // (Numbers compare with epsilon — the provider may clamp/round.)
+          if (msg.path in state.capPending) {
+            const pending = state.capPending[msg.path];
+            const v = body.value;
+            const satisfied = (typeof pending === 'number' && typeof v === 'number')
+              ? Math.abs(pending - v) < 0.005
+              : v === pending;
+            if (satisfied) delete state.capPending[msg.path];
+          }
+          renderCapWidgets();
         }
 
-        function handleSpeakerState(data) {
-          // Update local speaker state from server
-          state.speakerState = {
-            total: data.total_streamers || 0,
-            votes: data.votes || 0,
-            enabled: data.enabled || false,
-            voters: data.voters || [],
-          };
-          console.info('[speaker] state update:', state.speakerState);
-          updateSpeakerButton();
-          // NOTE: Don't mute video based on speaker vote - that would also mute group audio
-          // The speaker vote is advisory; audio routing controls what actually gets sent
-          // to the robot. The video element should always be unmuted to receive audio.
-          const videoElement = document.getElementById('robot-video');
-          if (videoElement && videoElement.muted) {
-            // Unmute on first interaction (autoplay policy workaround)
-            videoElement.muted = false;
-            console.info('[speaker] video unmuted for audio');
-          }
+        function resetCapState() {
+          state.caps = {};
+          state.capHeads = {};
+          state.capPending = {};
+          state.capChannel = null;
+          renderCapWidgets();
         }
 
-        function updateSpeakerButton() {
+        // Widget table: manifest type shape -> widget. Rendering is
+        // presence-driven: no manifest, no widget.
+        function renderCapWidgets() {
+          const container = document.getElementById('cap-widgets');
+          const prefix = capPrefix();
+          if (!container) return;
+          if (!prefix) { container.innerHTML = ''; updateSpeakerButtonFromCaps(); return; }
+
+          const seen = new Set();
+          for (const [path, fact] of Object.entries(state.caps)) {
+            if (!path.startsWith(prefix) || !fact.manifest) continue;
+            const m = fact.manifest;
+            // Per-peer bools bind the dedicated vote button; read-only facts
+            // surface through it too (enabled state) — skip generic rendering.
+            if (m.key === 'PEER' || m.readOnly) continue;
+            const suffix = path.slice(prefix.length);
+            const id = `cap-${suffix.replace(/\//g, '-')}`;
+            seen.add(id);
+            let el = document.getElementById(id);
+            const pending = path in state.capPending;
+            if ((m.schema || {}).type === 'FLOAT') {
+              const min = m.schema.min ?? 0, max = m.schema.max ?? 1;
+              if (!el) {
+                el = document.createElement('div');
+                el.id = id;
+                el.className = 'cap-widget';
+                el.innerHTML = `<span class="cap-label"></span>
+                  <input type="range" min="0" max="100" class="volume-slider">
+                  <span class="cap-value"></span>`;
+                el.querySelector('.cap-label').textContent = suffix.split('/').pop();
+                const slider = el.querySelector('input');
+                const sliderValue = () => {
+                  const v = min + (max - min) * (parseInt(slider.value, 10) / 100);
+                  return Math.round(v * 100) / 100;
+                };
+                let sendTimer = null;
+                slider.addEventListener('input', () => {
+                  el.dataset.dragging = '1';
+                  // Trailing throttle (~12Hz): latest value wins, no backlog.
+                  if (!sendTimer) {
+                    sendTimer = setTimeout(() => {
+                      sendTimer = null;
+                      sendCapGoal(suffix, sliderValue());
+                    }, 80);
+                  }
+                });
+                slider.addEventListener('change', () => {
+                  delete el.dataset.dragging;
+                  if (sendTimer) { clearTimeout(sendTimer); sendTimer = null; }
+                  sendCapGoal(suffix, sliderValue());  // final value, immediately
+                });
+                container.appendChild(el);
+              }
+              // Show confirmed value; never yank the thumb mid-drag.
+              if (!el.dataset.dragging && typeof fact.value === 'number') {
+                el.querySelector('input').value = Math.round(((fact.value - min) / (max - min)) * 100);
+              }
+              if (typeof fact.value === 'number') {
+                el.querySelector('.cap-value').textContent = `${Math.round(fact.value * 100)}%`;
+              }
+            } else if ((m.schema || {}).type === 'BOOL') {
+              if (!el) {
+                el = document.createElement('div');
+                el.id = id;
+                el.className = 'cap-widget';
+                el.innerHTML = `<button type="button" class="ghost"></button>`;
+                el.querySelector('button').addEventListener('click', () => {
+                  const current = (state.caps[path] || {}).value;
+                  sendCapGoal(suffix, !current);
+                });
+                container.appendChild(el);
+              }
+              const btn = el.querySelector('button');
+              btn.textContent = fact.value ? '🔇' : '🔊';
+              btn.title = (m.description || suffix) + (fact.value ? ' (muted)' : '');
+            } else {
+              seen.delete(id);
+              continue;
+            }
+            el.classList.toggle('cap-pending', pending);
+          }
+          // Drop widgets whose capability vanished
+          for (const el of [...container.children]) {
+            if (!seen.has(el.id)) el.remove();
+          }
+          updateSpeakerButtonFromCaps();
+        }
+
+        // The speaker vote button is the widget for the per-peer vote
+        // capability: presence follows the manifest; colors derive from the
+        // resolver's tally citation + the bridge-proved gate.
+        function updateSpeakerButtonFromCaps() {
           if (!robotMicBtn) return;
-          const { total, votes, enabled, voters } = state.speakerState;
-          const userKey = `${state.activeRobot?.ros_namespace}:${state.user?.email}`;
-          const userVoted = voters.includes(userKey) || state.speakerVoted;
+          const prefix = capPrefix();
+          const voteFact = prefix ? state.caps[`${prefix}audio/speaker/vote`] : null;
+          if (!voteFact || !voteFact.manifest) {
+            robotMicBtn.hidden = true;
+            return;
+          }
+          robotMicBtn.hidden = false;
+          const citation = voteFact.citation || { votes: [], connected: [] };
+          const votes = (citation.votes || []).length;
+          const total = (citation.connected || []).length;
+          const enabled = !!(state.caps[`${prefix}audio/speaker/enabled`] || {}).value;
+          const myWitness = state.caps[`${prefix}audio/speaker/votes/${capWriterKey()}`];
+          const userVoted = !!(myWitness && myWitness.value) || state.speakerVoted;
+          state.speakerEnabled = enabled;
 
-          // Remove all vote classes
           robotMicBtn.classList.remove('vote-none', 'vote-partial', 'vote-pending', 'vote-enabled', 'muted', 'active');
-
           if (enabled) {
-            // Green: everyone has voted yes
             robotMicBtn.classList.add('vote-enabled');
             robotMicBtn.title = `Speaker enabled (${votes}/${total} votes)`;
           } else if (votes === 0) {
-            // Red: nobody has voted
             robotMicBtn.classList.add('vote-none');
             robotMicBtn.title = `Vote to enable speaker (0/${total} votes)`;
           } else if (userVoted) {
-            // Yellow: current user voted but not everyone
             robotMicBtn.classList.add('vote-pending');
             robotMicBtn.title = `Waiting for others (${votes}/${total} votes)`;
           } else {
-            // Orange: some people voted but not current user
             robotMicBtn.classList.add('vote-partial');
             robotMicBtn.title = `Others want speaker (${votes}/${total} votes) - click to vote`;
           }
+          // Autoplay policy workaround (was in handleSpeakerState): make sure
+          // the video element is unmuted once real speaker facts flow.
+          const videoElement = document.getElementById('robot-video');
+          if (videoElement && videoElement.muted) videoElement.muted = false;
         }
 
         function toggleSpeakerVote() {
           state.speakerVoted = !state.speakerVoted;
-          sendSpeakerVote();
-          updateSpeakerButton();
+          sendCapGoal('audio/speaker/vote', state.speakerVoted);
+          updateSpeakerButtonFromCaps();
           logTelemetry(state.speakerVoted ? 'Voted for speaker' : 'Removed speaker vote');
         }
 
@@ -2725,11 +2976,8 @@
                 if (typeof data.linear_speed === 'number') {
                   state.linearSpeed = data.linear_speed;
                 }
-                if (typeof data.angular_speed === 'number') {
-                  state.angularSpeed = data.angular_speed;
-                }
                 updateSpeedIndicators();
-                logTelemetry(`vel: lin=${state.linearSpeed.toFixed(2)} ang=${state.angularSpeed.toFixed(2)}`);
+                logTelemetry(`vel: lin=${state.linearSpeed.toFixed(2)}`);
               } else {
                 logTelemetry(JSON.stringify(data));
               }
@@ -2986,8 +3234,6 @@
               logTelemetry('Control data channel connected');
               // Send current audio routing state in case buttons were clicked before channel opened
               sendAudioRouting();
-              // Send current speaker vote state
-              sendSpeakerVote();
             };
             controlChannel.onclose = () => {
               console.info('[data] control channel closed');
@@ -3000,9 +3246,7 @@
               // Handle incoming messages from server (speaker state, aggregated control, renegotiation, etc.)
               try {
                 const data = JSON.parse(event.data);
-                if (data.type === 'speaker_state') {
-                  handleSpeakerState(data);
-                } else if (data.type === 'aggregated_control') {
+                if (data.type === 'aggregated_control') {
                   // Update ghost joysticks to show other users' inputs
                   updateGhostJoysticks(data.axes, data.users);
                 } else if (data.type === 'camera_control') {
@@ -3056,6 +3300,22 @@
               } catch (err) {
                 console.warn('[data] control channel message parse error:', err);
               }
+            };
+
+            // Capability channel: goal/proof envelopes (ordered+reliable —
+            // unlike joy traffic, prev-chains want in-order delivery).
+            const capChannel = pc.createDataChannel('cap', { ordered: true });
+            state.capChannel = capChannel;
+            capChannel.onopen = () => {
+              console.info('[cap] channel open');
+              // Re-assert my vote intent across reconnects (votes are
+              // connection-scoped facts on the server side).
+              if (state.speakerVoted) sendCapGoal('audio/speaker/vote', true);
+            };
+            capChannel.onmessage = (event) => handleCapMessage(event.data);
+            capChannel.onclose = () => {
+              console.info('[cap] channel closed');
+              if (state.capChannel === capChannel) state.capChannel = null;
             };
           }
 
@@ -3191,11 +3451,10 @@
             const data = JSON.parse(message);
             if (data.type === 'telemetry') {
               // Update actual speed from robot telemetry
+              // (robot sends linear_speed + steering; there is no
+              // angular_speed field — the old read of it was dead code)
               if (typeof data.linear_speed === 'number') {
                 state.linearSpeed = data.linear_speed;
-              }
-              if (typeof data.angular_speed === 'number') {
-                state.angularSpeed = data.angular_speed;
               }
               updateSpeedIndicators();
               // Update front distance display
@@ -3285,22 +3544,43 @@
           tmpCanvas.height = map.height;
           tmpCanvas.getContext('2d').putImageData(imgData, 0, 0);
 
-          // Clear and draw scaled
+          // Clear and draw scaled. The occupancy grid is row-major with row 0 at
+          // the map origin (minimum y, ROS y-up), but putImageData places row 0 at
+          // the top, so flip vertically to render a conventional y-up map. The
+          // robot marker below assumes this orientation.
           ctx.clearRect(0, 0, canvas.width, canvas.height);
+          ctx.save();
+          ctx.translate(0, canvas.height);
+          ctx.scale(1, -1);
           ctx.drawImage(tmpCanvas, 0, 0, canvas.width, canvas.height);
+          ctx.restore();
 
-          // Draw robot position indicator (center for now - TODO: use odometry)
+          // Robot position: map pose (world metres) -> grid cell -> canvas px.
+          // Falls back to map centre if pose fields are absent (older sources).
+          const res = map.resolution || 0.05;
+          let rx = canvas.width / 2;
+          let ry = canvas.height / 2;
+          if (typeof map.robot_x === 'number' && typeof map.origin_x === 'number') {
+            const cellX = (map.robot_x - map.origin_x) / res;
+            const cellY = (map.robot_y - map.origin_y) / res;
+            rx = (cellX / map.width) * canvas.width;
+            // Grid is row-major from origin (y up); canvas y is down -> flip.
+            ry = canvas.height - (cellY / map.height) * canvas.height;
+          }
+          const theta = typeof map.robot_theta === 'number' ? map.robot_theta : Math.PI / 2;
+
           ctx.fillStyle = '#3b82f6';
           ctx.beginPath();
-          ctx.arc(canvas.width / 2, canvas.height / 2, 4, 0, 2 * Math.PI);
+          ctx.arc(rx, ry, 4, 0, 2 * Math.PI);
           ctx.fill();
 
-          // Draw direction indicator
+          // Direction indicator (theta measured CCW from +x; canvas y is flipped).
+          const len = 10;
           ctx.strokeStyle = '#3b82f6';
           ctx.lineWidth = 2;
           ctx.beginPath();
-          ctx.moveTo(canvas.width / 2, canvas.height / 2);
-          ctx.lineTo(canvas.width / 2, canvas.height / 2 - 8);
+          ctx.moveTo(rx, ry);
+          ctx.lineTo(rx + len * Math.cos(theta), ry - len * Math.sin(theta));
           ctx.stroke();
         }
 
@@ -3314,6 +3594,29 @@
           ctx.font = '10px sans-serif';
           ctx.textAlign = 'center';
           ctx.fillText('No map', canvas.width / 2, canvas.height / 2);
+        }
+
+        function setMinimapExpanded(expanded) {
+          const hud = document.getElementById('hud-minimap');
+          const canvas = document.getElementById('minimap-canvas');
+          if (!hud || !canvas) return;
+          state.minimapExpanded = expanded;
+          hud.classList.toggle('expanded', expanded);
+          // Use a larger drawing buffer when expanded so the map stays crisp.
+          const size = expanded ? 600 : 150;
+          if (canvas.width !== size) {
+            canvas.width = size;
+            canvas.height = size;
+          }
+          if (state.mapData) {
+            renderMinimap();
+          } else {
+            clearMinimap();
+          }
+        }
+
+        function toggleMinimap() {
+          setMinimapExpanded(!state.minimapExpanded);
         }
 
         function updateTeleopKeyState() {
@@ -3709,6 +4012,28 @@
         window.addEventListener('keydown', (event) => handleKey(event, true));
         window.addEventListener('keyup', (event) => handleKey(event, false));
 
+        // Expand/collapse the SLAM minimap via the button, clicking it, or "M".
+        const minimapExpandBtn = document.getElementById('minimap-expand-btn');
+        if (minimapExpandBtn) {
+          minimapExpandBtn.addEventListener('click', (event) => {
+            event.stopPropagation();
+            toggleMinimap();
+          });
+        }
+        const hudMinimap = document.getElementById('hud-minimap');
+        if (hudMinimap) {
+          hudMinimap.addEventListener('click', () => toggleMinimap());
+        }
+        window.addEventListener('keydown', (event) => {
+          if (event.key.toLowerCase() !== 'm') return;
+          const el = document.activeElement;
+          const tag = (el && el.tagName) || '';
+          if (tag === 'INPUT' || tag === 'TEXTAREA' || (el && el.isContentEditable)) return;
+          if (state.view !== 'detail') return;
+          event.preventDefault();
+          toggleMinimap();
+        });
+
         // ── Ghost Joystick for Other Users' Inputs ──────────────────────
         const ghostMoveJoystick = document.getElementById('ghost-move-joystick');
         const ghostMoveKnob = document.getElementById('ghost-move-knob');
@@ -3978,7 +4303,9 @@
           lobbyNameInput.value = lobby?.name || '';
           lobbyDescInput.value = lobby?.description || '';
           lobbyVisibilityInput.value = lobby?.is_public ? 'public' : 'private';
-          lobbyIsVirtualInput.checked = lobby?.is_virtual || false;
+          lobbyStyleInput.value = lobby?.game_style || 'remote';
+          lobbyAllowSpawnInput.checked = (lobby?.game_listeners || []).includes('spawn_player');
+          updateSpawnToggleVisibility();
 
           // Show pending changes indicator
           if (pendingChanges) {
@@ -4048,18 +4375,6 @@
           botNameInput.value = bot.name;
           botNamespaceInput.value = bot.ros_namespace;
           botDescInput.value = bot.description || '';
-          const vol = Math.round((bot.volume ?? 1.0) * 100);
-          botVolumeInput.value = vol;
-          botVolumeLabel.textContent = vol;
-          botPreviousVolume = vol > 0 ? vol : 100;  // Store for unmute
-          // Update mute button icon
-          if (vol === 0) {
-            botMuteBtn.textContent = '🔇';
-            botMuteBtn.title = 'Unmute robot';
-          } else {
-            botMuteBtn.textContent = '🔊';
-            botMuteBtn.title = 'Mute robot';
-          }
           botMessage.textContent = pendingChanges
             ? `Editing ${bot.name} (has unsaved changes)`
             : `Editing ${bot.name}`;
@@ -4072,11 +4387,6 @@
           botNameInput.value = '';
           botNamespaceInput.value = '';
           botDescInput.value = '';
-          botVolumeInput.value = 100;
-          botVolumeLabel.textContent = '100';
-          botMuteBtn.textContent = '🔊';
-          botMuteBtn.title = 'Mute robot';
-          botPreviousVolume = 100;
           botMessage.textContent = '';
         }
 
@@ -4084,17 +4394,25 @@
         async function autoSaveLobby() {
           if (!state.manageLobby) return;
           const lobbyId = state.manageLobby.id;
+          const style = lobbyStyleInput.value;
+          const allowSpawn = lobbyAllowSpawnInput.checked;
           const body = {
             name: lobbyNameInput.value,
             description: lobbyDescInput.value || null,
             is_public: lobbyVisibilityInput.value === 'public',
-            is_virtual: lobbyIsVirtualInput.checked,
+            game_style: style,
+            allow_spawn_players: allowSpawn,
+          };
+          // Mirror server-derived fields locally for immediate UI feedback
+          const derived = {
+            is_virtual: isVirtualStyle(style),
+            game_listeners: allowSpawn ? ['spawn_player'] : [],
           };
 
           // Update local state immediately
-          Object.assign(state.manageLobby, body);
+          Object.assign(state.manageLobby, body, derived);
           if (state.currentLobby?.id === lobbyId) {
-            Object.assign(state.currentLobby, body);
+            Object.assign(state.currentLobby, body, derived);
             renderLobbyDetail();
           }
 
@@ -4145,7 +4463,8 @@
         lobbyNameInput.addEventListener('blur', () => { if (state.manageLobby) autoSaveLobby(); });
         lobbyDescInput.addEventListener('blur', () => { if (state.manageLobby) autoSaveLobby(); });
         lobbyVisibilityInput.addEventListener('change', () => { if (state.manageLobby) autoSaveLobby(); });
-        lobbyIsVirtualInput.addEventListener('change', () => { if (state.manageLobby) autoSaveLobby(); });
+        lobbyStyleInput.addEventListener('change', () => { updateSpawnToggleVisibility(); if (state.manageLobby) autoSaveLobby(); });
+        lobbyAllowSpawnInput.addEventListener('change', () => { if (state.manageLobby) autoSaveLobby(); });
 
         // For new lobbies, create on first field blur if name is filled
         lobbyForm.addEventListener('submit', async (event) => {
@@ -4162,7 +4481,8 @@
             name: lobbyNameInput.value,
             description: lobbyDescInput.value || null,
             is_public: lobbyVisibilityInput.value === 'public',
-            is_virtual: lobbyIsVirtualInput.checked,
+            game_style: lobbyStyleInput.value,
+            allow_spawn_players: lobbyAllowSpawnInput.checked,
           };
           try {
             const resp = await authFetch(`${apiBase()}/lobbies`, {
@@ -4224,7 +4544,6 @@
             name: botNameInput.value,
             ros_namespace: botNamespaceInput.value,
             description: botDescInput.value || null,
-            volume: parseInt(botVolumeInput.value, 10) / 100,
           };
           try {
             if (botForm.dataset.editingId) {
@@ -4264,86 +4583,9 @@
           resetBotForm();
         });
 
-        // Volume slider - update label and auto-save for existing robots
-        botVolumeInput.addEventListener('input', () => {
-          const vol = parseInt(botVolumeInput.value, 10);
-          botVolumeLabel.textContent = vol;
-          updateMuteButtonIcon(vol);
-        });
-
-        // Auto-save volume when slider is released (for existing robots, supports offline)
-        botVolumeInput.addEventListener('change', async () => {
-          const botId = botForm.dataset.editingId;
-          if (!botId) return;  // Only auto-save for existing robots
-          const vol = parseInt(botVolumeInput.value, 10) / 100;
-
-          // Update local state immediately
-          const bot = state.manageLobby?.bots?.find(b => String(b.id) === botId);
-          if (bot) bot.volume = vol;
-
-          try {
-            const resp = await authFetch(`${apiBase()}/bots/${botId}`, {
-              method: 'PATCH',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ volume: vol }),
-            });
-            if (resp.status === 401) return;
-            if (!resp.ok) throw new Error(await resp.text());
-            botMessage.textContent = 'Volume saved';
-            removePendingBotChange(botId);
-            setTimeout(() => { if (botMessage.textContent === 'Volume saved') botMessage.textContent = ''; }, 1500);
-          } catch (err) {
-            console.error(err);
-            addPendingBotChange(botId, { volume: vol });
-            botMessage.textContent = 'Saved locally (will sync when online)';
-            setTimeout(() => { if (botMessage.textContent.includes('locally')) botMessage.textContent = ''; }, 2500);
-          }
-        });
-
-        // Mute button
-        function updateMuteButtonIcon(vol) {
-          if (vol === 0) {
-            botMuteBtn.textContent = '🔇';
-            botMuteBtn.title = 'Unmute robot';
-          } else {
-            botMuteBtn.textContent = '🔊';
-            botMuteBtn.title = 'Mute robot';
-          }
-        }
-
-        botMuteBtn.addEventListener('click', async () => {
-          const currentVol = parseInt(botVolumeInput.value, 10);
-          let newVol;
-          if (currentVol > 0) {
-            // Mute: save current volume and set to 0
-            botPreviousVolume = currentVol;
-            newVol = 0;
-          } else {
-            // Unmute: restore previous volume
-            newVol = botPreviousVolume || 100;
-          }
-          botVolumeInput.value = newVol;
-          botVolumeLabel.textContent = newVol;
-          updateMuteButtonIcon(newVol);
-
-          // Auto-save if editing existing robot
-          if (botForm.dataset.editingId) {
-            try {
-              const resp = await authFetch(`${apiBase()}/bots/${botForm.dataset.editingId}`, {
-                method: 'PATCH',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ volume: newVol / 100 }),
-              });
-              if (resp.status === 401) return;
-              if (!resp.ok) throw new Error(await resp.text());
-              botMessage.textContent = newVol === 0 ? 'Muted' : 'Unmuted';
-              setTimeout(() => { if (botMessage.textContent === 'Muted' || botMessage.textContent === 'Unmuted') botMessage.textContent = ''; }, 1500);
-            } catch (err) {
-              console.error(err);
-              botMessage.textContent = 'Failed to save';
-            }
-          }
-        });
+        // Volume and mute are capability widgets on the live robot view now
+        // (bot:<ns>/audio/gain and /audio/muted goals over the cap channel);
+        // the REST volume write path is gone.
 
         async function deleteBot(botId) {
           if (!confirm('Archive this robot?')) return;
@@ -4365,21 +4607,56 @@
           }
         }
 
+        // Pull a human-readable reason out of a FastAPI error response.
+        // Validation (422) errors come back as {detail: [{msg, loc}, ...]};
+        // most others as {detail: "..."}. Falls back to the raw text.
+        function describeAuthError(rawText, fallback) {
+          try {
+            const body = JSON.parse(rawText);
+            const detail = body && body.detail;
+            if (typeof detail === 'string') return detail;
+            if (Array.isArray(detail) && detail.length) {
+              return detail
+                .map((d) => {
+                  const field = Array.isArray(d.loc) ? d.loc[d.loc.length - 1] : '';
+                  const msg = (d.msg || '').replace(/^String /, '');
+                  return field && field !== 'body' ? `${field}: ${msg}` : msg;
+                })
+                .filter(Boolean)
+                .join('; ');
+            }
+          } catch (_) { /* not JSON */ }
+          return (rawText && rawText.trim()) || fallback;
+        }
+
         async function handleAuth(path) {
+          const email = authEmailInput.value.trim();
+          const password = authPasswordInput.value;
+          if (!email || !password) {
+            authMessage.textContent = 'Enter a username and password.';
+            return;
+          }
           authMessage.textContent = 'Working...';
           try {
             const resp = await fetch(`${apiBase()}/auth/${path}`, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ email: authEmailInput.value, password: authPasswordInput.value }),
+              body: JSON.stringify({ email, password }),
             });
-            if (!resp.ok) throw new Error(await resp.text());
+            if (!resp.ok) {
+              const reason = describeAuthError(
+                await resp.text(),
+                path === 'login' ? 'Invalid credentials.' : 'Could not create account.',
+              );
+              authMessage.textContent = reason;
+              return;
+            }
             const data = await resp.json();
             setAuth(data.access_token, data.user.email, rememberMeCheckbox.checked);
             authMessage.textContent = path === 'login' ? 'Welcome back!' : 'Account created.';
           } catch (err) {
             console.error(err);
-            authMessage.textContent = 'Authentication failed.';
+            authMessage.textContent = 'Could not reach the server. Check your connection and try again.';
           }
         }
 
