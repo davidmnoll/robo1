@@ -3620,13 +3620,26 @@
         }
 
         function updateTeleopKeyState() {
+          const wasEnabled = Boolean(window.__teleopKeysEnabled);
           window.__teleopKeysEnabled = Boolean(state.activeRobot && state.view === 'detail' && state.lobbyTab === 'teleop');
           // Start/stop gamepad polling based on teleop state
           if (window.__teleopKeysEnabled) {
             startGamepadPolling();
           } else {
             stopGamepadPolling();
+            // handleKey ignores events while disabled, so any key held right
+            // now would stay latched down forever — release everything.
+            if (wasEnabled) resetJoy();
           }
+        }
+
+        // Movement (WASD/arrows) and camera (IJKL) keys share state.keysPressed,
+        // so drive logic must only ever scan the movement subset — a latched
+        // camera key must not block the drive send loop or gamepad polling.
+        const MOVEMENT_KEYS = ['w', 's', 'a', 'd', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright'];
+        const CAMERA_KEYS = ['i', 'j', 'k', 'l'];
+        function anyMovementKeyHeld() {
+          return MOVEMENT_KEYS.some(k => state.keysPressed[k]);
         }
 
         function handleKey(event, isKeyDown) {
@@ -3634,12 +3647,11 @@
           const key = event.key.toLowerCase();
 
           // Movement keys (WASD / arrows)
-          const movementKeys = ['w', 's', 'a', 'd', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright'];
-          if (movementKeys.includes(key)) {
+          if (MOVEMENT_KEYS.includes(key)) {
             event.preventDefault();
-            const wasPressed = Object.values(state.keysPressed).some(v => v);
+            const wasPressed = anyMovementKeyHeld();
             state.keysPressed[key] = isKeyDown;
-            const isPressed = Object.values(state.keysPressed).some(v => v);
+            const isPressed = anyMovementKeyHeld();
 
             // Debug: log key state changes
             console.log(`[key] ${isKeyDown ? 'down' : 'up'} '${key}' wasPressed=${wasPressed} isPressed=${isPressed} interval=${!!state.keySendInterval}`);
@@ -3660,13 +3672,12 @@
           }
 
           // Camera pan/tilt keys (IJKL)
-          const cameraKeys = ['i', 'j', 'k', 'l'];
-          if (cameraKeys.includes(key)) {
+          if (CAMERA_KEYS.includes(key)) {
             event.preventDefault();
             state.keysPressed[key] = isKeyDown;
 
             // Start/stop camera movement based on whether any camera key is held
-            const anyCameraKeyHeld = cameraKeys.some(k => state.keysPressed[k]);
+            const anyCameraKeyHeld = CAMERA_KEYS.some(k => state.keysPressed[k]);
             if (anyCameraKeyHeld && !state.cameraPtzInterval) {
               startCameraPtz();
             } else if (!anyCameraKeyHeld && state.cameraPtzInterval) {
@@ -3828,8 +3839,8 @@
             return;
           }
 
-          // If keyboard keys are pressed, prefer keyboard
-          if (Object.values(state.keysPressed).some(v => v)) {
+          // If movement keys are pressed, prefer keyboard (camera keys don't count)
+          if (anyMovementKeyHeld()) {
             return;
           }
 
@@ -4011,6 +4022,13 @@
 
         window.addEventListener('keydown', (event) => handleKey(event, true));
         window.addEventListener('keyup', (event) => handleKey(event, false));
+        // A keyup can be swallowed while the page loses focus (alt-tab, tab
+        // switch), leaving a key latched down forever. Release everything when
+        // focus goes away.
+        window.addEventListener('blur', () => resetJoy());
+        document.addEventListener('visibilitychange', () => {
+          if (document.hidden) resetJoy();
+        });
 
         // Expand/collapse the SLAM minimap via the button, clicking it, or "M".
         const minimapExpandBtn = document.getElementById('minimap-expand-btn');
