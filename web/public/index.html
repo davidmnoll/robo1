@@ -3711,7 +3711,7 @@
         }
 
         // Camera pan/tilt control (IJKL keys) - uses DELTAS for multi-user compatibility
-        const CAMERA_STEP = 5;  // Degrees per update (keyboard)
+        const CAMERA_STEP = 3;  // Degrees per update (keyboard); 10Hz updates → 30°/s
         const CAMERA_MIN = 0;
         const CAMERA_MAX = 180;
         // Track deltas accumulated since last send (for delta-based control)
@@ -4059,6 +4059,13 @@
         const ghostCameraKnob = document.getElementById('ghost-camera-knob');
         let ghostFadeTimeout = null;
 
+        // Hide a ghost joystick and recenter its knob — a hidden knob must
+        // never keep a stale offset, or it reappears stuck at an old position.
+        function hideGhost(joystickEl, knobEl) {
+          joystickEl?.classList.remove('visible');
+          if (knobEl) knobEl.style.transform = 'translate(-50%, -50%)';
+        }
+
         function updateGhostJoysticks(aggregatedAxes, userCount) {
           // This handles OTHER users' inputs - skip if local control is active
           const hasLocalMoveInput = !!state.keySendInterval;
@@ -4067,8 +4074,8 @@
           // Only show ghost if there are other users controlling
           if (userCount <= 1 || !aggregatedAxes) {
             // Don't hide if local input is active (local handler controls visibility)
-            if (!hasLocalMoveInput) ghostMoveJoystick?.classList.remove('visible');
-            if (!hasLocalCameraInput) ghostCameraJoystick?.classList.remove('visible');
+            if (!hasLocalMoveInput) hideGhost(ghostMoveJoystick, ghostMoveKnob);
+            if (!hasLocalCameraInput) hideGhost(ghostCameraJoystick, ghostCameraKnob);
             return;
           }
 
@@ -4084,7 +4091,7 @@
               const maxOffset = 30;  // pixels from center
               ghostMoveKnob.style.transform = `translate(calc(-50% + ${moveX * maxOffset}px), calc(-50% + ${moveY * maxOffset}px))`;
             } else {
-              ghostMoveJoystick?.classList.remove('visible');
+              hideGhost(ghostMoveJoystick, ghostMoveKnob);
             }
           }
 
@@ -4099,15 +4106,15 @@
               const maxOffset = 30;
               ghostCameraKnob.style.transform = `translate(-50%, calc(-50% + ${cameraY * maxOffset}px))`;
             } else {
-              ghostCameraJoystick?.classList.remove('visible');
+              hideGhost(ghostCameraJoystick, ghostCameraKnob);
             }
           }
 
           // Auto-hide after inactivity (only for remote inputs, not local)
           if (ghostFadeTimeout) clearTimeout(ghostFadeTimeout);
           ghostFadeTimeout = setTimeout(() => {
-            if (!state.keySendInterval) ghostMoveJoystick?.classList.remove('visible');
-            if (!state.cameraPtzInterval) ghostCameraJoystick?.classList.remove('visible');
+            if (!state.keySendInterval) hideGhost(ghostMoveJoystick, ghostMoveKnob);
+            if (!state.cameraPtzInterval) hideGhost(ghostCameraJoystick, ghostCameraKnob);
           }, 500);
         }
 
@@ -4140,7 +4147,7 @@
           // Auto-hide after inactivity
           if (ghostCameraFadeTimeout) clearTimeout(ghostCameraFadeTimeout);
           ghostCameraFadeTimeout = setTimeout(() => {
-            ghostCameraJoystick?.classList.remove('visible');
+            hideGhost(ghostCameraJoystick, ghostCameraKnob);
           }, 300);
         }
 

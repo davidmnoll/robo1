@@ -162,6 +162,7 @@ class RosmasterController(Node):
         self.camera_tilt = self.SERVO_CENTER
         self.last_ptz_time = 0.0  # Rate limiting for PTZ commands
         self.PTZ_MIN_INTERVAL = 0.1  # Minimum 100ms between PTZ servo updates
+        self.pending_ptz = None  # Latest (pan, tilt) held back by rate limiting
 
         # Collision avoidance state
         self.min_front_distance = float('inf')
@@ -253,13 +254,27 @@ class RosmasterController(Node):
             self.get_logger().warning(f"Invalid camera_ptz message: expected [pan, tilt], got {msg.data}")
             return
 
-        # Rate limit PTZ commands to avoid serial buffer overrun
-        now = time.time()
-        if now - self.last_ptz_time < self.PTZ_MIN_INTERVAL:
-            return  # Skip this update, too soon
-
         pan = max(self.SERVO_MIN_ANGLE, min(self.SERVO_MAX_ANGLE, msg.data[0]))
         tilt = max(self.SERVO_MIN_ANGLE, min(self.SERVO_MAX_ANGLE, msg.data[1]))
+
+        # Positions are absolute, so under rate limiting we must not drop the
+        # newest value — the final message of a burst (or the center-on-stop
+        # reset) would be lost and the servos left stuck at a stale position.
+        # Stash the latest and let the control loop apply it when allowed.
+        self.pending_ptz = (pan, tilt)
+        self._apply_pending_ptz()
+
+    def _apply_pending_ptz(self) -> None:
+        """Apply the most recent PTZ target, honoring the serial rate limit."""
+        if self.pending_ptz is None:
+            return
+
+        now = time.time()
+        if now - self.last_ptz_time < self.PTZ_MIN_INTERVAL:
+            return  # Too soon; control loop will retry shortly
+
+        pan, tilt = self.pending_ptz
+        self.pending_ptz = None
 
         # Only send if values actually changed
         pan_changed = pan != self.camera_pan
@@ -395,6 +410,9 @@ class RosmasterController(Node):
         # Steering is direct (no ramping for car-like steering)
         # Send command to motors
         self._set_motion(effective_linear_x, self.current_steering)
+
+        # Flush any PTZ target held back by the serial rate limit
+        self._apply_pending_ptz()
 
         # Publish telemetry at lower rate
         self.telemetry_counter += 1

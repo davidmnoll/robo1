@@ -307,6 +307,9 @@ jobs:
         run: |
           set -euo pipefail
           echo "Uploading frontend to gs://${DEV_FRONTEND_BUCKET}/"
-          gsutil -m rsync -r -d web/dist "gs://${DEV_FRONTEND_BUCKET}/"
+          # no-cache: GCS defaults public objects to max-age=3600, which leaves
+          # browsers on an up-to-hour-stale dashboard after every deploy.
+          gsutil -m -h "Cache-Control:no-cache, max-age=0" rsync -r -d web/dist "gs://${DEV_FRONTEND_BUCKET}/"
+          gsutil -m setmeta -h "Cache-Control:no-cache, max-age=0" "gs://${DEV_FRONTEND_BUCKET}/**" || true
           echo ""
           echo "Frontend deployed to: https://storage.googleapis.com/${DEV_FRONTEND_BUCKET}/index.html"
