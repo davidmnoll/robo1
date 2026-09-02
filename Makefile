@@ -105,7 +105,7 @@ dev:
 	@if ! command -v tmux >/dev/null 2>&1; then \
 		echo "tmux required. Install with: sudo apt install tmux"; exit 1; \
 	fi
-	@DEV_IP=$$($(MAKE) -s dev-ip); \
+	@DEV_IP=$$($(MAKE) -s --no-print-directory dev-ip); \
 	if [ -z "$$DEV_IP" ] || [ "$$DEV_IP" = "Dev VM not found. Run deployment first." ]; then \
 		echo "Error: Could not get dev VM IP. Is the dev environment deployed?"; \
 		exit 1; \
@@ -353,7 +353,7 @@ dev-url:
 
 # Run local dashboard against dev API
 dev-cloud-web:
-	@DEV_IP=$$($(MAKE) -s dev-ip); \
+	@DEV_IP=$$($(MAKE) -s --no-print-directory dev-ip); \
 	if [ -z "$$DEV_IP" ] || [ "$$DEV_IP" = "Dev VM not found. Run deployment first." ]; then \
 		echo "Error: Could not get dev VM IP. Is the dev environment deployed?"; \
 		exit 1; \
@@ -363,7 +363,7 @@ dev-cloud-web:
 
 # Run ros-bridge connected to dev API
 dev-cloud-ros:
-	@DEV_IP=$$($(MAKE) -s dev-ip); \
+	@DEV_IP=$$($(MAKE) -s --no-print-directory dev-ip); \
 	if [ -z "$$DEV_IP" ] || [ "$$DEV_IP" = "Dev VM not found. Run deployment first." ]; then \
 		echo "Error: Could not get dev VM IP. Is the dev environment deployed?"; \
 		exit 1; \

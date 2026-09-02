@@ -4581,14 +4581,18 @@ async def handle_forwarder_offer(ws: WebSocket, message: dict) -> None:
 
         elif channel.label == "slam_map":
             # Map produced by server-side slam_toolbox (in ros-bridge). Relay it
-            # straight to browsers and mark the robot so the scan-based fallback
-            # SlamProcessor stops broadcasting.
+            # straight to browsers. The ros-bridge opens this channel for every
+            # robot even when slam_toolbox produces nothing, so only mark the
+            # robot as slam_toolbox-managed (which mutes the scan-based fallback
+            # SlamProcessor) once an actual map message arrives.
             hop1_slam_map_channels[robot] = channel
-            slam_toolbox_robots.add(robot)
             logger.info("SFU Hop1: slam_map channel received for %s", robot)
 
             @channel.on("message")
             def on_slam_map_message(message: str) -> None:
+                if robot not in slam_toolbox_robots:
+                    slam_toolbox_robots.add(robot)
+                    logger.info("SFU Hop1: slam_toolbox map active for %s, muting fallback", robot)
                 _relay_map_to_browsers(robot, message)
 
             @channel.on("open")
