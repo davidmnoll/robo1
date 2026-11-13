@@ -162,7 +162,7 @@ DEF BOT_ALPHA TurtleBot3Burger {
     RobotisLds01 { }
     Camera {
       translation 0.03 0 0.22
-      rotation 0.5 -1 0 1.5708
+      rotation 0 -1 0 -1.5708
       name "camera"
       fieldOfView 2
       width 320
@@ -183,7 +183,7 @@ DEF BOT_BETA TurtleBot3Burger {
     RobotisLds01 { }
     Camera {
       translation 0.03 0 0.22
-      rotation 0.5 -1 0 1.5708
+      rotation 0 -1 0 -1.5708
       name "camera"
       fieldOfView 2
       width 320

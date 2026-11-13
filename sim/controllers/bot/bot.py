@@ -288,6 +288,12 @@ def main() -> None:
     else:
         log("ROS2 not available - running without ROS integration")
 
+    # Initialize keyboard for local control
+    keyboard = robot.getKeyboard()
+    keyboard.enable(timestep)
+    keyboard_active = False  # True when keyboard is overriding ROS commands
+    log("Keyboard enabled — click Webots 3D view, then use WASD/arrows to drive")
+
     # Settings
     command_timeout = 2.0  # Increased timeout
     frame_interval = max(1, int(100 / timestep))  # ~10 fps
