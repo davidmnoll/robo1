@@ -1,0 +1,93 @@
+// Capability protocol — the single envelope for goals and proofs.
+//
+// This file is the normative schema. Phase 1 sends the protojson mapping of
+// these messages (human-readable JSON) over WebRTC data channels labeled
+// "cap"; the binary encoding is a later flip that requires no schema change.
+// Python/JS construct protojson-shaped objects by hand for now; codegen is a
+// follow-up (protoc --python_out / protobuf-es).
+//
+// Semantics (see design notes):
+// - A `goal` posts a constraint on a path. A `proof` carries evidence — the
+//   provider's attestable state (or a refutation citation). Whether a goal is
+//   satisfied/diverged/refuted is JUDGED BY THE RECEIVER by evaluating the
+//   evidence against its goal; it is never asserted as a status field.
+// - `prev` is the hash (sha256 hex of the wire bytes) of the sender's
+//   previous message on this path. Chains give supersession order,
+//   divergence detection (two messages sharing a prev = fork), and
+//   reconnect resync (walk back to the point of divergence). No counters.
+// - Writer identity is the connection (hop-local); durable authorship goes
+//   in witness provenance facts, not the envelope.
+
+syntax = "proto3";
+
+package capability;
+
+import "google/protobuf/struct.proto";
+
+// One message, two verbs. Everything on a "cap" channel is a CapMessage.
+message CapMessage {
+  string path = 1;                  // e.g. "bot:rosmaster_1/audio/gain"
+  Verb verb = 2;
+  google.protobuf.Value body = 3;   // goal: the constraint payload
+                                    // proof: the evidence (see Evidence shapes)
+  string prev = 4;                  // hash of sender's previous message on
+                                    // this path; empty = chain start
+}
+
+enum Verb {
+  VERB_UNSPECIFIED = 0;
+  GOAL = 1;   // client/composer -> provider: constrain this path
+  PROOF = 2;  // provider -> subscribers: attestable state of this path
+}
+
+// Evidence shapes carried in CapMessage.body when verb == PROOF.
+// A declaration proof (first proof on a path, or replayed to new
+// subscribers) carries {"manifest": Manifest, "value": <current>}.
+// Subsequent proofs carry {"value": <current>} plus optional fields:
+//   {"citation": {...}}   checkable facts behind a derived value
+//                         (e.g. vote tally: {"votes": [...], "connected":
+//                          [...], "rule": "unanimous"})
+//   {"tombstone": true}   the fact at this path is retracted
+//   {"provenance": {"goal": "<msg hash>", "writer": "<conn key>"}}
+//                         for fresh witnesses (spawns)
+
+// Capability declaration. Presence of a manifest at a path is what makes
+// dashboards render a widget for it — widgets are chosen by TYPE SHAPE
+// (mode + key + schema), never by path name.
+message Manifest {
+  Mode mode = 1;
+  Key key = 2;
+  Schema schema = 3;      // goal payload type
+  bool read_only = 4;     // true: browsers may not author goals here
+                          // (e.g. speaker/enabled — resolver-written)
+  string description = 5;
+}
+
+enum Mode {
+  MODE_UNSPECIFIED = 0;
+  PERSISTENT = 1;  // new goals supersede (upsert); idempotent facts
+  LINEAR = 2;      // each goal discharged exactly once (queue); counted
+}
+
+// Identity discipline of the witness — this is what makes a capability
+// single-writer, per-peer voted, or freshly spawning:
+enum Key {
+  KEY_UNSPECIFIED = 0;
+  CONST = 1;  // witness is the path itself (one shared cell, e.g. gain)
+  PEER = 2;   // witness at <path>s/{writer} — per-connection fact (votes)
+  FRESH = 3;  // witness minted per goal (spawns); provenance links it back
+}
+
+message Schema {
+  Type type = 1;
+  double min = 2;         // meaningful for FLOAT
+  double max = 3;
+  google.protobuf.Struct fields = 4;  // for STRUCT payloads (spawn args)
+}
+
+enum Type {
+  TYPE_UNSPECIFIED = 0;
+  BOOL = 1;
+  FLOAT = 2;
+  STRUCT = 3;
+}

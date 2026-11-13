@@ -64,6 +64,7 @@ class AudioPlayNode(Node):
             self.proc = subprocess.Popen(
                 [
                     "aplay",
+                    "-D", "plughw:2,0",  # USB audio device (plughw for format conversion)
                     "-f", "S16_LE",
                     "-r", str(self.SAMPLE_RATE),
                     "-c", str(self.CHANNELS),

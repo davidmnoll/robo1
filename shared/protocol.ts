@@ -33,7 +33,19 @@ export type MessageType =
   // Server management
   | 'subscribe'
   | 'unsubscribe'
-  | 'heartbeat';
+  | 'heartbeat'
+  // Virtual World (Tauri ↔ API)
+  | 'get_world_state'
+  | 'world_state'
+  | 'add_element'
+  | 'update_element'
+  | 'remove_element'
+  | 'element_added'
+  | 'element_updated'
+  | 'element_removed'
+  | 'player_state'
+  | 'virtual_player_created'
+  | 'virtual_player_deleted';
 
 // ============================================================================
 // CONTROLLER STATE (Client → Robot)
@@ -376,3 +388,101 @@ export const STANDARD_GAMEPAD_MAPPING = {
   // Axes that need Y inversion (push up = negative by default)
   invertY: [1, 3],
 } as const;
+
+// ============================================================================
+// VIRTUAL WORLD (Tauri Desktop App ↔ API)
+// ============================================================================
+
+export type VirtualElementType = 'wall' | 'fruit' | 'note' | 'obstacle';
+
+export interface VirtualWorldElement {
+  id: number;
+  element_type: VirtualElementType;
+  x: number;
+  y: number;
+  z: number;
+  width?: number;
+  height?: number;
+  depth?: number;
+  rotation: number;
+  data?: string;  // JSON for element-specific data
+}
+
+export interface VirtualPlayer {
+  id: number;
+  namespace: string;
+  name: string;
+  x: number;
+  y: number;
+  z: number;
+  yaw: number;
+  color: string;
+}
+
+export interface VirtualWorldState {
+  lobby_id: number;
+  elements: VirtualWorldElement[];
+  players: VirtualPlayer[];
+}
+
+// Virtual World WebSocket Messages
+
+export interface WorldStateMessage {
+  type: 'world_state';
+  lobby_id: number;
+  elements: VirtualWorldElement[];
+  players: VirtualPlayer[];
+}
+
+export interface AddElementMessage {
+  type: 'add_element';
+  element_type: VirtualElementType;
+  x: number;
+  y: number;
+  z?: number;
+  width?: number;
+  height?: number;
+  depth?: number;
+  rotation?: number;
+  data?: string;
+  created_by?: string;
+}
+
+export interface UpdateElementMessage {
+  type: 'update_element';
+  element_id: number;
+  x?: number;
+  y?: number;
+  z?: number;
+  width?: number;
+  height?: number;
+  depth?: number;
+  rotation?: number;
+  data?: string;
+}
+
+export interface RemoveElementMessage {
+  type: 'remove_element';
+  element_id: number;
+}
+
+export interface PlayerStateMessage {
+  type: 'player_state';
+  namespace: string;
+  x?: number;
+  y?: number;
+  z?: number;
+  yaw?: number;
+}
+
+export interface VirtualPlayerCreatedMessage {
+  type: 'virtual_player_created';
+  lobby_id: number;
+  player: VirtualPlayer;
+}
+
+export interface VirtualPlayerDeletedMessage {
+  type: 'virtual_player_deleted';
+  lobby_id: number;
+  namespace: string;
+}

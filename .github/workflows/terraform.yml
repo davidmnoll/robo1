@@ -187,7 +187,7 @@ jobs:
                 --project="${PROJECT_ID}" \
                 --zone="${API_VM_ZONE}" \
                 --tunnel-through-iap \
-                --command="sudo docker pull ${IMAGE} && sudo docker rm -f robot-gateway 2>/dev/null || true && sudo docker run -d --name robot-gateway --network host --restart=always --env-file /etc/robot-gateway/env ${IMAGE}"; then
+                --command="sudo docker pull ${IMAGE} && sudo docker rm -f robot-gateway 2>/dev/null || true && sudo docker run -d --name robot-gateway --network host --restart=always --memory=2560m --memory-swap=2560m --env-file /etc/robot-gateway/env ${IMAGE}"; then
               echo "Deploy succeeded on attempt ${i}"
               exit 0
             fi

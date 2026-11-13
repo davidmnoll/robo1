@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import contextlib
 import json
 import logging
@@ -9,12 +10,15 @@ import time as _time
 from collections import defaultdict
 from datetime import datetime, timedelta
 from enum import Enum
-from typing import Annotated, Any, Dict, Optional, TypeVar
+from typing import Annotated, Any, Dict, Optional, Set, TypeVar
 
 import numpy as np
 from aiortc import AudioStreamTrack, MediaStreamTrack, RTCDataChannel, RTCPeerConnection, RTCSessionDescription
 from aiortc.contrib.media import MediaRelay
 from av import AudioFrame
+
+from app.capabilities import Broker
+from app.virtual_world import RaycastCameraTrack, VirtualWorld
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from jose import JWTError, jwt
@@ -45,7 +49,7 @@ with contextlib.suppress(ImportError):
 from passlib.context import CryptContext
 from pydantic import BaseModel, Field, ValidationError, constr, field_validator
 from pydantic_settings import BaseSettings
-from sqlalchemy import Boolean, Column, DateTime, Float, ForeignKey, Integer, String, Text, delete, or_, select, text
+from sqlalchemy import JSON, Boolean, Column, DateTime, Float, ForeignKey, Integer, LargeBinary, String, Text, UniqueConstraint, delete, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, relationship, selectinload
 
@@ -86,6 +90,10 @@ class Settings(BaseSettings):
     heartbeat_timeout_seconds: int = Field(30, alias="HEARTBEAT_TIMEOUT_SECONDS")
     command_retention_seconds: int = Field(120, alias="COMMAND_RETENTION_SECONDS")
     stun_server: str = Field("", alias="STUN_SERVER")
+    # SLAM map tuning: downsample factor for a lower-resolution map, and how
+    # often (in scans, ~0.1s each at 10Hz) to broadcast a map update.
+    slam_map_downsample: int = Field(4, alias="SLAM_MAP_DOWNSAMPLE")
+    slam_map_update_interval: int = Field(3, alias="SLAM_MAP_UPDATE_INTERVAL")
 
 
 settings = Settings()
@@ -124,10 +132,18 @@ class Lobby(Base):
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     owner_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     is_public = Column(Boolean, nullable=False, default=False, server_default=text("false"))
+    is_virtual = Column(Boolean, nullable=False, default=False, server_default=text("false"))
     is_deleted = Column(Boolean, nullable=False, default=False, server_default=text("false"))
+    # Virtual-lobby game style ("remote" = external robots, "raycast", "dom"…)
+    game_style = Column(String(32), nullable=False, default="remote", server_default=text("'remote'"))
+    # Active event listeners registered with the game (e.g. ["spawn_player"]).
+    game_listeners = Column(JSON, nullable=False, default=list, server_default=text("'[]'"))
 
     owner = relationship("User", back_populates="lobbies")
     bots = relationship("Bot", back_populates="lobby", cascade="all, delete-orphan")
+    chat_messages = relationship("ChatMessage", back_populates="lobby", cascade="all, delete-orphan")
+    virtual_elements = relationship("VirtualWorldElement", back_populates="lobby", cascade="all, delete-orphan")
+    virtual_players = relationship("VirtualPlayer", back_populates="lobby", cascade="all, delete-orphan")
 
 
 class Bot(Base):
@@ -143,6 +159,34 @@ class Bot(Base):
     is_deleted = Column(Boolean, nullable=False, default=False, server_default=text("false"))
 
     lobby = relationship("Lobby", back_populates="bots")
+
+
+class SlamPoseGraph(Base):
+    """Persisted slam_toolbox pose graph for a lobby.
+
+    slam_toolbox serialization produces two artifacts, a `.posegraph` and a
+    `.data` file; we store both as blobs. One row per lobby: sessions continue
+    from (and re-serialize into) the same graph so the map accumulates and can
+    be stitched across sessions. The `x-api-key` (lobby access key) scopes which
+    lobby a bridge reads/writes, so persistence is naturally per-lobby.
+    """
+
+    __tablename__ = "slam_pose_graphs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    lobby_id = Column(Integer, ForeignKey("lobbies.id"), nullable=False, index=True)
+    robot_namespace = Column(String(255), nullable=True, index=True)
+    posegraph = Column(LargeBinary, nullable=False)
+    data = Column(LargeBinary, nullable=False)
+    resolution = Column(Float, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False
+    )
+
+    lobby = relationship("Lobby")
+
+    __table_args__ = (UniqueConstraint("lobby_id", name="uq_slam_pose_graph_lobby"),)
 
 
 class RobotCommand(Base):
@@ -164,6 +208,60 @@ class RobotCommand(Base):
     completed_at = Column(DateTime, nullable=True)
 
 
+class ChatMessage(Base):
+    __tablename__ = "chat_messages"
+
+    id = Column(Integer, primary_key=True, index=True)
+    lobby_id = Column(Integer, ForeignKey("lobbies.id"), nullable=False, index=True)
+    user_id = Column(String(255), nullable=True)  # null for system messages
+    user_name = Column(String(255), nullable=True)
+    message_type = Column(String(32), default="text")  # "text" or "system"
+    content = Column(Text, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+
+    lobby = relationship("Lobby", back_populates="chat_messages")
+
+
+class VirtualWorldElement(Base):
+    """Static elements in the virtual world: walls, fruits, notes, etc."""
+    __tablename__ = "virtual_world_elements"
+
+    id = Column(Integer, primary_key=True, index=True)
+    lobby_id = Column(Integer, ForeignKey("lobbies.id"), nullable=False, index=True)
+    element_type = Column(String(32), nullable=False)  # "wall", "fruit", "note"
+    x = Column(Float, nullable=False)
+    y = Column(Float, nullable=False)
+    z = Column(Float, nullable=False, default=0.0)
+    width = Column(Float, nullable=True)
+    height = Column(Float, nullable=True)
+    depth = Column(Float, nullable=True)
+    rotation = Column(Float, nullable=False, default=0.0)
+    data = Column(Text, nullable=True)  # JSON for element-specific data
+    created_at = Column(DateTime, default=datetime.utcnow)
+    created_by = Column(String(255), nullable=True)
+
+    lobby = relationship("Lobby", back_populates="virtual_elements")
+
+
+class VirtualPlayer(Base):
+    """Virtual players (cubes) that can be spawned and controlled in the virtual world."""
+    __tablename__ = "virtual_players"
+
+    id = Column(Integer, primary_key=True, index=True)
+    lobby_id = Column(Integer, ForeignKey("lobbies.id"), nullable=False, index=True)
+    namespace = Column(String(255), nullable=False, unique=True, index=True)
+    name = Column(String(255), nullable=False)
+    x = Column(Float, nullable=False, default=0.0)
+    y = Column(Float, nullable=False, default=0.0)
+    z = Column(Float, nullable=False, default=0.5)
+    yaw = Column(Float, nullable=False, default=0.0)
+    color = Column(String(7), nullable=False, default="#3b82f6")
+    created_at = Column(DateTime, default=datetime.utcnow)
+    is_deleted = Column(Boolean, nullable=False, default=False)
+
+    lobby = relationship("Lobby", back_populates="virtual_players")
+
+
 async def get_session() -> AsyncSession:
     async with AsyncSessionLocal() as session:
         yield session
@@ -180,6 +278,9 @@ media_relay = MediaRelay()
 robot_incoming_tracks: Dict[str, MediaStreamTrack] = {}
 # Incoming audio track from forwarder per robot (Hop 1)
 robot_incoming_audio_tracks: Dict[str, MediaStreamTrack] = {}
+# Incoming audio track from browser per user (Hop 2) - key: user_pc_key
+# These are the actual MediaStreamTracks that can be relayed via MediaRelay
+user_incoming_audio_tracks: Dict[str, MediaStreamTrack] = {}
 # Hop 1 PeerConnection from forwarder per robot
 robot_forwarder_pcs: Dict[str, RTCPeerConnection] = {}
 # Hop 2 PeerConnections (one per browser viewer) per robot
@@ -192,6 +293,8 @@ websocket_robot_map: Dict[int, set[str]] = {}
 # Internal bridge websockets (for sending start_stream/stop_stream)
 bridge_websockets: set[WebSocket] = set()
 command_ws_lock = asyncio.Lock()
+# Track which lobbies have active ros-bridge connections
+connected_lobby_ids: set[int] = set()
 # Telemetry subscribers - maps robot_id to set of websockets
 telemetry_subscribers: Dict[str, set[WebSocket]] = defaultdict(set)
 telemetry_ws_lock = asyncio.Lock()
@@ -200,25 +303,304 @@ latest_telemetry: Dict[str, Dict[str, Any]] = {}
 # Lobby status subscribers (browser clients)
 lobby_status_subscribers: set[WebSocket] = set()
 lobby_status_lock = asyncio.Lock()
+# Chat subscribers - maps lobby_id to set of WebSockets
+chat_subscribers: Dict[int, set[WebSocket]] = defaultdict(set)
+chat_lock = asyncio.Lock()
 
 
 # Browser audio relay tracks - for forwarding browser mic audio to ros-bridge (Hop 1)
 browser_audio_relay_tracks: Dict[str, "BrowserAudioRelayTrack"] = {}
+
 # Active browser audio forwarding tasks (key: "robot_id:user_email")
 browser_audio_forward_tasks: Dict[str, asyncio.Task] = {}
 
 # Track browser PCs by user for renegotiation (key: "robot_id:user_email")
 browser_user_pcs: Dict[str, RTCPeerConnection] = {}
+# Locks for serializing signaling operations per user (key: "robot_id:user_email")
+user_signaling_locks: Dict[str, asyncio.Lock] = {}
 # Robot audio broadcasters - consumes Hop1 audio and broadcasts to Hop2 subscribers
 robot_audio_broadcasters: Dict[str, "RobotAudioBroadcaster"] = {}
+
+# Internal "virtual lobby" game state (server-generated frames when offline).
+# One VirtualWorld per lobby_id; a namespace->world map for control routing.
+active_virtual_worlds: Dict[int, VirtualWorld] = {}       # lobby_id -> world
+virtual_ns_world: Dict[str, VirtualWorld] = {}            # player namespace -> world
+virtual_world_lock = asyncio.Lock()                       # serialize world setup/teardown
 
 # Data channels for control and telemetry relay
 # Hop1: ros-bridge <-> API
 hop1_telemetry_channels: Dict[str, RTCDataChannel] = {}  # robot_id -> channel from ros-bridge
 hop1_control_channels: Dict[str, RTCDataChannel] = {}    # robot_id -> channel to ros-bridge
+hop1_scan_channels: Dict[str, RTCDataChannel] = {}        # robot_id -> scan channel from ros-bridge
+hop1_slam_map_channels: Dict[str, RTCDataChannel] = {}    # robot_id -> slam_toolbox map channel from ros-bridge
+# Robots whose map comes from server-side slam_toolbox (Design B); suppresses the
+# built-in SlamProcessor broadcast so browsers don't get two competing maps.
+slam_toolbox_robots: Set[str] = set()
 # Hop2: API <-> Browser(s)
 hop2_telemetry_channels: Dict[str, list[RTCDataChannel]] = defaultdict(list)  # robot_id -> list of channels to browsers
 hop2_control_channels: Dict[str, list[RTCDataChannel]] = defaultdict(list)    # robot_id -> list of channels from browsers
+hop2_map_channels: Dict[str, list[RTCDataChannel]] = defaultdict(list)        # robot_id -> list of map channels to browsers
+
+# Audio routing preferences per user (key: "robot_id:user_email")
+# Value: {"to_group": bool, "to_robot": bool}
+user_audio_routing: Dict[str, dict] = {}
+
+# Connected users per robot (for counting total streamers)
+# Key: robot_id, Value: set of user_pc_keys
+connected_streamers: Dict[str, set] = defaultdict(set)
+
+
+# ── Capability broker (goal/proof envelopes on "cap" data channels) ──
+# Speaker voting lives here now as the broker's vote resolver; the legacy
+# speaker_votes/broadcast_speaker_state path is gone.
+
+async def _persist_confirmed_gain(robot_id: str, value: float) -> None:
+    """Store the bridge-confirmed speaker gain as the durable actual."""
+    async with AsyncSessionLocal() as session:
+        await session.execute(
+            Bot.__table__.update()
+            .where(Bot.ros_namespace == robot_id)
+            .where(Bot.is_deleted == False)  # noqa: E712
+            .values(volume=max(0.0, min(1.0, value)))
+        )
+        await session.commit()
+
+
+async def _load_confirmed_gain(robot_id: str) -> float:
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(Bot.volume)
+            .where(Bot.ros_namespace == robot_id)
+            .where(Bot.is_deleted == False)  # noqa: E712
+            .limit(1)
+        )
+        value = result.scalar_one_or_none()
+    return 1.0 if value is None else float(value)
+
+
+capability_broker = Broker(
+    get_connected=lambda robot_id: connected_streamers[robot_id],
+    persist_gain=_persist_confirmed_gain,
+    load_gain=_load_confirmed_gain,
+)
+
+# Control channels per user (for server-initiated renegotiation)
+# Key: user_pc_key, Value: RTCDataChannel
+user_control_channels: Dict[str, RTCDataChannel] = {}
+
+# Track which user pairs have been introduced (to avoid reconnect loops)
+# Key: robot_id, Value: set of frozenset({user_key_a, user_key_b}) pairs
+introduced_user_pairs: Dict[str, set] = defaultdict(set)
+
+# Track last renegotiation request time per user (rate limiting)
+# Key: user_pc_key, Value: timestamp
+last_renegotiation_request: Dict[str, float] = {}
+RENEGOTIATION_COOLDOWN = 10.0  # seconds
+
+# Pending renegotiations (waiting for answer from browser)
+# Key: user_pc_key, Value: asyncio.Future
+pending_renegotiations: Dict[str, asyncio.Future] = {}
+
+# SLAM processors per robot
+slam_processors: Dict[str, "SlamProcessor"] = {}
+
+
+class SlamProcessor:
+    """Simple occupancy grid SLAM processor.
+
+    Accumulates laser scans and builds an occupancy grid map.
+    Uses scan matching for pose estimation (simplified ICP-like approach).
+    """
+
+    def __init__(
+        self,
+        robot_id: str,
+        map_size: int = 200,
+        resolution: float = 0.05,
+        downsample: int = 4,
+        map_update_interval: int = 3,
+    ):
+        self.robot_id = robot_id
+        self.map_size = map_size  # Grid cells
+        self.resolution = resolution  # Meters per cell (internal/fine grid)
+        self.map_width = map_size
+        self.map_height = map_size
+
+        # Lower the resolution of the broadcast map by aggregating fine cells into
+        # coarse blocks of `downsample` x `downsample`. Scan points are also
+        # aggregated to one representative per coarse cell so we don't integrate
+        # every lidar point. downsample=1 disables aggregation.
+        self.downsample = max(1, int(downsample))
+
+        # Emit a map update every N scans (~N*0.1s at 10Hz). Lower = more frequent.
+        self.map_update_interval = max(1, int(map_update_interval))
+
+        # Occupancy grid: -1 = unknown, 0 = free, 100 = occupied
+        self.grid = np.full((map_size, map_size), -1, dtype=np.int16)
+
+        # Robot pose (x, y, theta) in meters/radians - starts at center of map
+        self.pose = np.array([map_size * resolution / 2, map_size * resolution / 2, 0.0])
+
+        # Origin of map in world coordinates
+        self.origin_x = 0.0
+        self.origin_y = 0.0
+
+        # Scan counter for periodic map updates
+        self.scan_count = 0
+        self.last_map_update = 0
+
+        logger.info(
+            "SlamProcessor created for %s: %dx%d grid, %.2fm res, downsample=%d "
+            "(->%.2fm), update every %d scans",
+            robot_id, map_size, map_size, resolution, self.downsample,
+            resolution * self.downsample, self.map_update_interval,
+        )
+
+    def process_scan(self, scan_data: dict) -> Optional[dict]:
+        """Process a laser scan and update the map.
+
+        Returns map update dict if map changed significantly, None otherwise.
+        """
+        try:
+            # Decode ranges from base64 float32 array
+            ranges_b64 = scan_data.get("ranges", "")
+            ranges_bytes = base64.b64decode(ranges_b64)
+            ranges = np.frombuffer(ranges_bytes, dtype=np.float32)
+
+            angle_min = scan_data.get("angle_min", -np.pi)
+            angle_max = scan_data.get("angle_max", np.pi)
+            angle_increment = scan_data.get("angle_increment", 0.01)
+            range_min = scan_data.get("range_min", 0.1)
+            range_max = scan_data.get("range_max", 12.0)
+
+            self.scan_count += 1
+
+            # Convert scan to points in robot frame
+            # Generate angles array matching ranges length exactly
+            n_ranges = len(ranges)
+            if angle_increment > 0 and n_ranges > 0:
+                angles = angle_min + np.arange(n_ranges) * angle_increment
+            else:
+                angles = np.linspace(angle_min, angle_max, n_ranges)
+            valid = (ranges >= range_min) & (ranges <= range_max) & np.isfinite(ranges)
+
+            if not np.any(valid):
+                return None
+
+            # Points in robot frame
+            x_robot = ranges[valid] * np.cos(angles[valid])
+            y_robot = ranges[valid] * np.sin(angles[valid])
+
+            # Transform to world frame using current pose
+            cos_theta = np.cos(self.pose[2])
+            sin_theta = np.sin(self.pose[2])
+            x_world = self.pose[0] + x_robot * cos_theta - y_robot * sin_theta
+            y_world = self.pose[1] + x_robot * sin_theta + y_robot * cos_theta
+
+            # Aggregate points: keep one representative per coarse cell so we don't
+            # integrate every lidar return (cheaper ray-tracing, lower-res map).
+            if self.downsample > 1 and x_world.size > 0:
+                cell_size = self.resolution * self.downsample
+                cells = np.stack(
+                    [np.floor(x_world / cell_size), np.floor(y_world / cell_size)],
+                    axis=1,
+                )
+                _, keep = np.unique(cells, axis=0, return_index=True)
+                x_world, y_world = x_world[keep], y_world[keep]
+
+            # Update occupancy grid
+            self._update_grid(x_world, y_world)
+
+            # Send map update every `map_update_interval` scans (~0.1s each at 10Hz)
+            if self.scan_count - self.last_map_update >= self.map_update_interval:
+                self.last_map_update = self.scan_count
+                return self._get_map_update()
+
+            return None
+
+        except Exception as e:
+            logger.warning("SlamProcessor error for %s: %s", self.robot_id, e)
+            return None
+
+    def _update_grid(self, x_points: np.ndarray, y_points: np.ndarray) -> None:
+        """Update occupancy grid with obstacle points."""
+        # Convert world coordinates to grid cells
+        grid_x = ((x_points - self.origin_x) / self.resolution).astype(int)
+        grid_y = ((y_points - self.origin_y) / self.resolution).astype(int)
+
+        # Robot position in grid
+        robot_gx = int((self.pose[0] - self.origin_x) / self.resolution)
+        robot_gy = int((self.pose[1] - self.origin_y) / self.resolution)
+
+        # Mark cells along rays as free (simplified ray tracing)
+        for gx, gy in zip(grid_x, grid_y):
+            if 0 <= gx < self.map_width and 0 <= gy < self.map_height:
+                # Mark endpoint as occupied (clamp to int8 range)
+                current = int(self.grid[gy, gx])
+                if current >= 0:
+                    self.grid[gy, gx] = min(100, current + 20)
+                else:
+                    self.grid[gy, gx] = 100
+
+                # Simple ray tracing: mark cells between robot and obstacle as free
+                dx = abs(gx - robot_gx)
+                dy = abs(gy - robot_gy)
+                steps = max(dx, dy)
+                if steps > 0:
+                    x_step = (gx - robot_gx) / steps
+                    y_step = (gy - robot_gy) / steps
+                    for i in range(int(steps)):
+                        cx = int(robot_gx + i * x_step)
+                        cy = int(robot_gy + i * y_step)
+                        if 0 <= cx < self.map_width and 0 <= cy < self.map_height:
+                            curr = int(self.grid[cy, cx])
+                            if curr < 50:  # Don't clear if strongly occupied
+                                self.grid[cy, cx] = max(0, curr - 5) if curr >= 0 else 0
+
+    @staticmethod
+    def downsample_grid(grid: np.ndarray, factor: int) -> np.ndarray:
+        """Aggregate an occupancy grid into coarse blocks of `factor` x `factor`.
+
+        Block priority is occupied (100) > free (0) > unknown (-1): an obstacle
+        anywhere in a block marks the whole block occupied (conservative for a
+        minimap). Since occupied > free > unknown numerically, a block-max does
+        exactly this. Reusable for any occupancy grid (e.g. slam_toolbox output).
+        """
+        if factor <= 1:
+            return grid
+        h, w = grid.shape
+        # Crop to a whole multiple of `factor` so the reshape is exact.
+        h2, w2 = (h // factor) * factor, (w // factor) * factor
+        if h2 == 0 or w2 == 0:
+            return grid
+        cropped = grid[:h2, :w2]
+        blocks = cropped.reshape(h2 // factor, factor, w2 // factor, factor)
+        return blocks.max(axis=(1, 3))
+
+    def _get_map_update(self) -> dict:
+        """Generate map update message for browsers (downsampled / lower-res)."""
+        out_grid = self.downsample_grid(self.grid, self.downsample)
+        out_h, out_w = out_grid.shape
+        out_resolution = self.resolution * self.downsample
+
+        # Convert grid to uint8: -1 -> 0 (unknown), 0 -> 1 (free), 100 -> 101 (occupied)
+        # Clamp values to valid range before converting
+        grid_clamped = np.clip(out_grid.flatten(), -1, 100)
+        grid_uint8 = (grid_clamped + 1).astype(np.uint8)
+        map_b64 = base64.b64encode(grid_uint8.tobytes()).decode('ascii')
+
+        return {
+            "type": "map_update",
+            "width": out_w,
+            "height": out_h,
+            "resolution": out_resolution,
+            "origin_x": self.origin_x,
+            "origin_y": self.origin_y,
+            "robot_x": self.pose[0],
+            "robot_y": self.pose[1],
+            "robot_theta": self.pose[2],
+            "data": map_b64,
+        }
 
 
 class RobotAudioBroadcaster:
@@ -476,16 +858,24 @@ class BrowserAudioRelayTrack(AudioStreamTrack):
                 logger.info("BrowserAudioRelay push_frame %d for %s: shape=%s, dtype=%s, rms=%.1f, min=%d, max=%d, frame.samples=%d",
                             self._push_count, self.robot_id, arr.shape, arr.dtype, rms, arr.min(), arr.max(), frame.samples)
 
-            # Handle different stereo formats
-            if arr.shape[0] > 1:
+            # Handle different audio formats
+            # aiortc AudioFrame.to_ndarray() can return different formats:
+            # - (2, N): planar stereo - 2 channels, N samples each
+            # - (1, N): mono - 1 channel, N samples
+            # - (1, N*2): interleaved stereo - 1 row with L,R,L,R,... samples
+            # - (N,): 1D mono array
+            if len(arr.shape) == 1:
+                # Already 1D mono audio
+                samples = arr.astype(np.int16)
+            elif arr.shape[0] == 2:
                 # Planar stereo (2, N): take left channel
                 samples = arr[0].astype(np.int16)
-            elif arr.shape[1] > frame.samples:
-                # Packed/interleaved stereo (1, N*2): extract left channel (every other sample)
+            elif arr.shape[0] == 1 and arr.shape[1] > frame.samples:
+                # Interleaved stereo (1, N*2): extract left channel (every other sample)
                 samples = arr.flatten()[::2].astype(np.int16)
             else:
-                # Mono (1, N): use as-is
-                samples = arr.flatten()
+                # Mono (1, N) or unknown - flatten
+                samples = arr.flatten().astype(np.int16)
 
             self._buffer = np.concatenate([self._buffer, samples])
 
@@ -550,6 +940,1034 @@ class BrowserAudioRelayTrack(AudioStreamTrack):
         """Stop the relay track."""
         self._running = False
         super().stop()
+
+
+class GroupAudioMixer:
+    """Mixes audio from multiple users for group calling.
+
+    Each user's audio frames are stored in a per-user buffer.
+    When mixed audio is requested, all users' recent frames are combined.
+    """
+
+    SAMPLES_PER_FRAME = 960  # 20ms at 48kHz
+    MAX_BUFFER_FRAMES = 5   # Keep last 100ms of audio per user
+
+    def __init__(self, robot_id: str) -> None:
+        self.robot_id = robot_id
+        # user_key -> list of recent audio frames (as numpy arrays)
+        self._user_buffers: Dict[str, list[np.ndarray]] = defaultdict(list)
+        self._lock = asyncio.Lock()
+        self._push_count = 0
+        logger.info("GroupAudioMixer created for %s", robot_id)
+
+    def push_frame(self, user_key: str, frame: AudioFrame) -> None:
+        """Push an audio frame from a user to the mixer."""
+        try:
+            arr = frame.to_ndarray()
+            # Convert to mono if needed
+            # aiortc AudioFrame.to_ndarray() can return different formats:
+            # - (2, N): planar stereo - 2 channels, N samples each
+            # - (1, N): mono - 1 channel, N samples
+            # - (1, N*2): interleaved stereo - 1 row with L,R,L,R,... samples
+            # - (N,): 1D mono array
+            if len(arr.shape) == 1:
+                # Already 1D mono audio
+                samples = arr.astype(np.int16)
+            elif arr.shape[0] == 2:
+                # Planar stereo (2, N): take left channel
+                samples = arr[0].astype(np.int16)
+            elif arr.shape[0] == 1 and arr.shape[1] > frame.samples:
+                # Interleaved stereo (1, N*2): extract left channel (every other sample)
+                samples = arr.flatten()[::2].astype(np.int16)
+            else:
+                # Mono (1, N) or unknown - flatten
+                samples = arr.flatten().astype(np.int16)
+
+            # Store in user's buffer
+            self._user_buffers[user_key].append(samples)
+            # Keep only recent frames
+            while len(self._user_buffers[user_key]) > self.MAX_BUFFER_FRAMES:
+                self._user_buffers[user_key].pop(0)
+
+            self._push_count += 1
+            if self._push_count % 100 == 1:
+                # Log RMS of pushed audio to debug silent audio issues
+                rms = np.sqrt(np.mean(samples.astype(np.float32)**2))
+                logger.info("GroupAudioMixer %s: push %d from %s, active_users=%d, rms=%.1f, samples=%d, buffer_sizes=%s",
+                           self.robot_id, self._push_count, user_key, len(self._user_buffers),
+                           rms, len(samples), {k: len(v) for k, v in self._user_buffers.items()})
+        except Exception as e:
+            logger.warning("GroupAudioMixer push error for %s: %s", self.robot_id, e)
+
+    def get_mixed_frame(self, exclude_user: str = None) -> np.ndarray:
+        """Get mixed audio from all users, optionally excluding one user.
+
+        Returns a mono int16 numpy array of SAMPLES_PER_FRAME samples.
+        """
+        mixed = np.zeros(self.SAMPLES_PER_FRAME, dtype=np.float32)
+        contributing_users = 0
+
+        for user_key, frames in self._user_buffers.items():
+            if exclude_user and user_key == exclude_user:
+                continue
+            if not frames:
+                continue
+            # Use the most recent frame from this user
+            frame_data = frames[-1]
+            # Pad or truncate to SAMPLES_PER_FRAME
+            if len(frame_data) >= self.SAMPLES_PER_FRAME:
+                mixed += frame_data[:self.SAMPLES_PER_FRAME].astype(np.float32)
+            else:
+                mixed[:len(frame_data)] += frame_data.astype(np.float32)
+            contributing_users += 1
+
+        # Normalize if multiple users to avoid clipping
+        if contributing_users > 1:
+            mixed = mixed / contributing_users
+
+        # Clip to int16 range and convert
+        mixed = np.clip(mixed, -32768, 32767).astype(np.int16)
+        return mixed
+
+    def remove_user(self, user_key: str) -> None:
+        """Remove a user's audio buffer when they disconnect."""
+        self._user_buffers.pop(user_key, None)
+        logger.info("GroupAudioMixer %s: removed user %s, remaining=%d",
+                   self.robot_id, user_key, len(self._user_buffers))
+
+    def has_audio(self, exclude_user: str = None) -> bool:
+        """Check if there's any audio to mix (excluding a specific user)."""
+        for user_key, frames in self._user_buffers.items():
+            if exclude_user and user_key == exclude_user:
+                continue
+            if frames:
+                return True
+        return False
+
+
+class UserAudioBroadcaster:
+    """Broadcasts a single user's audio to multiple subscriber queues.
+
+    Each user who sends audio (to_group=True) has their own broadcaster.
+    Other users subscribe to receive that user's audio as a separate track.
+    """
+
+    def __init__(self, user_key: str, robot_id: str) -> None:
+        self.user_key = user_key
+        self.robot_id = robot_id
+        self._subscribers: list[asyncio.Queue] = []
+        self._frame_count = 0
+        logger.info("UserAudioBroadcaster created for %s on %s", user_key, robot_id)
+
+    def push_frame(self, frame: AudioFrame) -> None:
+        """Push a frame to all subscribers."""
+        self._frame_count += 1
+        if self._frame_count % 100 == 1:  # More frequent logging for debugging
+            logger.info("UserAudioBroadcaster %s: frame %d, subscribers=%d",
+                       self.user_key, self._frame_count, len(self._subscribers))
+
+        for q in self._subscribers:
+            try:
+                q.put_nowait(frame)
+            except asyncio.QueueFull:
+                # Drop oldest frame and add new one
+                try:
+                    q.get_nowait()
+                    q.put_nowait(frame)
+                except (asyncio.QueueEmpty, asyncio.QueueFull):
+                    pass
+
+    def subscribe(self) -> asyncio.Queue:
+        """Create a new subscriber queue."""
+        q: asyncio.Queue = asyncio.Queue(maxsize=50)
+        self._subscribers.append(q)
+        logger.info("UserAudioBroadcaster %s: new subscriber (total=%d)",
+                    self.user_key, len(self._subscribers))
+        return q
+
+    def unsubscribe(self, q: asyncio.Queue) -> None:
+        """Remove a subscriber queue."""
+        if q in self._subscribers:
+            self._subscribers.remove(q)
+            logger.info("UserAudioBroadcaster %s: removed subscriber (total=%d)",
+                        self.user_key, len(self._subscribers))
+
+    def stop(self) -> None:
+        """Signal all subscribers to stop."""
+        for q in self._subscribers:
+            try:
+                q.put_nowait(None)
+            except asyncio.QueueFull:
+                pass
+        self._subscribers.clear()
+        logger.info("UserAudioBroadcaster %s: stopped", self.user_key)
+
+
+class GroupAudioSlotTrack(AudioStreamTrack):
+    """Audio slot track that can be connected to different broadcasters dynamically.
+
+    Created during initial connection to ensure aiortc starts consuming it.
+    Queue can be swapped later when users connect.
+    """
+
+    kind = "audio"
+
+    def __init__(self, slot_index: int, target_user_key: str) -> None:
+        super().__init__()
+        self.slot_index = slot_index
+        self.target_user_key = target_user_key
+        self._queue: Optional[asyncio.Queue] = None
+        self._source_user_key: Optional[str] = None
+        self._frame_count = 0
+        self._pts = 0
+        self._recv_calls = 0
+        self._silence_count = 0
+        logger.info("GroupAudioSlotTrack slot %d created for %s", slot_index, target_user_key)
+
+    def connect_broadcaster(self, queue: asyncio.Queue, source_user_key: str) -> None:
+        """Connect this slot to a broadcaster's queue."""
+        self._queue = queue
+        self._source_user_key = source_user_key
+        logger.info("GroupAudioSlotTrack slot %d connected: %s -> %s",
+                   self.slot_index, source_user_key, self.target_user_key)
+
+    def disconnect(self) -> None:
+        """Disconnect from current broadcaster."""
+        if self._source_user_key:
+            logger.info("GroupAudioSlotTrack slot %d disconnected from %s",
+                       self.slot_index, self._source_user_key)
+        self._queue = None
+        self._source_user_key = None
+
+    async def recv(self) -> AudioFrame:
+        """Get next frame from connected queue, or return silence."""
+        self._recv_calls += 1
+
+        if self._recv_calls <= 5 or self._recv_calls % 500 == 0:
+            logger.info("GroupAudioSlotTrack slot %d (%s->%s): recv() call %d, connected=%s",
+                       self.slot_index, self._source_user_key or "none", self.target_user_key,
+                       self._recv_calls, self._queue is not None)
+
+        if self._queue is not None:
+            try:
+                frame = await asyncio.wait_for(self._queue.get(), timeout=0.02)
+                if frame is not None:
+                    self._frame_count += 1
+                    frame.pts = self._pts
+                    self._pts += frame.samples
+                    if self._frame_count % 100 == 1:
+                        logger.info("GroupAudioSlotTrack slot %d: frame %d from %s",
+                                   self.slot_index, self._frame_count, self._source_user_key)
+                    return frame
+            except asyncio.TimeoutError:
+                pass
+
+        # Return silence
+        self._silence_count += 1
+        frame = AudioFrame.from_ndarray(
+            np.zeros((1, 1920), dtype=np.int16), format="s16", layout="stereo"
+        )
+        frame.sample_rate = 48000
+        frame.pts = self._pts
+        self._pts += 960
+        return frame
+
+
+class UserAudioRelayTrack(AudioStreamTrack):
+    """Relay track that receives audio from a UserAudioBroadcaster queue."""
+
+    kind = "audio"
+
+    def __init__(self, queue: asyncio.Queue, source_user_key: str, target_user_key: str) -> None:
+        super().__init__()
+        self._queue = queue
+        self.source_user_key = source_user_key
+        self.target_user_key = target_user_key
+        self._frame_count = 0
+        self._pts = 0
+        self._silence_frame = None
+        self._recv_calls = 0
+        self._silence_count = 0
+        logger.info("UserAudioRelayTrack created: %s -> %s (queue=%s)",
+                    source_user_key, target_user_key, id(queue))
+
+    async def recv(self) -> AudioFrame:
+        """Get next frame from the queue, or return silence if queue is empty."""
+        self._recv_calls += 1
+
+        # Log first few recv calls to confirm aiortc is calling us
+        if self._recv_calls <= 5 or self._recv_calls % 500 == 0:
+            logger.info("UserAudioRelayTrack %s->%s: recv() call %d, queue_size=%d",
+                       self.source_user_key, self.target_user_key,
+                       self._recv_calls, self._queue.qsize())
+
+        try:
+            # Non-blocking get with timeout to avoid blocking forever
+            frame = await asyncio.wait_for(self._queue.get(), timeout=0.05)
+
+            if frame is None:
+                raise Exception("Audio stream ended")
+
+            self._frame_count += 1
+
+            # Update pts for this consumer's timeline
+            frame.pts = self._pts
+            self._pts += frame.samples
+
+            if self._frame_count % 100 == 1:  # More frequent logging for debugging
+                logger.info("UserAudioRelayTrack %s->%s: received frame %d",
+                           self.source_user_key, self.target_user_key, self._frame_count)
+
+            return frame
+        except asyncio.TimeoutError:
+            # No frame available, return silence
+            self._silence_count += 1
+            if self._silence_count <= 5 or self._silence_count % 500 == 0:
+                logger.info("UserAudioRelayTrack %s->%s: silence %d (no frames in queue)",
+                           self.source_user_key, self.target_user_key, self._silence_count)
+
+            if self._silence_frame is None:
+                # Create a silence frame (960 samples of stereo silence at 48kHz)
+                silence = np.zeros((1, 1920), dtype=np.int16)
+                self._silence_frame = AudioFrame.from_ndarray(silence, format="s16", layout="stereo")
+                self._silence_frame.sample_rate = 48000
+
+            frame = AudioFrame.from_ndarray(
+                np.zeros((1, 1920), dtype=np.int16), format="s16", layout="stereo"
+            )
+            frame.sample_rate = 48000
+            frame.pts = self._pts
+            self._pts += 960
+            return frame
+
+
+# Per-user audio broadcasters (key: user_pc_key like "rosmaster1:user@email.com:client_id")
+user_audio_broadcasters: Dict[str, UserAudioBroadcaster] = {}
+
+# Per-user audio slot tracks (key: user_pc_key, value: list of GroupAudioSlotTrack)
+# These are created during initial connection and can be connected to broadcasters later
+user_audio_slots: Dict[str, list] = {}
+
+NUM_GROUP_AUDIO_SLOTS = 4  # Number of audio slots per user (for hearing up to 4 other users)
+
+
+def get_or_create_user_broadcaster(user_key: str, robot_id: str) -> UserAudioBroadcaster:
+    """Get or create a UserAudioBroadcaster for a user."""
+    if user_key not in user_audio_broadcasters:
+        user_audio_broadcasters[user_key] = UserAudioBroadcaster(user_key, robot_id)
+    return user_audio_broadcasters[user_key]
+
+
+def get_other_user_broadcasters(robot_id: str, exclude_user_key: str) -> list[UserAudioBroadcaster]:
+    """Get all user broadcasters for a robot, excluding a specific user."""
+    result = []
+    for key, broadcaster in user_audio_broadcasters.items():
+        if broadcaster.robot_id == robot_id and key != exclude_user_key:
+            result.append(broadcaster)
+    return result
+
+
+# Pending audio tracks to add during browser-initiated renegotiation
+# Key: user_pc_key, Value: list of UserAudioBroadcaster
+pending_audio_tracks: Dict[str, list] = {}
+
+
+def queue_track_for_user(target_user_key: str, broadcaster: UserAudioBroadcaster) -> None:
+    """Queue a new audio track to be added to a user's PC during browser-initiated renegotiation."""
+    if target_user_key not in pending_audio_tracks:
+        pending_audio_tracks[target_user_key] = []
+    pending_audio_tracks[target_user_key].append(broadcaster)
+    logger.info("Queued audio track %s for user %s (total pending: %d)",
+               broadcaster.user_key, target_user_key, len(pending_audio_tracks[target_user_key]))
+
+
+def notify_browser_to_reconnect(target_user_key: str) -> bool:
+    """Tell browser to reconnect to get new audio tracks (simpler than renegotiation)."""
+    control_channel = user_control_channels.get(target_user_key)
+    if not control_channel or control_channel.readyState != "open":
+        logger.warning("Cannot notify %s to reconnect: control channel not open", target_user_key)
+        return False
+
+    msg = json.dumps({"type": "reconnect_needed", "reason": "new_audio_tracks"})
+    control_channel.send(msg)
+    logger.info("Notified %s to reconnect for new audio tracks", target_user_key)
+    return True
+
+
+def request_browser_renegotiation(target_user_key: str) -> bool:
+    """Ask browser to send a new offer for renegotiation (browser-initiated).
+
+    This avoids ICE role conflicts by keeping the browser as the offerer.
+    The server will add pending tracks when processing the browser's offer.
+    """
+    import time
+
+    # Rate limit: don't send requests too frequently to the same user
+    now = time.time()
+    last_request = last_renegotiation_request.get(target_user_key, 0)
+    if now - last_request < RENEGOTIATION_COOLDOWN:
+        logger.info("Skipping renegotiation request to %s: cooldown (%.1fs remaining)",
+                   target_user_key, RENEGOTIATION_COOLDOWN - (now - last_request))
+        return True  # Return True to stop retries - track is queued, will be added later
+
+    # Check control channel is ready
+    control_channel = user_control_channels.get(target_user_key)
+    if not control_channel or control_channel.readyState != "open":
+        logger.warning("Cannot request renegotiation from %s: control channel not open", target_user_key)
+        return False
+
+    # Check target user's PC is connected and in stable signaling state
+    target_pc = browser_user_pcs.get(target_user_key)
+    if not target_pc:
+        logger.warning("Cannot request renegotiation from %s: no PC", target_user_key)
+        return False
+    if target_pc.connectionState != "connected":
+        logger.warning("Cannot request renegotiation from %s: PC not connected (state=%s)",
+                      target_user_key, target_pc.connectionState)
+        return False
+    if target_pc.signalingState != "stable":
+        logger.warning("Cannot request renegotiation from %s: signaling not stable (state=%s)",
+                      target_user_key, target_pc.signalingState)
+        return False
+
+    # Update last request time
+    last_renegotiation_request[target_user_key] = now
+
+    # Tell browser how many new transceivers to create
+    pending_count = len(pending_relayed_audio.get(target_user_key, []))
+    msg = json.dumps({
+        "type": "renegotiate_request",
+        "reason": "new_audio_tracks",
+        "new_track_count": pending_count
+    })
+    control_channel.send(msg)
+    logger.info("Requested renegotiation from %s for %d new audio tracks", target_user_key, pending_count)
+    return True
+
+
+def add_pending_tracks_to_pc(user_pc_key: str, pc: RTCPeerConnection) -> int:
+    """Add any pending audio tracks to a PC. Called when browser sends renegotiation offer."""
+    broadcasters = pending_audio_tracks.pop(user_pc_key, [])
+    if broadcasters:
+        logger.info("Processing %d pending tracks for %s", len(broadcasters), user_pc_key)
+
+    # Find available audio transceivers (recvonly without sender track = browser wants to receive)
+    available_transceivers = []
+    for trans in pc.getTransceivers():
+        if trans.kind == "audio" and trans.sender.track is None:
+            available_transceivers.append(trans)
+    logger.info("Found %d available audio transceivers for %s", len(available_transceivers), user_pc_key)
+
+    added = 0
+    for broadcaster in broadcasters:
+        try:
+            queue = broadcaster.subscribe()
+            relay_track = UserAudioRelayTrack(queue, broadcaster.user_key, user_pc_key)
+
+            if available_transceivers:
+                # Bind to existing transceiver
+                trans = available_transceivers.pop(0)
+                trans.sender.replaceTrack(relay_track)
+                # Change direction to sendonly so we send to browser
+                trans.direction = "sendonly"
+                logger.info("Bound pending track %s -> %s to transceiver (broadcaster has %d subscribers, track_id=%s)",
+                           broadcaster.user_key, user_pc_key,
+                           len(broadcaster._subscribers), relay_track.id)
+            else:
+                # Fallback: add new track (creates new transceiver)
+                pc.addTrack(relay_track)
+                logger.info("Added pending track %s -> %s (new transceiver, broadcaster has %d subscribers, track_id=%s)",
+                           broadcaster.user_key, user_pc_key,
+                           len(broadcaster._subscribers), relay_track.id)
+            added += 1
+        except Exception as e:
+            logger.error("Failed to add pending track %s -> %s: %s",
+                        broadcaster.user_key, user_pc_key, e)
+    return added
+
+
+def add_pending_tracks_to_pc_simple(user_pc_key: str, pc: RTCPeerConnection) -> int:
+    """Add pending audio tracks using simple addTrack (before setRemoteDescription)."""
+    broadcasters = pending_audio_tracks.pop(user_pc_key, [])
+    if broadcasters:
+        logger.info("Processing %d pending tracks (simple) for %s", len(broadcasters), user_pc_key)
+
+    added = 0
+    for broadcaster in broadcasters:
+        try:
+            queue = broadcaster.subscribe()
+            relay_track = UserAudioRelayTrack(queue, broadcaster.user_key, user_pc_key)
+            pc.addTrack(relay_track)
+            logger.info("Added pending track (simple) %s -> %s (broadcaster has %d subscribers, track_id=%s)",
+                       broadcaster.user_key, user_pc_key,
+                       len(broadcaster._subscribers), relay_track.id)
+            added += 1
+        except Exception as e:
+            logger.error("Failed to add pending track %s -> %s: %s",
+                        broadcaster.user_key, user_pc_key, e)
+    return added
+
+
+async def queue_new_user_audio_for_existing_users(robot_id: str, new_user_key: str) -> None:
+    """Connect new user's audio broadcaster to existing users' audio slots."""
+    new_broadcaster = user_audio_broadcasters.get(new_user_key)
+    if not new_broadcaster:
+        logger.warning("No broadcaster for new user %s", new_user_key)
+        return
+
+    # Find all other users connected to this robot
+    other_users = [
+        key for key in browser_user_pcs.keys()
+        if key.startswith(f"{robot_id}:") and key != new_user_key
+    ]
+
+    # Connect new user's broadcaster to existing users' available audio slots
+    connected_count = 0
+    for user_key in other_users:
+        slots = user_audio_slots.get(user_key, [])
+        # Find an empty slot
+        for slot in slots:
+            if slot._queue is None:
+                # Subscribe to the new broadcaster and connect to this slot
+                queue = new_broadcaster.subscribe()
+                slot.connect_broadcaster(queue, new_user_key)
+                connected_count += 1
+                break  # Only need one slot per user
+        else:
+            logger.warning("No available audio slots for user %s to hear %s", user_key, new_user_key)
+
+    if connected_count > 0:
+        logger.info("Connected %s's audio to %d existing users' slots", new_user_key, connected_count)
+    else:
+        logger.info("No existing users to connect %s's audio to", new_user_key)
+
+
+async def request_renegotiation_with_retry(user_key: str, max_retries: int = 5) -> None:
+    """Request browser renegotiation with retry logic."""
+    for attempt in range(max_retries):
+        if request_browser_renegotiation(user_key):
+            return  # Success
+        # Wait before retry, with exponential backoff
+        delay = 0.5 * (2 ** attempt)  # 0.5s, 1s, 2s, 4s, 8s
+        logger.info("Renegotiation request to %s failed (attempt %d/%d), retrying in %.1fs",
+                   user_key, attempt + 1, max_retries, delay)
+        await asyncio.sleep(delay)
+        # Check if user is still connected
+        if user_key not in browser_user_pcs:
+            logger.info("User %s disconnected, cancelling renegotiation retry", user_key)
+            return
+    logger.warning("Failed to request renegotiation from %s after %d attempts", user_key, max_retries)
+
+
+async def add_existing_users_audio_to_new_user(robot_id: str, new_user_key: str) -> None:
+    """No longer needed - existing users' audio is now added during initial connection."""
+    # Existing users' audio tracks are added during initial connection (pc.addTrack)
+    # This function is kept for compatibility but does nothing
+    logger.info("Existing users' audio already added during initial connection for %s", new_user_key)
+
+
+# Track relayed user audio subscriptions per connection: {target_user_key: {source_user_key: relayed_track}}
+user_audio_relays: Dict[str, Dict[str, MediaStreamTrack]] = {}
+# Track pending relayed audio tracks to add during renegotiation
+pending_relayed_audio: Dict[str, list] = {}  # {target_user_key: [(source_user_key, relayed_track)]}
+
+
+class LoggingRelayTrack(AudioStreamTrack):
+    """Wrapper around a MediaRelay track that logs RMS values for debugging."""
+
+    kind = "audio"
+
+    def __init__(self, source_track: MediaStreamTrack, source_user: str, target_user: str) -> None:
+        super().__init__()
+        self._source = source_track
+        self._source_user = source_user
+        self._target_user = target_user
+        self._frame_count = 0
+        self._last_log_time = 0
+        logger.info("LoggingRelayTrack created: %s -> %s", source_user, target_user)
+
+    async def recv(self) -> AudioFrame:
+        frame = await self._source.recv()
+        self._frame_count += 1
+
+        # Log RMS periodically or when audio is loud
+        import time
+        now = time.time()
+        try:
+            arr = frame.to_ndarray()
+            rms = np.sqrt(np.mean(arr.astype(np.float32)**2))
+
+            # Log every 5 seconds or if RMS > 100 (actual speech)
+            if now - self._last_log_time >= 5.0 or (rms > 100 and now - self._last_log_time >= 0.5):
+                logger.info("LoggingRelayTrack %s->%s: frame %d, rms=%.1f, samples=%d",
+                           self._source_user, self._target_user, self._frame_count, rms, frame.samples)
+                self._last_log_time = now
+        except Exception:
+            pass
+
+        return frame
+
+
+async def relay_new_user_audio_to_existing_users(robot_id: str, new_user_key: str) -> None:
+    """Relay new user's audio to existing users via MediaRelay + browser-initiated renegotiation.
+
+    This is the proper approach using aiortc's MediaRelay:
+    1. Get the actual incoming audio track from the new user
+    2. Use media_relay.subscribe() to create relayed copies (aiortc properly consumes these)
+    3. Add relayed tracks to existing users' PCs
+    4. Request browser-initiated renegotiation from each existing user
+    """
+    # Get the new user's incoming audio track
+    source_track = user_incoming_audio_tracks.get(new_user_key)
+    if not source_track:
+        logger.warning("No incoming audio track for new user %s", new_user_key)
+        return
+
+    # Find all other users connected to this robot
+    other_users = [
+        key for key in browser_user_pcs.keys()
+        if key.startswith(f"{robot_id}:") and key != new_user_key
+    ]
+
+    if not other_users:
+        logger.info("No other users to relay %s's audio to", new_user_key)
+        return
+
+    logger.info("Relaying %s's audio to %d existing users via MediaRelay", new_user_key, len(other_users))
+
+    for target_user_key in other_users:
+        target_pc = browser_user_pcs.get(target_user_key)
+        if not target_pc:
+            logger.warning("No PC for target user %s", target_user_key)
+            continue
+
+        # Check if we already have a relay for this source->target pair
+        if target_user_key not in user_audio_relays:
+            user_audio_relays[target_user_key] = {}
+        if new_user_key in user_audio_relays[target_user_key]:
+            logger.info("Already have relay %s -> %s, skipping", new_user_key, target_user_key)
+            continue
+
+        try:
+            # Create a relayed copy via MediaRelay (this is what makes aiortc properly consume the track)
+            relayed_track = media_relay.subscribe(source_track)
+            user_audio_relays[target_user_key][new_user_key] = relayed_track
+            logger.info("Created MediaRelay subscription: %s -> %s (track_id=%s)",
+                       new_user_key, target_user_key, relayed_track.id)
+
+            # Queue this track to be added during renegotiation
+            if target_user_key not in pending_relayed_audio:
+                pending_relayed_audio[target_user_key] = []
+            pending_relayed_audio[target_user_key].append((new_user_key, relayed_track))
+
+            # Request browser-initiated renegotiation
+            asyncio.ensure_future(request_renegotiation_with_retry(target_user_key))
+
+        except Exception as e:
+            logger.error("Failed to create MediaRelay subscription %s -> %s: %s",
+                        new_user_key, target_user_key, e)
+
+
+def add_pending_relayed_audio_to_pc(user_pc_key: str, pc: RTCPeerConnection) -> int:
+    """Add pending relayed audio tracks to a PC during renegotiation.
+
+    Called AFTER setRemoteDescription when browser sends a renegotiation offer.
+    Browser added recvonly transceivers - we find those with empty senders and
+    use replaceTrack() to attach our audio tracks.
+    """
+    pending = pending_relayed_audio.pop(user_pc_key, [])
+    if not pending:
+        return 0
+
+    logger.info("Adding %d pending relayed audio tracks for %s", len(pending), user_pc_key)
+
+    # Find audio transceivers with empty senders (browser's recvonly transceivers)
+    # After setRemoteDescription, these exist but have no track on the sender
+    available_transceivers = []
+    for trans in pc.getTransceivers():
+        if trans.kind == "audio" and trans.sender.track is None:
+            available_transceivers.append(trans)
+            logger.info("Found available audio transceiver: direction=%s, mid=%s",
+                       trans.direction, trans.mid)
+
+    if len(available_transceivers) < len(pending):
+        logger.warning("Not enough transceivers: have %d, need %d",
+                      len(available_transceivers), len(pending))
+
+    added = 0
+    for i, (source_user_key, relayed_track) in enumerate(pending):
+        if i >= len(available_transceivers):
+            logger.warning("No transceiver available for track from %s", source_user_key)
+            # Put it back for next renegotiation
+            if user_pc_key not in pending_relayed_audio:
+                pending_relayed_audio[user_pc_key] = []
+            pending_relayed_audio[user_pc_key].append((source_user_key, relayed_track))
+            continue
+
+        trans = available_transceivers[i]
+        try:
+            # Use replaceTrack on the sender - this attaches our track to the
+            # transceiver the browser created
+            trans.sender.replaceTrack(relayed_track)
+            # Set direction to sendonly so aiortc will actually send frames
+            # Browser's recvonly means we (server) should send
+            trans.direction = "sendonly"
+            logger.info("Attached relayed audio track %s -> %s via replaceTrack (mid=%s, track_id=%s, dir=%s)",
+                       source_user_key, user_pc_key, trans.mid, relayed_track.id, trans.direction)
+            added += 1
+        except Exception as e:
+            logger.error("Failed to attach relayed audio track %s -> %s: %s",
+                        source_user_key, user_pc_key, e)
+    return added
+
+
+class GroupAudioRelayTrack(AudioStreamTrack):
+    """Relay track that provides mixed group audio to a specific user.
+
+    Pulls mixed audio from GroupAudioMixer, excluding the receiving user's own audio.
+    """
+
+    kind = "audio"
+    SAMPLES_PER_FRAME = 960
+
+    def __init__(self, mixer: GroupAudioMixer, user_key: str, sample_rate: int = 48000) -> None:
+        super().__init__()
+        self.mixer = mixer
+        self.user_key = user_key
+        self.sample_rate = sample_rate
+        self._pts = 0
+        self._running = True
+        self._recv_count = 0
+        logger.info("GroupAudioRelayTrack created for user %s on robot %s",
+                   user_key, mixer.robot_id)
+
+    async def recv(self) -> AudioFrame:
+        """Get the next mixed audio frame (excluding self)."""
+        if not self._running:
+            raise Exception("Track stopped")
+
+        # Small delay to allow frames to accumulate
+        await asyncio.sleep(0.02)  # 20ms
+
+        self._recv_count += 1
+
+        # Get mixed audio excluding our own
+        mixed = self.mixer.get_mixed_frame(exclude_user=self.user_key)
+
+        # Create stereo frame (duplicate mono to both channels)
+        stereo = np.empty(len(mixed) * 2, dtype=np.int16)
+        stereo[0::2] = mixed
+        stereo[1::2] = mixed
+
+        frame = AudioFrame.from_ndarray(stereo.reshape(1, -1), format="s16", layout="stereo")
+        frame.sample_rate = self.sample_rate
+        frame.pts = self._pts
+        self._pts += self.SAMPLES_PER_FRAME
+
+        if self._recv_count % 500 == 1:
+            rms = np.sqrt(np.mean(mixed.astype(np.float32)**2))
+            has_audio = self.mixer.has_audio(exclude_user=self.user_key)
+            logger.info("GroupAudioRelayTrack recv %d for %s: rms=%.1f, has_other_audio=%s",
+                       self._recv_count, self.user_key, rms, has_audio)
+
+        return frame
+
+    def stop(self) -> None:
+        """Stop the relay track."""
+        self._running = False
+        super().stop()
+
+
+class MixedAudioTrack(AudioStreamTrack):
+    """Mixes robot audio with group audio (other users) into a single track.
+
+    This allows sending both robot audio and group call audio to the browser
+    without needing a second audio track (which breaks SDP negotiation).
+    """
+
+    kind = "audio"
+    SAMPLES_PER_FRAME = 960
+
+    def __init__(
+        self,
+        robot_track: MediaStreamTrack,
+        mixer: GroupAudioMixer,
+        user_key: str,
+        sample_rate: int = 48000,
+    ) -> None:
+        super().__init__()
+        self.robot_track = robot_track
+        self.mixer = mixer
+        self.user_key = user_key
+        self.sample_rate = sample_rate
+        self._pts = 0
+        self._running = True
+        self._recv_count = 0
+        logger.info("MixedAudioTrack created for user %s on robot %s",
+                   user_key, mixer.robot_id)
+
+    async def recv(self) -> AudioFrame:
+        """Get the next mixed audio frame (robot + group, excluding self)."""
+        if not self._running:
+            raise Exception("Track stopped")
+
+        self._recv_count += 1
+
+        # Get robot audio frame
+        try:
+            robot_frame = await self.robot_track.recv()
+            robot_arr = robot_frame.to_ndarray()
+            # Convert to mono if stereo
+            if robot_arr.shape[0] > 1:
+                # Planar stereo (2, N): take left channel
+                robot_samples = robot_arr[0].astype(np.float32)
+            else:
+                # Mono or other format - flatten and truncate below
+                robot_samples = robot_arr.flatten().astype(np.float32)
+            # Ensure correct length
+            if len(robot_samples) > self.SAMPLES_PER_FRAME:
+                robot_samples = robot_samples[:self.SAMPLES_PER_FRAME]
+            elif len(robot_samples) < self.SAMPLES_PER_FRAME:
+                robot_samples = np.pad(robot_samples, (0, self.SAMPLES_PER_FRAME - len(robot_samples)))
+        except Exception as e:
+            # If robot track fails, use silence
+            if self._recv_count % 500 == 1:
+                logger.warning("MixedAudioTrack: robot track error: %s", e)
+            robot_samples = np.zeros(self.SAMPLES_PER_FRAME, dtype=np.float32)
+
+        # Get group audio (other users, excluding self)
+        group_samples = self.mixer.get_mixed_frame(exclude_user=self.user_key).astype(np.float32)
+
+        # Mix: average if both have audio, otherwise use whichever has audio
+        robot_rms = np.sqrt(np.mean(robot_samples**2))
+        group_rms = np.sqrt(np.mean(group_samples**2))
+
+        if robot_rms > 100 and group_rms > 100:
+            # Both have audio - mix them (average)
+            mixed = (robot_samples + group_samples) / 2
+        elif group_rms > 100:
+            # Only group audio
+            mixed = group_samples
+        else:
+            # Only robot audio (or silence)
+            mixed = robot_samples
+
+        # Clip and convert to int16
+        mixed = np.clip(mixed, -32768, 32767).astype(np.int16)
+
+        # Create stereo frame
+        stereo = np.empty(len(mixed) * 2, dtype=np.int16)
+        stereo[0::2] = mixed
+        stereo[1::2] = mixed
+
+        frame = AudioFrame.from_ndarray(stereo.reshape(1, -1), format="s16", layout="stereo")
+        frame.sample_rate = self.sample_rate
+        frame.pts = self._pts
+        self._pts += self.SAMPLES_PER_FRAME
+
+        if self._recv_count % 100 == 1:
+            has_group = self.mixer.has_audio(exclude_user=self.user_key)
+            active_users = list(self.mixer._user_buffers.keys())
+            # Log RMS per user in buffer to debug silent audio
+            user_rms = {}
+            for uk, frames in self.mixer._user_buffers.items():
+                if frames:
+                    u_rms = np.sqrt(np.mean(frames[-1].astype(np.float32)**2))
+                    user_rms[uk] = f"{u_rms:.1f}"
+            logger.info("MixedAudioTrack recv %d for %s: robot_rms=%.1f, group_rms=%.1f, has_group=%s, active_users=%s, user_rms=%s, exclude=%s",
+                       self._recv_count, self.user_key, robot_rms, group_rms, has_group, active_users, user_rms, self.user_key)
+
+        return frame
+
+    def stop(self) -> None:
+        """Stop the mixed track."""
+        self._running = False
+        super().stop()
+
+
+# Group audio mixers per robot
+group_audio_mixers: Dict[str, GroupAudioMixer] = {}
+
+
+def get_or_create_group_mixer(robot_id: str) -> GroupAudioMixer:
+    """Get or create a group audio mixer for a robot."""
+    if robot_id not in group_audio_mixers:
+        group_audio_mixers[robot_id] = GroupAudioMixer(robot_id)
+    return group_audio_mixers[robot_id]
+
+
+class ControlAggregator:
+    """Aggregates control commands from multiple users and sends averaged commands.
+
+    Each user's most recent command is stored. Periodically, all commands are
+    averaged and sent to the robot. Opposing inputs cancel out.
+    """
+
+    SEND_INTERVAL = 0.05  # 20Hz - send averaged command every 50ms
+    STALE_TIMEOUT = 0.2   # Commands older than 200ms are ignored
+
+    def __init__(self, robot_id: str) -> None:
+        self.robot_id = robot_id
+        # user_key -> (timestamp, parsed command)
+        self._user_commands: Dict[str, tuple[float, dict]] = {}
+        self._running = False
+        self._task: asyncio.Task | None = None
+        self._send_count = 0
+        logger.info("ControlAggregator created for %s", robot_id)
+
+    def start(self) -> None:
+        """Start the aggregation loop."""
+        if not self._running:
+            self._running = True
+            self._task = asyncio.create_task(self._send_loop())
+            logger.info("ControlAggregator started for %s", self.robot_id)
+
+    def stop(self) -> None:
+        """Stop the aggregation loop."""
+        self._running = False
+        if self._task:
+            self._task.cancel()
+            self._task = None
+        logger.info("ControlAggregator stopped for %s", self.robot_id)
+
+    def push_command(self, user_key: str, message: str) -> None:
+        """Store a control command from a user.
+
+        Joy commands are stored for averaging. Other commands (like camera_ptz)
+        are forwarded immediately since they shouldn't be averaged.
+        """
+        try:
+            cmd = json.loads(message)
+
+            # Non-joy commands (camera_ptz, etc.) should be forwarded immediately
+            if cmd.get("type") != "joy":
+                channel = hop1_control_channels.get(self.robot_id)
+                if channel and channel.readyState == "open":
+                    channel.send(message)
+                    logger.debug("ControlAggregator: forwarded %s command for %s",
+                                cmd.get("type"), self.robot_id)
+
+                # Broadcast camera_ptz to other users (for ghost joystick display)
+                if cmd.get("type") == "camera_ptz":
+                    broadcast_msg = json.dumps({
+                        "type": "camera_control",
+                        "pan_delta": cmd.get("pan_delta", 0),
+                        "tilt_delta": cmd.get("tilt_delta", 0),
+                        "user": user_key,
+                    })
+                    for browser_channel in hop2_control_channels.get(self.robot_id, []):
+                        if browser_channel.readyState == "open":
+                            try:
+                                browser_channel.send(broadcast_msg)
+                            except Exception as e:
+                                logger.warning("Broadcast camera control error: %s", e)
+                return
+
+            # Store joy commands for averaging
+            self._user_commands[user_key] = (_time.time(), cmd)
+        except json.JSONDecodeError:
+            logger.warning("ControlAggregator: invalid JSON from %s", user_key)
+
+    def remove_user(self, user_key: str) -> None:
+        """Remove a user's commands when they disconnect."""
+        self._user_commands.pop(user_key, None)
+        logger.info("ControlAggregator %s: removed user %s", self.robot_id, user_key)
+
+    async def _send_loop(self) -> None:
+        """Periodically compute averaged command and send to robot."""
+        while self._running:
+            try:
+                await asyncio.sleep(self.SEND_INTERVAL)
+                self._send_averaged_command()
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.warning("ControlAggregator send loop error: %s", e)
+
+    def _send_averaged_command(self) -> None:
+        """Compute averaged command from all users and send to robot."""
+        now = _time.time()
+        valid_commands = []
+
+        # Collect non-stale commands
+        for user_key, (timestamp, cmd) in list(self._user_commands.items()):
+            if now - timestamp > self.STALE_TIMEOUT:
+                # Remove stale command
+                self._user_commands.pop(user_key, None)
+            elif cmd.get("type") == "joy":
+                valid_commands.append(cmd)
+
+        if not valid_commands:
+            return  # No active commands
+
+        # Average the axes
+        num_users = len(valid_commands)
+        averaged_axes = [0.0] * 6
+        for cmd in valid_commands:
+            axes = cmd.get("axes", [])
+            for i in range(min(len(axes), 6)):
+                averaged_axes[i] += axes[i]
+
+        # Divide by number of users (averaging)
+        averaged_axes = [a / num_users for a in averaged_axes]
+
+        # For buttons, use OR (any user pressing counts)
+        merged_buttons = [0] * 12
+        for cmd in valid_commands:
+            buttons = cmd.get("buttons", [])
+            for i in range(min(len(buttons), 12)):
+                if buttons[i]:
+                    merged_buttons[i] = 1
+
+        # Create averaged command
+        averaged_cmd = {
+            "type": "joy",
+            "axes": averaged_axes,
+            "buttons": merged_buttons,
+            "timestamp": int(now * 1000),
+            "users": num_users,  # Include for debugging
+        }
+
+        # Send to robot
+        channel = hop1_control_channels.get(self.robot_id)
+        if channel and channel.readyState == "open":
+            try:
+                channel.send(json.dumps(averaged_cmd))
+                self._send_count += 1
+                if self._send_count % 100 == 1:
+                    logger.info("ControlAggregator %s: sent cmd #%d (users=%d, axes=%.2f,%.2f)",
+                               self.robot_id, self._send_count, num_users,
+                               averaged_axes[1], averaged_axes[3])
+            except Exception as e:
+                logger.warning("ControlAggregator send error: %s", e)
+
+        # Broadcast aggregated state to all browsers (for ghost joystick display)
+        if num_users > 1:
+            broadcast_msg = json.dumps({
+                "type": "aggregated_control",
+                "axes": averaged_axes,
+                "users": num_users,
+            })
+            for browser_channel in hop2_control_channels.get(self.robot_id, []):
+                try:
+                    if browser_channel.readyState == "open":
+                        browser_channel.send(broadcast_msg)
+                except Exception:
+                    pass
+
+
+# Control aggregators per robot
+control_aggregators: Dict[str, ControlAggregator] = {}
+
+
+def get_or_create_control_aggregator(robot_id: str) -> ControlAggregator:
+    """Get or create a control aggregator for a robot."""
+    if robot_id not in control_aggregators:
+        agg = ControlAggregator(robot_id)
+        agg.start()
+        control_aggregators[robot_id] = agg
+    return control_aggregators[robot_id]
+
 
 # STUN whitelist: maps IP -> expiry timestamp
 stun_whitelist: Dict[str, float] = {}
@@ -656,12 +2074,21 @@ class TwistCommand(BaseModel):
 class WebRTCOffer(BaseModel):
     sdp: str
     type: str
+    client_id: str | None = None  # Unique per browser/device, allows same user on multiple devices
 
 
 class TelemetryPayload(BaseModel):
     linear_speed: float = 0.0
     angular_speed: float = 0.0
     timestamp: float | None = None
+
+
+class PoseGraphPayload(BaseModel):
+    """slam_toolbox serialized pose graph, base64-encoded, from the bridge."""
+    posegraph_b64: str
+    data_b64: str
+    robot_namespace: str | None = None
+    resolution: float | None = None
 
 
 class UserOut(BaseModel):
@@ -677,7 +2104,7 @@ class TokenResponse(BaseModel):
 
 class RegisterRequest(BaseModel):
     email: Annotated[str, Field(min_length=3, description="Username (min 3 characters)")]
-    password: Annotated[str, Field(min_length=6, max_length=32, description="Password (6-32 characters)")]
+    password: Annotated[str, Field(min_length=6, max_length=72, description="Password (6-72 characters)")]
 
     @field_validator("email")
     @classmethod
@@ -691,30 +2118,40 @@ class RegisterRequest(BaseModel):
     def validate_password(cls, v: str) -> str:
         if len(v) < 6:
             raise ValueError("Password must be at least 6 characters")
-        if len(v) > 32:
-            raise ValueError("Password must be at most 32 characters")
+        if len(v) > 72:
+            # 72 is bcrypt's hard limit; anything longer is silently truncated.
+            raise ValueError("Password must be at most 72 characters")
         return v
 
 
 class LoginRequest(BaseModel):
     email: IdentifierStr
-    password: constr(min_length=1, max_length=32)
+    password: constr(min_length=1, max_length=72)
 
 
 class LobbyOnlineRequest(BaseModel):
     access_key: constr(min_length=1, max_length=255)
 
 
+# Game styles that are server-simulated "virtual" lobbies (is_virtual=True).
+# "remote" = robots/frames handled by an external machine (relay); not virtual.
+VIRTUAL_GAME_STYLES = {"raycast", "dom"}
+
+
 class LobbyCreate(BaseModel):
     name: constr(min_length=1, strip_whitespace=True)
     description: Optional[str] = None
     is_public: bool = False
+    game_style: str = "remote"
+    allow_spawn_players: bool = True
 
 
 class LobbyUpdate(BaseModel):
     name: Optional[constr(min_length=1, strip_whitespace=True)] = None
     description: Optional[str] = None
     is_public: Optional[bool] = None
+    game_style: Optional[str] = None
+    allow_spawn_players: Optional[bool] = None
 
 
 class BotCreate(BaseModel):
@@ -722,14 +2159,15 @@ class BotCreate(BaseModel):
     name: constr(min_length=1, strip_whitespace=True)
     ros_namespace: constr(min_length=1, strip_whitespace=True)
     description: Optional[str] = None
-    volume: Optional[float] = 1.0
+    # NOTE: volume is not writable over REST — it is the durable *confirmed*
+    # speaker gain, written only when the bridge proves an applied value
+    # (see capabilities.py). Set it via a goal on bot:<ns>/audio/gain.
 
 
 class BotUpdate(BaseModel):
     name: Optional[constr(min_length=1, strip_whitespace=True)] = None
     ros_namespace: Optional[constr(min_length=1, strip_whitespace=True)] = None
     description: Optional[str] = None
-    volume: Optional[float] = None
 
 
 class LobbyOut(BaseModel):
@@ -740,6 +2178,9 @@ class LobbyOut(BaseModel):
     owner_email: IdentifierStr
     created_at: datetime
     is_public: bool
+    is_virtual: bool
+    game_style: str
+    game_listeners: list[str]
     is_deleted: bool
     is_owner: bool
     bot_count: int
@@ -763,6 +2204,7 @@ class BotOut(BaseModel):
 
 class LobbyDetailOut(LobbyOut):
     bots: list[BotOut]
+    virtual_players: list["VirtualPlayerOut"] = []
 
 
 class RobotCommandOut(BaseModel):
@@ -789,6 +2231,80 @@ class RobotCommandDelivery(BaseModel):
 class RobotCommandComplete(BaseModel):
     status: Optional[str] = None
     message: Optional[str] = None
+
+
+class ChatMessageCreate(BaseModel):
+    content: str = Field(..., min_length=1, max_length=2000)
+
+
+class ChatMessageOut(BaseModel):
+    id: int
+    lobby_id: int
+    user_id: Optional[str]
+    user_name: Optional[str]
+    message_type: str
+    content: str
+    created_at: datetime
+
+
+class VirtualWorldElementCreate(BaseModel):
+    element_type: constr(min_length=1, max_length=32)
+    x: float
+    y: float
+    z: float = 0.0
+    width: Optional[float] = None
+    height: Optional[float] = None
+    depth: Optional[float] = None
+    rotation: float = 0.0
+    data: Optional[str] = None
+
+
+class VirtualWorldElementOut(BaseModel):
+    id: int
+    lobby_id: int
+    element_type: str
+    x: float
+    y: float
+    z: float
+    width: Optional[float]
+    height: Optional[float]
+    depth: Optional[float]
+    rotation: float
+    data: Optional[str]
+    created_at: datetime
+    created_by: Optional[str]
+
+
+class VirtualPlayerCreate(BaseModel):
+    name: constr(min_length=1, max_length=255)
+    x: float = 0.0
+    y: float = 0.0
+    z: float = 0.5
+    yaw: float = 0.0
+    color: str = "#3b82f6"
+
+
+class VirtualPlayerOut(BaseModel):
+    id: int
+    lobby_id: int
+    namespace: str
+    name: str
+    x: float
+    y: float
+    z: float
+    yaw: float
+    color: str
+    created_at: datetime
+    is_deleted: bool
+
+
+# Rebuild LobbyDetailOut to resolve forward reference to VirtualPlayerOut
+LobbyDetailOut.model_rebuild()
+
+
+class VirtualWorldOut(BaseModel):
+    elements: list[VirtualWorldElementOut]
+    players: list[VirtualPlayerOut]
 
 
 async def get_current_user(
@@ -874,6 +2390,10 @@ async def create_lobby(
     session: AsyncSession = Depends(get_session),
 ) -> LobbyOut:
     access_key = secrets.token_urlsafe(16)
+    style = payload.game_style or "remote"
+    is_virtual = style in VIRTUAL_GAME_STYLES
+    # Seed the hardcoded spawn_player listener for virtual games when allowed.
+    listeners = ["spawn_player"] if (is_virtual and payload.allow_spawn_players) else []
     lobby = Lobby(
         name=payload.name.strip(),
         ros_host="internal",
@@ -882,6 +2402,9 @@ async def create_lobby(
         access_key=access_key,
         owner_id=current_user.id,
         is_public=payload.is_public,
+        is_virtual=is_virtual,
+        game_style=style,
+        game_listeners=listeners,
     )
     session.add(lobby)
     await session.commit()
@@ -900,7 +2423,11 @@ async def get_lobby_detail(
 ) -> LobbyDetailOut:
     stmt = (
         select(Lobby)
-        .options(selectinload(Lobby.owner), selectinload(Lobby.bots).selectinload(Bot.lobby))
+        .options(
+            selectinload(Lobby.owner),
+            selectinload(Lobby.bots).selectinload(Bot.lobby),
+            selectinload(Lobby.virtual_players),
+        )
         .where(Lobby.id == lobby_id)
     )
     result = await session.execute(stmt)
@@ -930,6 +2457,16 @@ async def update_lobby(
         lobby.description = payload.description
     if payload.is_public is not None:
         lobby.is_public = payload.is_public
+    if payload.game_style is not None:
+        lobby.game_style = payload.game_style
+        lobby.is_virtual = payload.game_style in VIRTUAL_GAME_STYLES
+    if payload.allow_spawn_players is not None:
+        listeners = list(lobby.game_listeners or [])
+        if payload.allow_spawn_players and "spawn_player" not in listeners:
+            listeners.append("spawn_player")
+        elif not payload.allow_spawn_players:
+            listeners = [name for name in listeners if name != "spawn_player"]
+        lobby.game_listeners = listeners
     await session.commit()
     await session.refresh(lobby)
     await session.refresh(lobby, attribute_names=["owner", "bots"])
@@ -953,6 +2490,530 @@ async def delete_lobby(
         bot.is_deleted = True
     await session.commit()
     return {"status": "deleted"}
+
+
+# -----------------------------------------------------------------------------
+# Chat Message Endpoints
+# -----------------------------------------------------------------------------
+
+
+@app.get("/api/lobbies/{lobby_id}/messages")
+async def get_lobby_messages(
+    lobby_id: int,
+    limit: int = 50,
+    before: Optional[datetime] = None,
+    current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    """Get chat messages for a lobby."""
+    lobby = await session.get(Lobby, lobby_id)
+    if not lobby or lobby.is_deleted:
+        raise HTTPException(status_code=404, detail="Lobby not found")
+    if not lobby.is_public and lobby.owner_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Lobby is private")
+
+    query = (
+        select(ChatMessage)
+        .where(ChatMessage.lobby_id == lobby_id)
+        .order_by(ChatMessage.created_at.desc())
+        .limit(min(limit, 100))
+    )
+    if before:
+        query = query.where(ChatMessage.created_at < before)
+
+    result = await session.execute(query)
+    messages = result.scalars().all()
+
+    return {
+        "items": [
+            ChatMessageOut(
+                id=msg.id,
+                lobby_id=msg.lobby_id,
+                user_id=msg.user_id,
+                user_name=msg.user_name,
+                message_type=msg.message_type,
+                content=msg.content,
+                created_at=msg.created_at,
+            )
+            for msg in reversed(messages)  # Return oldest first for display
+        ]
+    }
+
+
+@app.post("/api/lobbies/{lobby_id}/messages", response_model=ChatMessageOut)
+async def create_lobby_message(
+    lobby_id: int,
+    payload: ChatMessageCreate,
+    current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+) -> ChatMessageOut:
+    """Create a new chat message in a lobby."""
+    lobby = await session.get(Lobby, lobby_id)
+    if not lobby or lobby.is_deleted:
+        raise HTTPException(status_code=404, detail="Lobby not found")
+    if not lobby.is_public and lobby.owner_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Lobby is private")
+
+    message = ChatMessage(
+        lobby_id=lobby_id,
+        user_id=str(current_user.id),
+        user_name=current_user.email,
+        message_type="text",
+        content=payload.content.strip(),
+    )
+    session.add(message)
+    await session.commit()
+    await session.refresh(message)
+
+    # Broadcast to WebSocket subscribers
+    await broadcast_chat_message(lobby_id, message)
+
+    return ChatMessageOut(
+        id=message.id,
+        lobby_id=message.lobby_id,
+        user_id=message.user_id,
+        user_name=message.user_name,
+        message_type=message.message_type,
+        content=message.content,
+        created_at=message.created_at,
+    )
+
+
+async def create_virtual_player_ws(lobby_id: int, name: str, color: str) -> Optional[VirtualPlayer]:
+    """Create a virtual player via WebSocket request."""
+    try:
+        async with AsyncSessionLocal() as session:
+            # Verify lobby exists
+            lobby = await session.get(Lobby, lobby_id)
+            if not lobby or lobby.is_deleted:
+                return None
+
+            # Generate unique namespace
+            namespace = f"virtual_{secrets.token_hex(8)}"
+
+            # Random spawn on create (persisted; loaded as-is on future connects)
+            spawn_x, spawn_y, spawn_yaw = await _random_spawn_for_lobby(session, lobby_id)
+
+            player = VirtualPlayer(
+                lobby_id=lobby_id,
+                namespace=namespace,
+                name=name.strip() if name else "Player",
+                x=spawn_x,
+                y=spawn_y,
+                z=0.5,
+                yaw=spawn_yaw,
+                color=color if color else "#3b82f6",
+            )
+            session.add(player)
+            await session.commit()
+            await session.refresh(player)
+            return player
+    except Exception as e:
+        logger.error("Failed to create virtual player: %s", e)
+        return None
+
+
+async def delete_virtual_player_ws(namespace: str) -> Optional[int]:
+    """Delete a virtual player via WebSocket request. Returns lobby_id if successful."""
+    try:
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                select(VirtualPlayer)
+                .where(VirtualPlayer.namespace == namespace)
+                .where(VirtualPlayer.is_deleted.is_(False))
+            )
+            player = result.scalar_one_or_none()
+            if not player:
+                return None
+
+            lobby_id = player.lobby_id
+            player.is_deleted = True
+            await session.commit()
+            return lobby_id
+    except Exception as e:
+        logger.error("Failed to delete virtual player: %s", e)
+        return None
+
+
+async def notify_virtual_player_created(lobby_id: int, player: VirtualPlayer) -> None:
+    """Notify connected Tauri hosts about a new virtual player."""
+    message = {
+        "type": "virtual_player_created",
+        "lobby_id": lobby_id,
+        "player": {
+            "id": player.id,
+            "namespace": player.namespace,
+            "name": player.name,
+            "x": player.x,
+            "y": player.y,
+            "z": player.z,
+            "yaw": player.yaw,
+            "color": player.color,
+        },
+    }
+    async with lobby_status_lock:
+        dead = []
+        for ws in lobby_status_subscribers:
+            try:
+                await ws.send_json(message)
+            except Exception:
+                dead.append(ws)
+        for ws in dead:
+            lobby_status_subscribers.discard(ws)
+
+
+async def notify_virtual_player_deleted(lobby_id: int, namespace: str) -> None:
+    """Notify connected Tauri hosts about a deleted virtual player."""
+    message = {
+        "type": "virtual_player_deleted",
+        "lobby_id": lobby_id,
+        "namespace": namespace,
+    }
+    async with lobby_status_lock:
+        dead = []
+        for ws in lobby_status_subscribers:
+            try:
+                await ws.send_json(message)
+            except Exception:
+                dead.append(ws)
+        for ws in dead:
+            lobby_status_subscribers.discard(ws)
+
+
+# -----------------------------------------------------------------------------
+# Virtual World WebSocket Helper Functions
+# -----------------------------------------------------------------------------
+
+
+async def send_world_state(websocket: WebSocket, lobby_id: int) -> None:
+    """Send full world state to a client."""
+    async with AsyncSessionLocal() as session:
+        elements_result = await session.execute(
+            select(VirtualWorldElement)
+            .where(VirtualWorldElement.lobby_id == lobby_id)
+            .order_by(VirtualWorldElement.created_at)
+        )
+        elements = elements_result.scalars().all()
+
+        players_result = await session.execute(
+            select(VirtualPlayer)
+            .where(VirtualPlayer.lobby_id == lobby_id)
+            .where(VirtualPlayer.is_deleted.is_(False))
+            .order_by(VirtualPlayer.created_at)
+        )
+        players = players_result.scalars().all()
+
+    message = {
+        "type": "world_state",
+        "lobby_id": lobby_id,
+        "elements": [
+            {
+                "id": e.id,
+                "element_type": e.element_type,
+                "x": e.x,
+                "y": e.y,
+                "z": e.z,
+                "width": e.width,
+                "height": e.height,
+                "depth": e.depth,
+                "rotation": e.rotation,
+                "data": e.data,
+            }
+            for e in elements
+        ],
+        "players": [
+            {
+                "id": p.id,
+                "namespace": p.namespace,
+                "name": p.name,
+                "x": p.x,
+                "y": p.y,
+                "z": p.z,
+                "yaw": p.yaw,
+                "color": p.color,
+            }
+            for p in players
+        ],
+    }
+    await websocket.send_json(message)
+
+
+async def create_virtual_element(lobby_id: int, message: dict) -> Optional[VirtualWorldElement]:
+    """Create a new virtual world element from WebSocket message."""
+    try:
+        async with AsyncSessionLocal() as session:
+            element = VirtualWorldElement(
+                lobby_id=lobby_id,
+                element_type=message.get("element_type", "wall"),
+                x=float(message.get("x", 0)),
+                y=float(message.get("y", 0)),
+                z=float(message.get("z", 0)),
+                width=message.get("width"),
+                height=message.get("height"),
+                depth=message.get("depth"),
+                rotation=float(message.get("rotation", 0)),
+                data=message.get("data"),
+                created_by=message.get("created_by"),
+            )
+            session.add(element)
+            await session.commit()
+            await session.refresh(element)
+            return element
+    except Exception as e:
+        logger.error("Failed to create virtual element: %s", e)
+        return None
+
+
+async def update_virtual_element(lobby_id: int, message: dict) -> Optional[VirtualWorldElement]:
+    """Update an existing virtual world element."""
+    element_id = message.get("element_id")
+    if not element_id:
+        return None
+
+    try:
+        async with AsyncSessionLocal() as session:
+            element = await session.get(VirtualWorldElement, element_id)
+            if not element or element.lobby_id != lobby_id:
+                return None
+
+            if "x" in message:
+                element.x = float(message["x"])
+            if "y" in message:
+                element.y = float(message["y"])
+            if "z" in message:
+                element.z = float(message["z"])
+            if "width" in message:
+                element.width = message["width"]
+            if "height" in message:
+                element.height = message["height"]
+            if "depth" in message:
+                element.depth = message["depth"]
+            if "rotation" in message:
+                element.rotation = float(message["rotation"])
+            if "data" in message:
+                element.data = message["data"]
+
+            await session.commit()
+            await session.refresh(element)
+            return element
+    except Exception as e:
+        logger.error("Failed to update virtual element: %s", e)
+        return None
+
+
+async def remove_virtual_element(lobby_id: int, element_id: int) -> bool:
+    """Remove a virtual world element."""
+    if not element_id:
+        return False
+
+    try:
+        async with AsyncSessionLocal() as session:
+            element = await session.get(VirtualWorldElement, element_id)
+            if not element or element.lobby_id != lobby_id:
+                return False
+
+            await session.delete(element)
+            await session.commit()
+            return True
+    except Exception as e:
+        logger.error("Failed to remove virtual element: %s", e)
+        return False
+
+
+async def broadcast_world_element_change(lobby_id: int, change_type: str, element: VirtualWorldElement) -> None:
+    """Broadcast element change to all lobby subscribers."""
+    message = {
+        "type": change_type,
+        "lobby_id": lobby_id,
+        "element": {
+            "id": element.id,
+            "element_type": element.element_type,
+            "x": element.x,
+            "y": element.y,
+            "z": element.z,
+            "width": element.width,
+            "height": element.height,
+            "depth": element.depth,
+            "rotation": element.rotation,
+            "data": element.data,
+        },
+    }
+    async with lobby_status_lock:
+        dead = []
+        for ws in lobby_status_subscribers:
+            try:
+                await ws.send_json(message)
+            except Exception:
+                dead.append(ws)
+        for ws in dead:
+            lobby_status_subscribers.discard(ws)
+
+
+async def broadcast_world_element_removed(lobby_id: int, element_id: int) -> None:
+    """Broadcast element removal to all lobby subscribers."""
+    message = {
+        "type": "element_removed",
+        "lobby_id": lobby_id,
+        "element_id": element_id,
+    }
+    async with lobby_status_lock:
+        dead = []
+        for ws in lobby_status_subscribers:
+            try:
+                await ws.send_json(message)
+            except Exception:
+                dead.append(ws)
+        for ws in dead:
+            lobby_status_subscribers.discard(ws)
+
+
+async def update_virtual_player_state(lobby_id: int, message: dict) -> None:
+    """Update virtual player position and broadcast to subscribers."""
+    namespace = message.get("namespace")
+    if not namespace:
+        return
+
+    try:
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                select(VirtualPlayer)
+                .where(VirtualPlayer.namespace == namespace)
+                .where(VirtualPlayer.lobby_id == lobby_id)
+                .where(VirtualPlayer.is_deleted.is_(False))
+            )
+            player = result.scalar_one_or_none()
+            if not player:
+                return
+
+            if "x" in message:
+                player.x = float(message["x"])
+            if "y" in message:
+                player.y = float(message["y"])
+            if "z" in message:
+                player.z = float(message["z"])
+            if "yaw" in message:
+                player.yaw = float(message["yaw"])
+
+            await session.commit()
+
+        # Broadcast player state to lobby subscribers
+        state_message = {
+            "type": "player_state",
+            "lobby_id": lobby_id,
+            "namespace": namespace,
+            "x": message.get("x"),
+            "y": message.get("y"),
+            "z": message.get("z"),
+            "yaw": message.get("yaw"),
+        }
+        async with lobby_status_lock:
+            dead = []
+            for ws in lobby_status_subscribers:
+                try:
+                    await ws.send_json(state_message)
+                except Exception:
+                    dead.append(ws)
+            for ws in dead:
+                lobby_status_subscribers.discard(ws)
+    except Exception as e:
+        logger.error("Failed to update virtual player state: %s", e)
+
+
+# --- Internal virtual-lobby game: lifecycle helpers ------------------------
+VIRTUAL_SPAWN_HALF_EXTENT = 6.0  # players spawn within [-6, 6] world units
+
+
+async def _load_wall_dicts(session: AsyncSession, lobby_id: int) -> list[dict]:
+    """Load a lobby's world elements as plain dicts for VirtualWorld."""
+    result = await session.execute(
+        select(VirtualWorldElement).where(VirtualWorldElement.lobby_id == lobby_id)
+    )
+    return [
+        {
+            "element_type": e.element_type,
+            "x": e.x,
+            "y": e.y,
+            "width": e.width,
+            "height": e.height,
+            "rotation": e.rotation,
+        }
+        for e in result.scalars().all()
+    ]
+
+
+async def _random_spawn_for_lobby(session: AsyncSession, lobby_id: int) -> tuple[float, float, float]:
+    """Pick a random (x, y, yaw) that isn't inside a wall. Used on player create."""
+    tmp = VirtualWorld(lobby_id)
+    tmp.set_walls_from_elements(await _load_wall_dicts(session, lobby_id))
+    for _ in range(30):
+        x = float(np.random.uniform(-VIRTUAL_SPAWN_HALF_EXTENT, VIRTUAL_SPAWN_HALF_EXTENT))
+        y = float(np.random.uniform(-VIRTUAL_SPAWN_HALF_EXTENT, VIRTUAL_SPAWN_HALF_EXTENT))
+        if not tmp._blocked(x, y):
+            return x, y, float(np.random.uniform(-np.pi, np.pi))
+    return 0.0, 0.0, 0.0
+
+
+async def ensure_virtual_source(robot_id: str) -> bool:
+    """If robot_id is a virtual player, start server-side frame generation.
+
+    Registers a server-generated camera track into robot_incoming_tracks so the
+    existing Hop 2 relay path streams it like a forwarder. Returns True when a
+    virtual source is active for this namespace. A real forwarder track (if
+    present) always takes precedence over the internal game.
+    """
+    if robot_id in virtual_ns_world:
+        return True
+    if robot_id in robot_incoming_tracks:
+        return False
+    async with virtual_world_lock:
+        if robot_id in virtual_ns_world:
+            return True
+        if robot_id in robot_incoming_tracks:
+            return False
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                select(VirtualPlayer).where(
+                    VirtualPlayer.namespace == robot_id,
+                    VirtualPlayer.is_deleted.is_(False),
+                )
+            )
+            player = result.scalar_one_or_none()
+            if player is None:
+                return False
+            lobby_id = player.lobby_id
+            world = active_virtual_worlds.get(lobby_id)
+            if world is None:
+                world = VirtualWorld(lobby_id)
+                world.set_walls_from_elements(await _load_wall_dicts(session, lobby_id))
+                world.start()
+                active_virtual_worlds[lobby_id] = world
+                logger.info("VirtualWorld started for lobby %s (%d walls)", lobby_id, len(world.walls))
+            world.add_player(robot_id, player.x, player.y, player.yaw, player.color)
+        # No robot audio track: virtual bots are silent; browser group audio is unaffected.
+        robot_incoming_tracks[robot_id] = RaycastCameraTrack(world, robot_id)
+        virtual_ns_world[robot_id] = world
+        logger.info("Virtual source active for %s (lobby %s)", robot_id, world.lobby_id)
+        return True
+
+
+async def teardown_virtual_source(robot_id: str) -> None:
+    """Persist a virtual player's pose and stop its world if no players remain."""
+    async with virtual_world_lock:
+        world = virtual_ns_world.pop(robot_id, None)
+        if world is None:
+            return
+        snap = world.snapshot_player(robot_id)
+        world.remove_player(robot_id)
+        robot_incoming_tracks.pop(robot_id, None)
+        lobby_id = world.lobby_id
+        if not world.players:
+            world.stop()
+            active_virtual_worlds.pop(lobby_id, None)
+            logger.info("VirtualWorld stopped for lobby %s", lobby_id)
+    if snap is not None:
+        x, y, yaw = snap
+        await update_virtual_player_state(lobby_id, {"namespace": robot_id, "x": x, "y": y, "yaw": yaw})
+        logger.info("Persisted virtual player %s pose (%.2f, %.2f, %.2f)", robot_id, x, y, yaw)
 
 
 @app.get("/api/bots")
@@ -999,7 +3060,6 @@ async def create_bot(
     if bot and bot.is_deleted:
         bot.name = payload.name.strip()
         bot.description = payload.description
-        bot.volume = payload.volume if payload.volume is not None else 1.0
         bot.lobby_id = lobby.id
         bot.is_deleted = False
     else:
@@ -1007,7 +3067,6 @@ async def create_bot(
             name=payload.name.strip(),
             ros_namespace=normalized_namespace,
             description=payload.description,
-            volume=payload.volume if payload.volume is not None else 1.0,
             lobby_id=lobby.id,
         )
         session.add(bot)
@@ -1044,8 +3103,6 @@ async def update_bot(
             if ns_bot and ns_bot.id != bot.id:
                 raise HTTPException(status_code=400, detail="ROS namespace already registered in this lobby")
             bot.ros_namespace = new_ns
-    if payload.volume is not None:
-        bot.volume = max(0.0, min(1.0, payload.volume))
     await session.commit()
     await session.refresh(bot)
     bot.lobby = lobby
@@ -1123,8 +3180,8 @@ def lobby_to_out(lobby: Lobby, current_user: User) -> LobbyOut:
     bot_count = len(active_bots)
     bot_namespaces = [bot.ros_namespace for bot in active_bots]
     is_owner = lobby.owner_id == current_user.id
-    # Check if any bot in this lobby has an active ROS bridge connection
-    ros_connected = any(ns in robot_forwarder_pcs for ns in bot_namespaces)
+    # Check if this lobby has an active ros-bridge command websocket connection
+    ros_connected = lobby.id in connected_lobby_ids
     return LobbyOut(
         id=lobby.id,
         name=lobby.name,
@@ -1133,6 +3190,9 @@ def lobby_to_out(lobby: Lobby, current_user: User) -> LobbyOut:
         owner_email=owner_email,
         created_at=lobby.created_at,
         is_public=bool(lobby.is_public),
+        is_virtual=bool(getattr(lobby, "is_virtual", False)),
+        game_style=getattr(lobby, "game_style", "remote") or "remote",
+        game_listeners=list(getattr(lobby, "game_listeners", []) or []),
         is_deleted=bool(lobby.is_deleted),
         is_owner=is_owner,
         bot_count=bot_count,
@@ -1144,9 +3204,49 @@ def lobby_to_out(lobby: Lobby, current_user: User) -> LobbyOut:
 def lobby_detail_to_out(lobby: Lobby, current_user: User) -> LobbyDetailOut:
     base = lobby_to_out(lobby, current_user)
     bots = [bot_to_out(bot) for bot in getattr(lobby, "bots", []) if not bot.is_deleted]
+    virtual_players = [
+        virtual_player_to_out(vp)
+        for vp in getattr(lobby, "virtual_players", [])
+        if not vp.is_deleted
+    ]
     data = base.model_dump()
     data["bots"] = bots
+    data["virtual_players"] = virtual_players
     return LobbyDetailOut(**data)
+
+
+def virtual_player_to_out(player: VirtualPlayer) -> VirtualPlayerOut:
+    return VirtualPlayerOut(
+        id=player.id,
+        lobby_id=player.lobby_id,
+        namespace=player.namespace,
+        name=player.name,
+        x=player.x,
+        y=player.y,
+        z=player.z,
+        yaw=player.yaw,
+        color=player.color,
+        created_at=player.created_at,
+        is_deleted=bool(player.is_deleted),
+    )
+
+
+def virtual_element_to_out(element: VirtualWorldElement) -> VirtualWorldElementOut:
+    return VirtualWorldElementOut(
+        id=element.id,
+        lobby_id=element.lobby_id,
+        element_type=element.element_type,
+        x=element.x,
+        y=element.y,
+        z=element.z,
+        width=element.width,
+        height=element.height,
+        depth=element.depth,
+        rotation=element.rotation,
+        data=element.data,
+        created_at=element.created_at,
+        created_by=element.created_by,
+    )
 
 
 def bot_to_out(bot: Bot) -> BotOut:
@@ -1355,7 +3455,27 @@ async def prepare_database(max_attempts: int = 60, delay: int = 5) -> None:
                 )
                 await conn.execute(
                     text(
+                        "ALTER TABLE lobbies ADD COLUMN IF NOT EXISTS is_virtual BOOLEAN NOT NULL DEFAULT false"
+                    )
+                )
+                await conn.execute(
+                    text(
                         "ALTER TABLE bots ADD COLUMN IF NOT EXISTS is_deleted BOOLEAN NOT NULL DEFAULT false"
+                    )
+                )
+                await conn.execute(
+                    text(
+                        "ALTER TABLE bots ADD COLUMN IF NOT EXISTS volume FLOAT NOT NULL DEFAULT 1.0"
+                    )
+                )
+                await conn.execute(
+                    text(
+                        "ALTER TABLE lobbies ADD COLUMN IF NOT EXISTS game_style VARCHAR(32) NOT NULL DEFAULT 'remote'"
+                    )
+                )
+                await conn.execute(
+                    text(
+                        "ALTER TABLE lobbies ADD COLUMN IF NOT EXISTS game_listeners JSON NOT NULL DEFAULT '[]'"
                     )
                 )
             logger.info("Database connection established after %s attempt(s)", attempt + 1)
@@ -1580,6 +3700,69 @@ async def startup_event() -> None:
 
     app.state.stun_cleanup_task = asyncio.create_task(_cleanup_loop())
 
+    # Periodic cleanup of stale WebRTC connections and data structures
+    async def _webrtc_cleanup_loop() -> None:
+        while True:
+            await asyncio.sleep(60)  # Check every minute
+            try:
+                cleaned = 0
+                # Clean up closed browser peer connections
+                for robot_id in list(robot_browser_pcs.keys()):
+                    pcs = robot_browser_pcs.get(robot_id, [])
+                    alive = []
+                    for pc in pcs:
+                        if pc.connectionState in ("connected", "connecting", "new"):
+                            alive.append(pc)
+                        else:
+                            cleaned += 1
+                            try:
+                                await pc.close()
+                            except:
+                                pass
+                    if alive:
+                        robot_browser_pcs[robot_id] = alive
+                    else:
+                        robot_browser_pcs.pop(robot_id, None)
+
+                # Clean up closed hop2 data channels
+                for robot_id in list(hop2_telemetry_channels.keys()):
+                    channels = hop2_telemetry_channels.get(robot_id, [])
+                    alive = [c for c in channels if c.readyState == "open"]
+                    if alive:
+                        hop2_telemetry_channels[robot_id] = alive
+                    else:
+                        hop2_telemetry_channels.pop(robot_id, None)
+
+                for robot_id in list(hop2_control_channels.keys()):
+                    channels = hop2_control_channels.get(robot_id, [])
+                    alive = [c for c in channels if c.readyState == "open"]
+                    if alive:
+                        hop2_control_channels[robot_id] = alive
+                    else:
+                        hop2_control_channels.pop(robot_id, None)
+
+                for robot_id in list(hop2_map_channels.keys()):
+                    channels = hop2_map_channels.get(robot_id, [])
+                    alive = [c for c in channels if c.readyState == "open"]
+                    if alive:
+                        hop2_map_channels[robot_id] = alive
+                    else:
+                        hop2_map_channels.pop(robot_id, None)
+
+                # Clean up stale browser_user_pcs
+                for key in list(browser_user_pcs.keys()):
+                    pc = browser_user_pcs.get(key)
+                    if pc and pc.connectionState not in ("connected", "connecting", "new"):
+                        browser_user_pcs.pop(key, None)
+                        cleaned += 1
+
+                if cleaned > 0:
+                    logger.info("WebRTC cleanup: removed %d stale connections", cleaned)
+            except Exception as e:
+                logger.warning("WebRTC cleanup error: %s", e)
+
+    app.state.webrtc_cleanup_task = asyncio.create_task(_webrtc_cleanup_loop())
+
 
 @app.on_event("shutdown")
 async def shutdown_event() -> None:
@@ -1588,6 +3771,8 @@ async def shutdown_event() -> None:
         app.state.stun_transport.close()
     if hasattr(app.state, "stun_cleanup_task"):
         app.state.stun_cleanup_task.cancel()
+    if hasattr(app.state, "webrtc_cleanup_task"):
+        app.state.webrtc_cleanup_task.cancel()
     # Close all SFU peer connections
     for pc in robot_forwarder_pcs.values():
         await pc.close()
@@ -1611,6 +3796,61 @@ async def health() -> dict[str, Any]:
         "gateway": settings.gateway_name,
         "active_robots": active,
     }
+
+
+@app.get("/api/debug/memory")
+async def debug_memory() -> dict[str, Any]:
+    """Debug endpoint to track memory usage and data structure sizes."""
+    import gc
+    import sys
+
+    # Force garbage collection
+    gc.collect()
+
+    # Get sizes of global data structures
+    structures = {
+        "robot_heartbeats": len(robot_heartbeats),
+        "robot_incoming_tracks": len(robot_incoming_tracks),
+        "robot_incoming_audio_tracks": len(robot_incoming_audio_tracks),
+        "robot_forwarder_pcs": len(robot_forwarder_pcs),
+        "robot_browser_pcs": {k: len(v) for k, v in robot_browser_pcs.items()},
+        "robot_track_ready": len(robot_track_ready),
+        "websocket_robot_map": {k: len(v) for k, v in websocket_robot_map.items()},
+        "telemetry_subscribers": {k: len(v) for k, v in telemetry_subscribers.items()},
+        "latest_telemetry": len(latest_telemetry),
+        "chat_subscribers": {k: len(v) for k, v in chat_subscribers.items()},
+        "browser_audio_relay_tracks": len(browser_audio_relay_tracks),
+        "browser_audio_forward_tasks": len(browser_audio_forward_tasks),
+        "browser_user_pcs": len(browser_user_pcs),
+        "robot_audio_broadcasters": len(robot_audio_broadcasters),
+        "hop1_telemetry_channels": len(hop1_telemetry_channels),
+        "hop1_control_channels": len(hop1_control_channels),
+        "hop1_scan_channels": len(hop1_scan_channels),
+        "hop2_telemetry_channels": {k: len(v) for k, v in hop2_telemetry_channels.items()},
+        "hop2_control_channels": {k: len(v) for k, v in hop2_control_channels.items()},
+        "hop2_map_channels": {k: len(v) for k, v in hop2_map_channels.items()},
+        "group_audio_mixers": len(group_audio_mixers),
+        "control_aggregators": len(control_aggregators),
+        "active_robot_streams": {k: len(v) for k, v in active_robot_streams.items()},
+        "connected_lobby_ids": len(connected_lobby_ids),
+        "lobby_status_subscribers": len(lobby_status_subscribers),
+        "command_subscribers": {k: len(v) for k, v in command_subscribers.items()},
+    }
+
+    # Get process memory info
+    try:
+        import resource
+        rusage = resource.getrusage(resource.RUSAGE_SELF)
+        memory_mb = rusage.ru_maxrss / 1024  # Convert KB to MB on Linux
+    except:
+        memory_mb = 0
+
+    return {
+        "memory_mb": round(memory_mb, 2),
+        "gc_counts": gc.get_count(),
+        "structures": structures,
+    }
+
 
 def _get_ice_servers() -> dict[str, Any]:
     """Return ICE server config pointing to our own STUN server."""
@@ -1691,6 +3931,72 @@ async def ingest_telemetry(
     return {"robot": robot_id, "status": "ok"}
 
 
+@app.post("/api/internal/slam/pose-graph")
+async def upload_pose_graph(
+    payload: PoseGraphPayload,
+    x_api_key: str = Header(default=""),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    """Persist a lobby's slam_toolbox pose graph (upsert). The api key scopes the lobby."""
+    lobby_id = await require_internal_api_key(x_api_key, session)
+    try:
+        posegraph_bytes = base64.b64decode(payload.posegraph_b64)
+        data_bytes = base64.b64decode(payload.data_b64)
+    except Exception:
+        raise HTTPException(status_code=400, detail="invalid base64 pose graph")
+    if not posegraph_bytes or not data_bytes:
+        raise HTTPException(status_code=400, detail="empty pose graph")
+
+    existing = (
+        await session.execute(
+            select(SlamPoseGraph).where(SlamPoseGraph.lobby_id == lobby_id)
+        )
+    ).scalar_one_or_none()
+    if existing is not None:
+        existing.posegraph = posegraph_bytes
+        existing.data = data_bytes
+        existing.robot_namespace = payload.robot_namespace
+        existing.resolution = payload.resolution
+    else:
+        session.add(
+            SlamPoseGraph(
+                lobby_id=lobby_id,
+                robot_namespace=payload.robot_namespace,
+                posegraph=posegraph_bytes,
+                data=data_bytes,
+                resolution=payload.resolution,
+            )
+        )
+    await session.commit()
+    total = len(posegraph_bytes) + len(data_bytes)
+    logger.info("Stored slam pose graph for lobby %s (%d bytes)", lobby_id, total)
+    return {"lobby_id": lobby_id, "status": "ok", "bytes": total}
+
+
+@app.get("/api/internal/slam/pose-graph")
+async def download_pose_graph(
+    x_api_key: str = Header(default=""),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    """Return a lobby's stored pose graph so the bridge can deserialize/continue it."""
+    lobby_id = await require_internal_api_key(x_api_key, session)
+    row = (
+        await session.execute(
+            select(SlamPoseGraph).where(SlamPoseGraph.lobby_id == lobby_id)
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        raise HTTPException(status_code=404, detail="no pose graph for lobby")
+    return {
+        "lobby_id": lobby_id,
+        "robot_namespace": row.robot_namespace,
+        "resolution": row.resolution,
+        "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+        "posegraph_b64": base64.b64encode(row.posegraph).decode("ascii"),
+        "data_b64": base64.b64encode(row.data).decode("ascii"),
+    }
+
+
 async def broadcast_telemetry(robot_id: str, data: Dict[str, Any]) -> None:
     """Broadcast telemetry to all subscribed websockets."""
     payload = {"type": "telemetry", "robot": robot_id, **data}
@@ -1718,6 +4024,9 @@ async def robot_command_bridge(websocket: WebSocket) -> None:
     ws_client_ip = ws_forwarded.split(",")[0].strip() if ws_forwarded else peer[0]
     allow_stun_ip(ws_client_ip)
     logger.info("Command websocket connected from %s:%s (lobby_id=%s)", ws_client_ip, peer[1], lobby_id)
+    # Mark lobby as online
+    connected_lobby_ids.add(lobby_id)
+    await broadcast_lobby_connection(lobby_id, True)
     try:
         while True:
             message = await websocket.receive_json()
@@ -1802,12 +4111,102 @@ async def robot_command_bridge(websocket: WebSocket) -> None:
             elif msg_type == "webrtc_offer":
                 # Forwarder is sending us its Hop 1 offer
                 await handle_forwarder_offer(websocket, message)
+            # Virtual World message handlers
+            elif msg_type == "register_virtual_players":
+                # Tauri host registering virtual players (auto-create like robots)
+                players_data = message.get("players", [])
+                created_players = []
+                async with AsyncSessionLocal() as session:
+                    for p_data in players_data:
+                        namespace = p_data.get("namespace", f"virtual_{secrets.token_hex(8)}")
+                        name = p_data.get("name", namespace)
+                        color = p_data.get("color", "#3b82f6")
+                        # Check if already exists
+                        existing = await session.execute(
+                            select(VirtualPlayer.id).where(
+                                VirtualPlayer.namespace == namespace,
+                                VirtualPlayer.lobby_id == lobby_id,
+                            )
+                        )
+                        if existing.scalar_one_or_none() is None:
+                            sx, sy, syaw = await _random_spawn_for_lobby(session, lobby_id)
+                            player = VirtualPlayer(
+                                lobby_id=lobby_id,
+                                namespace=namespace,
+                                name=name,
+                                x=sx,
+                                y=sy,
+                                yaw=syaw,
+                                color=color,
+                            )
+                            session.add(player)
+                            await session.flush()
+                            await session.refresh(player)
+                            created_players.append(player)
+                            logger.info("Auto-created virtual player '%s' in lobby %s", namespace, lobby_id)
+                        else:
+                            # Un-delete if previously soft-deleted
+                            await session.execute(
+                                VirtualPlayer.__table__.update()
+                                .where(VirtualPlayer.namespace == namespace)
+                                .where(VirtualPlayer.lobby_id == lobby_id)
+                                .values(is_deleted=False)
+                            )
+                    await session.commit()
+                # Notify about created players
+                for player in created_players:
+                    await notify_virtual_player_created(lobby_id, player)
+                await websocket.send_json({"type": "registered", "virtual_players": [p.namespace for p in created_players]})
+            elif msg_type == "get_world_state":
+                # Send full world state to the requesting client
+                await send_world_state(websocket, lobby_id)
+            elif msg_type == "add_element":
+                # Tauri host adding a world element
+                element = await create_virtual_element(lobby_id, message)
+                if element:
+                    await broadcast_world_element_change(lobby_id, "element_added", element)
+                    await websocket.send_json({"type": "ack", "msg_type": "add_element", "element_id": element.id})
+            elif msg_type == "update_element":
+                # Tauri host updating a world element
+                element = await update_virtual_element(lobby_id, message)
+                if element:
+                    await broadcast_world_element_change(lobby_id, "element_updated", element)
+                    await websocket.send_json({"type": "ack", "msg_type": "update_element", "element_id": element.id})
+                else:
+                    await websocket.send_json({"type": "error", "error": "element not found"})
+            elif msg_type == "remove_element":
+                # Tauri host removing a world element
+                element_id = message.get("element_id")
+                if await remove_virtual_element(lobby_id, element_id):
+                    await broadcast_world_element_removed(lobby_id, element_id)
+                    await websocket.send_json({"type": "ack", "msg_type": "remove_element", "element_id": element_id})
+                else:
+                    await websocket.send_json({"type": "error", "error": "element not found"})
+            elif msg_type == "player_state":
+                # Virtual player position/state updates from Tauri host
+                await update_virtual_player_state(lobby_id, message)
             else:
                 await websocket.send_json({"type": "error", "error": "unknown message", "payload": message})
     except WebSocketDisconnect:
         pass
     finally:
+        connected_lobby_ids.discard(lobby_id)
+        await broadcast_lobby_connection(lobby_id, False)
         await unregister_robot_ws(websocket)
+
+
+async def broadcast_lobby_connection(lobby_id: int, connected: bool) -> None:
+    """Broadcast lobby connection status change to all subscribers."""
+    message = {"type": "lobby_status", "lobby_id": lobby_id, "connected": connected}
+    async with lobby_status_lock:
+        dead = []
+        for ws in lobby_status_subscribers:
+            try:
+                await ws.send_json(message)
+            except Exception:
+                dead.append(ws)
+        for ws in dead:
+            lobby_status_subscribers.discard(ws)
 
 
 async def broadcast_lobby_status(robot: str, connected: bool) -> None:
@@ -1824,23 +4223,200 @@ async def broadcast_lobby_status(robot: str, connected: bool) -> None:
             lobby_status_subscribers.discard(ws)
 
 
+async def broadcast_chat_message(lobby_id: int, message: "ChatMessage") -> None:
+    """Broadcast a chat message to all subscribers of a lobby."""
+    payload = {
+        "type": "chat_message",
+        "lobby_id": lobby_id,
+        "message": {
+            "id": message.id,
+            "lobby_id": message.lobby_id,
+            "user_id": message.user_id,
+            "user_name": message.user_name,
+            "message_type": message.message_type,
+            "content": message.content,
+            "created_at": message.created_at.isoformat(),
+        },
+    }
+    async with chat_lock:
+        dead = []
+        for ws in chat_subscribers.get(lobby_id, set()):
+            try:
+                await ws.send_json(payload)
+            except Exception:
+                dead.append(ws)
+        for ws in dead:
+            chat_subscribers[lobby_id].discard(ws)
+        if not chat_subscribers.get(lobby_id):
+            chat_subscribers.pop(lobby_id, None)
+
+
+async def create_system_message(lobby_id: int, content: str) -> None:
+    """Create and broadcast a system message for a lobby."""
+    async with AsyncSessionLocal() as session:
+        message = ChatMessage(
+            lobby_id=lobby_id,
+            user_id=None,
+            user_name=None,
+            message_type="system",
+            content=content,
+        )
+        session.add(message)
+        await session.commit()
+        await session.refresh(message)
+        await broadcast_chat_message(lobby_id, message)
+
+
+async def get_lobby_id_for_robot(robot_namespace: str) -> Optional[int]:
+    """Get the lobby_id for a robot by its namespace."""
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(Bot.lobby_id)
+            .where(Bot.ros_namespace == robot_namespace)
+            .where(Bot.is_deleted.is_(False))
+            .limit(1)
+        )
+        row = result.first()
+        return row[0] if row else None
+
+
+async def notify_robot_connected(robot_namespace: str) -> None:
+    """Send a system message when a robot connects."""
+    lobby_id = await get_lobby_id_for_robot(robot_namespace)
+    if lobby_id:
+        # Get bot name for a friendlier message
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                select(Bot.name)
+                .where(Bot.ros_namespace == robot_namespace)
+                .where(Bot.is_deleted.is_(False))
+                .limit(1)
+            )
+            row = result.first()
+            bot_name = row[0] if row else robot_namespace
+        await create_system_message(lobby_id, f"{bot_name} connected")
+
+
+async def notify_robot_disconnected(robot_namespace: str) -> None:
+    """Send a system message when a robot disconnects."""
+    lobby_id = await get_lobby_id_for_robot(robot_namespace)
+    if lobby_id:
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                select(Bot.name)
+                .where(Bot.ros_namespace == robot_namespace)
+                .where(Bot.is_deleted.is_(False))
+                .limit(1)
+            )
+            row = result.first()
+            bot_name = row[0] if row else robot_namespace
+        await create_system_message(lobby_id, f"{bot_name} disconnected")
+
+
+async def notify_streaming_started(robot_namespace: str, user_email: str) -> None:
+    """Send a system message when a user starts streaming a robot."""
+    lobby_id = await get_lobby_id_for_robot(robot_namespace)
+    if lobby_id:
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                select(Bot.name)
+                .where(Bot.ros_namespace == robot_namespace)
+                .where(Bot.is_deleted.is_(False))
+                .limit(1)
+            )
+            row = result.first()
+            bot_name = row[0] if row else robot_namespace
+        await create_system_message(lobby_id, f"{user_email} started streaming {bot_name}")
+
+
+async def notify_streaming_stopped(robot_namespace: str, user_email: str) -> None:
+    """Send a system message when a user stops streaming a robot."""
+    lobby_id = await get_lobby_id_for_robot(robot_namespace)
+    if lobby_id:
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                select(Bot.name)
+                .where(Bot.ros_namespace == robot_namespace)
+                .where(Bot.is_deleted.is_(False))
+                .limit(1)
+            )
+            row = result.first()
+            bot_name = row[0] if row else robot_namespace
+        await create_system_message(lobby_id, f"{user_email} stopped streaming {bot_name}")
+
+
 @app.websocket("/api/ws/lobby-status")
 async def lobby_status_ws(websocket: WebSocket) -> None:
-    """WebSocket for browser clients to receive lobby/robot status updates."""
+    """WebSocket for browser clients to receive lobby/robot status updates and chat."""
     await websocket.accept()
     async with lobby_status_lock:
         lobby_status_subscribers.add(websocket)
-    # Send current connected robots
+    # Send current connected lobbies and robots
+    await websocket.send_json({"type": "connected_lobbies", "lobby_ids": list(connected_lobby_ids)})
     connected_robots = list(robot_forwarder_pcs.keys())
     await websocket.send_json({"type": "connected_robots", "robots": connected_robots})
+    # Track which lobbies this websocket is subscribed to for chat
+    subscribed_lobbies: set[int] = set()
     try:
         while True:
-            await websocket.receive_text()  # Keep alive, ignore messages
+            text = await websocket.receive_text()
+            try:
+                data = json.loads(text)
+                msg_type = data.get("type")
+                lobby_id = data.get("lobby_id")
+
+                if msg_type == "subscribe_chat" and lobby_id:
+                    lobby_id = int(lobby_id)
+                    async with chat_lock:
+                        chat_subscribers[lobby_id].add(websocket)
+                    subscribed_lobbies.add(lobby_id)
+                    logger.debug("WS subscribed to chat for lobby %d", lobby_id)
+
+                elif msg_type == "unsubscribe_chat" and lobby_id:
+                    lobby_id = int(lobby_id)
+                    async with chat_lock:
+                        chat_subscribers[lobby_id].discard(websocket)
+                        if not chat_subscribers[lobby_id]:
+                            chat_subscribers.pop(lobby_id, None)
+                    subscribed_lobbies.discard(lobby_id)
+                    logger.debug("WS unsubscribed from chat for lobby %d", lobby_id)
+
+                elif msg_type == "request_virtual_player" and lobby_id:
+                    # Browser requesting a new virtual player
+                    lobby_id = int(lobby_id)
+                    name = data.get("name", "Player")
+                    color = data.get("color", "#3b82f6")
+                    player = await create_virtual_player_ws(lobby_id, name, color)
+                    if player:
+                        await notify_virtual_player_created(lobby_id, player)
+                        logger.info("Created virtual player %s in lobby %d", player.namespace, lobby_id)
+                    else:
+                        await websocket.send_json({"type": "error", "error": "Failed to create virtual player"})
+
+                elif msg_type == "delete_virtual_player":
+                    # Browser requesting to delete a virtual player
+                    namespace = data.get("namespace")
+                    if namespace:
+                        lobby_id = await delete_virtual_player_ws(namespace)
+                        if lobby_id:
+                            await notify_virtual_player_deleted(lobby_id, namespace)
+                            logger.info("Deleted virtual player %s", namespace)
+                        else:
+                            await websocket.send_json({"type": "error", "error": "Virtual player not found"})
+
+            except (json.JSONDecodeError, ValueError):
+                pass  # Ignore invalid messages
     except WebSocketDisconnect:
         pass
     finally:
         async with lobby_status_lock:
             lobby_status_subscribers.discard(websocket)
+        # Clean up chat subscriptions
+        async with chat_lock:
+            for lobby_id in subscribed_lobbies:
+                chat_subscribers[lobby_id].discard(websocket)
+                if not chat_subscribers[lobby_id]:
+                    chat_subscribers.pop(lobby_id, None)
 
 
 @app.websocket("/api/ws/{robot_id}")
@@ -1907,10 +4483,14 @@ async def handle_forwarder_offer(ws: WebSocket, message: dict) -> None:
     # Clean up old data channels
     hop1_telemetry_channels.pop(robot, None)
     hop1_control_channels.pop(robot, None)
+    hop1_scan_channels.pop(robot, None)
+    hop1_slam_map_channels.pop(robot, None)
+    slam_toolbox_robots.discard(robot)
 
     pc = RTCPeerConnection()
     robot_forwarder_pcs[robot] = pc
     asyncio.create_task(broadcast_lobby_status(robot, True))
+    asyncio.create_task(notify_robot_connected(robot))
 
     @pc.on("track")
     def on_track(track: MediaStreamTrack) -> None:
@@ -1935,14 +4515,13 @@ async def handle_forwarder_offer(ws: WebSocket, message: dict) -> None:
 
     @pc.on("datachannel")
     def on_datachannel(channel: RTCDataChannel) -> None:
-        """Handle incoming data channels from ros-bridge (telemetry)."""
+        """Handle incoming data channels from ros-bridge (telemetry, map)."""
         logger.info("SFU Hop1: received data channel '%s' from ros-bridge for %s", channel.label, robot)
         if channel.label == "telemetry":
             hop1_telemetry_channels[robot] = channel
 
             @channel.on("message")
             def on_telemetry_message(message: str) -> None:
-                """Relay telemetry from ros-bridge to all connected browsers."""
                 _relay_telemetry_to_browsers(robot, message)
 
             @channel.on("open")
@@ -1954,6 +4533,78 @@ async def handle_forwarder_offer(ws: WebSocket, message: dict) -> None:
                 logger.info("SFU Hop1: telemetry data channel closed for %s", robot)
                 hop1_telemetry_channels.pop(robot, None)
 
+        elif channel.label == "scan":
+            hop1_scan_channels[robot] = channel
+            logger.info("SFU Hop1: scan channel received for %s, state=%s", robot, channel.readyState)
+
+            # Create SLAM processor for this robot if not exists
+            if robot not in slam_processors:
+                slam_processors[robot] = SlamProcessor(
+                    robot,
+                    downsample=settings.slam_map_downsample,
+                    map_update_interval=settings.slam_map_update_interval,
+                )
+                logger.info("SFU Hop1: created SlamProcessor for %s", robot)
+
+            # Create the handler once with closure over robot
+            scan_count = [0]
+
+            @channel.on("message")
+            def on_scan_message(message: str) -> None:
+                scan_count[0] += 1
+                if scan_count[0] <= 3 or scan_count[0] % 100 == 0:
+                    logger.info("SFU Hop1: received scan message %d for %s (len=%d)",
+                                scan_count[0], robot, len(message))
+                try:
+                    scan_data = json.loads(message)
+                    processor = slam_processors.get(robot)
+                    if processor:
+                        map_update = processor.process_scan(scan_data)
+                        # If slam_toolbox is providing this robot's map (Design B),
+                        # let it win — don't also broadcast the fallback grid.
+                        if map_update and robot not in slam_toolbox_robots:
+                            logger.info("SFU Hop1: sending map update for %s (scan %d)", robot, processor.scan_count)
+                            _relay_map_to_browsers(robot, json.dumps(map_update))
+                    else:
+                        logger.warning("SFU Hop1: no SLAM processor for %s", robot)
+                except Exception as e:
+                    logger.warning("SFU Hop1: scan processing error for %s: %s", robot, e, exc_info=True)
+
+            @channel.on("open")
+            def on_scan_open() -> None:
+                logger.info("SFU Hop1: scan data channel open for %s", robot)
+
+            @channel.on("close")
+            def on_scan_close() -> None:
+                logger.info("SFU Hop1: scan data channel closed for %s", robot)
+                hop1_scan_channels.pop(robot, None)
+
+        elif channel.label == "slam_map":
+            # Map produced by server-side slam_toolbox (in ros-bridge). Relay it
+            # straight to browsers. The ros-bridge opens this channel for every
+            # robot even when slam_toolbox produces nothing, so only mark the
+            # robot as slam_toolbox-managed (which mutes the scan-based fallback
+            # SlamProcessor) once an actual map message arrives.
+            hop1_slam_map_channels[robot] = channel
+            logger.info("SFU Hop1: slam_map channel received for %s", robot)
+
+            @channel.on("message")
+            def on_slam_map_message(message: str) -> None:
+                if robot not in slam_toolbox_robots:
+                    slam_toolbox_robots.add(robot)
+                    logger.info("SFU Hop1: slam_toolbox map active for %s, muting fallback", robot)
+                _relay_map_to_browsers(robot, message)
+
+            @channel.on("open")
+            def on_slam_map_open() -> None:
+                logger.info("SFU Hop1: slam_map data channel open for %s", robot)
+
+            @channel.on("close")
+            def on_slam_map_close() -> None:
+                logger.info("SFU Hop1: slam_map data channel closed for %s", robot)
+                hop1_slam_map_channels.pop(robot, None)
+                slam_toolbox_robots.discard(robot)
+
     @pc.on("connectionstatechange")
     async def on_state() -> None:
         state = pc.connectionState
@@ -1963,6 +4614,7 @@ async def handle_forwarder_offer(ws: WebSocket, message: dict) -> None:
             robot_incoming_audio_tracks.pop(robot, None)
             robot_forwarder_pcs.pop(robot, None)
             asyncio.create_task(broadcast_lobby_status(robot, False))
+            asyncio.create_task(notify_robot_disconnected(robot))
             # Clean up browser audio relay (browser->robot direction)
             relay = browser_audio_relay_tracks.pop(robot, None)
             if relay:
@@ -1970,8 +4622,16 @@ async def handle_forwarder_offer(ws: WebSocket, message: dict) -> None:
             # Clean up data channels
             hop1_telemetry_channels.pop(robot, None)
             hop1_control_channels.pop(robot, None)
+            capability_broker.hop1_closed(robot)
+            hop1_scan_channels.pop(robot, None)
             hop2_telemetry_channels.pop(robot, None)
             hop2_control_channels.pop(robot, None)
+            hop2_map_channels.pop(robot, None)
+            # Clean up group audio mixer and control aggregator for this robot
+            mixer = group_audio_mixers.pop(robot, None)
+            agg = control_aggregators.pop(robot, None)
+            if agg:
+                agg.stop()
             # Close all Hop 2 PCs for this robot
             browser_pcs = robot_browser_pcs.pop(robot, [])
             for bpc in browser_pcs:
@@ -1989,6 +4649,10 @@ async def handle_forwarder_offer(ws: WebSocket, message: dict) -> None:
 
     # Add browser audio relay as a new track
     # This creates a new m-line in the answer for sending audio to ros-bridge
+    # Check PC state first to avoid race with ICE failure
+    if pc.connectionState in ("closed", "failed"):
+        logger.warning("SFU Hop1: PC already closed/failed for %s, aborting", robot)
+        return
     pc.addTrack(browser_relay)
     logger.info("SFU Hop1: added browser audio relay for %s", robot)
 
@@ -2004,6 +4668,11 @@ async def handle_forwarder_offer(ws: WebSocket, message: dict) -> None:
     def on_control_close() -> None:
         logger.info("SFU Hop1: control data channel closed for %s", robot)
         hop1_control_channels.pop(robot, None)
+
+    # Create capability data channel (goal/proof envelopes; ordered+reliable —
+    # prev-chains rely on it far less than joy traffic relies on latency)
+    cap_channel = pc.createDataChannel("cap")
+    capability_broker.hop1_open(robot, cap_channel)
 
     answer = await pc.createAnswer()
     await pc.setLocalDescription(answer)
@@ -2030,21 +4699,95 @@ async def start_webrtc(
     Supports renegotiation (e.g., when browser adds mic track).
     """
     # Check if this is a renegotiation (user already has a PC for this robot)
-    user_pc_key = f"{robot_id}:{current_user.email}"
-    existing_pc = browser_user_pcs.get(user_pc_key)
-    logger.info("SFU Hop2: offer for %s (user=%s, existing_pc=%s, state=%s)",
-                robot_id, current_user.email, existing_pc is not None,
-                existing_pc.connectionState if existing_pc else "none")
+    # Include client_id to allow same user on multiple devices
+    client_id = offer.client_id or "default"
+    user_pc_key = f"{robot_id}:{current_user.email}:{client_id}"
 
-    # Only renegotiate if PC is fully connected (not disconnected/connecting)
+    # Get or create a lock for this user to serialize signaling operations
+    if user_pc_key not in user_signaling_locks:
+        user_signaling_locks[user_pc_key] = asyncio.Lock()
+    signaling_lock = user_signaling_locks[user_pc_key]
+
+    # Try to acquire lock with timeout - if another request is processing, wait briefly
+    try:
+        async with asyncio.timeout(5.0):
+            await signaling_lock.acquire()
+    except asyncio.TimeoutError:
+        logger.warning("SFU Hop2: signaling lock timeout for %s", user_pc_key)
+        raise HTTPException(status_code=409, detail="Signaling busy, try again")
+
+    try:
+        return await _handle_browser_offer_inner(robot_id, offer, current_user, user_pc_key)
+    finally:
+        signaling_lock.release()
+
+
+async def _handle_browser_offer_inner(
+    robot_id: str,
+    offer: WebRTCOffer,
+    current_user: User,
+    user_pc_key: str,
+) -> dict[str, str]:
+    """Inner implementation of browser offer handling (called with lock held)."""
+    existing_pc = browser_user_pcs.get(user_pc_key)
+    logger.info("SFU Hop2: offer for %s (user=%s, existing_pc=%s, state=%s, sig=%s)",
+                robot_id, current_user.email, existing_pc is not None,
+                existing_pc.connectionState if existing_pc else "none",
+                existing_pc.signalingState if existing_pc else "none")
+
+    # Only renegotiate if PC is fully connected and in stable signaling state
     if existing_pc and existing_pc.connectionState == "connected":
-        # Renegotiation: reuse existing PC
+        # Check signaling state - can only accept offer in "stable" state
+        if existing_pc.signalingState != "stable":
+            # PC is stuck in non-stable state (previous renegotiation might have failed)
+            # Close it and proceed to create a new one
+            logger.warning("SFU Hop2: closing stuck PC for %s (signaling state=%s, will create new)",
+                          user_pc_key, existing_pc.signalingState)
+            browser_user_pcs.pop(user_pc_key, None)
+            pcs = robot_browser_pcs.get(robot_id, [])
+            if existing_pc in pcs:
+                pcs.remove(existing_pc)
+            try:
+                await existing_pc.close()
+            except Exception:
+                pass
+            existing_pc = None  # Fall through to new PC creation
+
+    if existing_pc and existing_pc.connectionState == "connected":
+        # Renegotiation: reuse existing PC (signaling state is stable)
         logger.info("SFU Hop2: renegotiating for %s (user=%s)", robot_id, current_user.email)
         pc = existing_pc
-        await pc.setRemoteDescription(RTCSessionDescription(sdp=offer.sdp, type=offer.type))
-        answer = await pc.createAnswer()
-        await pc.setLocalDescription(answer)
-        return {"sdp": pc.localDescription.sdp, "type": pc.localDescription.type}
+        try:
+            # First set remote description to parse browser's offer and create transceivers
+            await pc.setRemoteDescription(RTCSessionDescription(sdp=offer.sdp, type=offer.type))
+
+            # Now bind pending relayed audio tracks to the transceivers browser created
+            added_relayed = add_pending_relayed_audio_to_pc(user_pc_key, pc)
+            if added_relayed > 0:
+                logger.info("SFU Hop2: bound %d pending relayed audio tracks during renegotiation for %s",
+                           added_relayed, user_pc_key)
+
+            # Log transceiver state after binding
+            for i, trans in enumerate(pc.getTransceivers()):
+                logger.info("SFU Hop2: transceiver %d - kind=%s, direction=%s, sender.track=%s",
+                           i, trans.kind, trans.direction,
+                           trans.sender.track.id if trans.sender.track else None)
+
+            answer = await pc.createAnswer()
+            await pc.setLocalDescription(answer)
+            return {"sdp": pc.localDescription.sdp, "type": pc.localDescription.type}
+        except Exception as e:
+            logger.error("SFU Hop2: renegotiation failed for %s: %s", user_pc_key, e)
+            # If renegotiation fails, close the stale PC and let client reconnect
+            browser_user_pcs.pop(user_pc_key, None)
+            pcs = robot_browser_pcs.get(robot_id, [])
+            if existing_pc in pcs:
+                pcs.remove(existing_pc)
+            try:
+                await existing_pc.close()
+            except Exception:
+                pass
+            raise HTTPException(status_code=503, detail="Renegotiation failed, please reconnect")
 
     # Clean up existing PC if it exists but isn't connected
     if existing_pc:
@@ -2058,8 +4801,15 @@ async def start_webrtc(
     # Track active viewers and trigger stream start if first viewer
     was_empty = not active_robot_streams.get(robot_id)
     active_robot_streams[robot_id].add(current_user.email)
+    asyncio.create_task(notify_streaming_started(robot_id, current_user.email))
     if was_empty:
         await notify_bridge_stream(robot_id, True)
+
+    # Internal virtual lobby: if this namespace is a virtual player and no real
+    # forwarder is producing, generate the first-person view server-side. This
+    # registers a camera track into robot_incoming_tracks so the relay path below
+    # streams it exactly like a forwarder track.
+    await ensure_virtual_source(robot_id)
 
     # Wait for forwarder track if not yet available
     incoming_track = robot_incoming_tracks.get(robot_id)
@@ -2094,67 +4844,233 @@ async def start_webrtc(
     @pc.on("track")
     def on_browser_track(track: MediaStreamTrack) -> None:
         """Handle incoming audio track from browser mic."""
+        logger.info("SFU Hop2: received track kind=%s for %s (user=%s, id=%s)",
+                   track.kind, robot_id, current_user.email, track.id)
         if track.kind == "audio":
-            logger.info("SFU Hop2: received browser audio track for %s (user=%s)", robot_id, current_user.email)
+            logger.info("SFU Hop2: starting audio forwarding for %s (user=%s)", robot_id, current_user.email)
+            # Store the actual track for MediaRelay (for group audio to other users)
+            user_incoming_audio_tracks[user_pc_key] = track
+            logger.info("SFU Hop2: stored user audio track for %s (id=%s)", user_pc_key, track.id)
+
             # Cancel any existing forwarding task for this user
             old_task = browser_audio_forward_tasks.pop(user_pc_key, None)
             if old_task and not old_task.done():
                 logger.info("SFU Hop2: cancelling old audio forward task for %s", user_pc_key)
                 old_task.cancel()
-            # Start new forwarding task
-            task = asyncio.ensure_future(_forward_browser_audio(robot_id, track))
+            # Start new forwarding task (pass user_key for group audio)
+            task = asyncio.ensure_future(_forward_browser_audio(robot_id, track, user_pc_key))
             browser_audio_forward_tasks[user_pc_key] = task
+
+            # Relay this user's audio to existing users via browser-initiated renegotiation
+            asyncio.ensure_future(relay_new_user_audio_to_existing_users(robot_id, user_pc_key))
 
     @pc.on("datachannel")
     def on_browser_datachannel(channel: RTCDataChannel) -> None:
         """Handle incoming data channels from browser (control commands)."""
-        logger.info("SFU Hop2: received data channel '%s' from browser for %s (user=%s)",
-                    channel.label, robot_id, current_user.email)
-        if channel.label == "control":
+        logger.info("SFU Hop2: received data channel '%s' from browser for %s (user=%s, state=%s)",
+                    channel.label, robot_id, current_user.email, channel.readyState)
+        if channel.label == "cap":
+            capability_broker.browser_open(robot_id, user_pc_key, channel)
+        elif channel.label == "control":
             hop2_control_channels[robot_id].append(channel)
+            # Store channel for this user (for server-initiated renegotiation)
+            user_control_channels[user_pc_key] = channel
+            # Get control aggregator for multi-user command averaging
+            aggregator = get_or_create_control_aggregator(robot_id)
+
+            # Track this user as a connected streamer immediately
+            # (channel may already be open when received, so on_open might not fire)
+            if user_pc_key not in connected_streamers[robot_id]:
+                connected_streamers[robot_id].add(user_pc_key)
+                logger.info("SFU Hop2: added %s to connected_streamers (now %d)",
+                           user_pc_key, len(connected_streamers[robot_id]))
+                # Connected set feeds the speaker-vote unanimity rule
+                capability_broker.streamers_changed(robot_id)
 
             @channel.on("message")
             def on_control_message(message: str) -> None:
-                """Relay control commands from browser to ros-bridge."""
-                _relay_control_to_robot(robot_id, message)
+                """Handle control messages: joystick commands, audio routing, speaker votes, and renegotiation."""
+                try:
+                    data = json.loads(message)
+                    if data.get("type") == "audio_routing":
+                        # Update audio routing preferences for this user
+                        user_audio_routing[user_pc_key] = {
+                            "to_group": data.get("to_group", False),
+                            "to_robot": data.get("to_robot", False),
+                        }
+                        logger.info("Audio routing for %s: to_group=%s, to_robot=%s",
+                                   user_pc_key, data.get("to_group"), data.get("to_robot"))
+                        return
+                    if data.get("type") == "renegotiation_answer":
+                        # Handle renegotiation answer from browser
+                        logger.info("Received renegotiation answer from %s", user_pc_key)
+                        future = pending_renegotiations.get(user_pc_key)
+                        if future and not future.done():
+                            future.set_result({
+                                "sdp": data.get("sdp"),
+                                "type": data.get("sdp_type", "answer"),
+                            })
+                        return
+                except json.JSONDecodeError:
+                    pass
+                # Internal virtual lobby: drive the server-side sim directly
+                # instead of relaying the joystick to a (non-existent) robot.
+                world = virtual_ns_world.get(robot_id)
+                if world is not None:
+                    try:
+                        jd = json.loads(message)
+                        if jd.get("type") == "joy":
+                            world.set_command_from_joy(robot_id, jd.get("axes") or [])
+                    except json.JSONDecodeError:
+                        pass
+                    return
+                # Otherwise it's a joystick command
+                aggregator.push_command(user_pc_key, message)
 
             @channel.on("open")
             def on_open() -> None:
-                logger.info("SFU Hop2: control data channel open for %s (user=%s)", robot_id, current_user.email)
+                logger.info("SFU Hop2: control data channel open event for %s (user=%s)", robot_id, current_user.email)
+                # Ensure user is tracked (redundant but safe)
+                if user_pc_key not in connected_streamers[robot_id]:
+                    connected_streamers[robot_id].add(user_pc_key)
+                    capability_broker.streamers_changed(robot_id)
 
             @channel.on("close")
             def on_close() -> None:
                 logger.info("SFU Hop2: control data channel closed for %s (user=%s)", robot_id, current_user.email)
                 if channel in hop2_control_channels.get(robot_id, []):
                     hop2_control_channels[robot_id].remove(channel)
+                # Remove user's control channel reference
+                user_control_channels.pop(user_pc_key, None)
+                # Remove user from aggregator
+                aggregator.remove_user(user_pc_key)
+                # Remove user from connected streamers; the broker retracts
+                # their connection-scoped facts (votes) and re-resolves
+                connected_streamers[robot_id].discard(user_pc_key)
+                capability_broker.streamers_changed(robot_id)
+
+    # Track if we've already handled the "connected" state for this PC
+    pc_connected_handled = False
+    pc_id = id(pc)  # Unique ID for this PC for logging
 
     @pc.on("connectionstatechange")
     async def on_state() -> None:
+        nonlocal pc_connected_handled
         state = pc.connectionState
-        logger.info("SFU Hop2 state for %s: %s (pcs=%d, viewers=%s)",
-                    robot_id, state, len(robot_browser_pcs.get(robot_id, [])),
-                    active_robot_streams.get(robot_id))
-        if state in ("failed", "closed", "disconnected"):
+        logger.info("SFU Hop2 state for %s (pc=%d): %s (pcs=%d, handled=%s, pairs=%s)",
+                    user_pc_key, pc_id, state, len(robot_browser_pcs.get(robot_id, [])),
+                    pc_connected_handled, list(introduced_user_pairs.get(robot_id, set())))
+        if state == "connected" and not pc_connected_handled:
+            pc_connected_handled = True
+            logger.info("SFU Hop2: FIRST connected for %s (pc=%d), will queue audio",
+                       user_pc_key, pc_id)
+            # New user fully connected - existing users' audio is added during initial connection
+            # via MediaRelay. New user's audio is relayed to existing users when they enable mic
+            # (handled in on_browser_track via relay_new_user_audio_to_existing_users)
+            pass
+        elif state == "connected" and pc_connected_handled:
+            logger.info("SFU Hop2: repeated connected for %s (pc=%d), skipping", user_pc_key, pc_id)
+        elif state in ("failed", "closed", "disconnected"):
             pcs = robot_browser_pcs.get(robot_id, [])
             if pc in pcs:
                 pcs.remove(pc)
                 logger.info("SFU Hop2: removed pc, remaining=%d", len(pcs))
             # Clean up user PC tracking and audio forward task
             browser_user_pcs.pop(user_pc_key, None)
+            user_control_channels.pop(user_pc_key, None)
             old_task = browser_audio_forward_tasks.pop(user_pc_key, None)
             if old_task and not old_task.done():
                 old_task.cancel()
             # Note: data channels are cleaned up in their on_close handlers
             await pc.close()
-            # Don't auto-stop stream - let it keep running to avoid race conditions
+            # Clean up user's audio broadcaster after a delay (allows for reconnection)
+            # If user reconnects within 5s, their broadcaster will be reused
+            async def delayed_broadcaster_cleanup():
+                await asyncio.sleep(5.0)
+                # Only stop if user hasn't reconnected (no new PC with same key)
+                if user_pc_key not in browser_user_pcs:
+                    broadcaster = user_audio_broadcasters.pop(user_pc_key, None)
+                    if broadcaster:
+                        broadcaster.stop()
+                        logger.info("Cleaned up broadcaster for %s after delay", user_pc_key)
+                    # Clean up audio slots
+                    slots = user_audio_slots.pop(user_pc_key, None)
+                    if slots:
+                        logger.info("Cleaned up %d audio slots for %s", len(slots), user_pc_key)
+                    # Clean up user's incoming audio track
+                    user_incoming_audio_tracks.pop(user_pc_key, None)
+                    # Clean up relayed tracks for this user
+                    user_audio_relays.pop(user_pc_key, None)
+                    # Clean up pending relayed audio for this user
+                    pending_relayed_audio.pop(user_pc_key, None)
+                    # Clean up relayed tracks where this user is the source
+                    for target_key in list(user_audio_relays.keys()):
+                        if user_pc_key in user_audio_relays.get(target_key, {}):
+                            user_audio_relays[target_key].pop(user_pc_key, None)
+                    logger.info("Cleaned up audio relays for %s", user_pc_key)
+                    # Clean up introduced pairs for this user so fresh connections work
+                    pairs_to_remove = [p for p in introduced_user_pairs[robot_id] if user_pc_key in p]
+                    for pair in pairs_to_remove:
+                        introduced_user_pairs[robot_id].discard(pair)
+                    if pairs_to_remove:
+                        logger.info("Cleaned up %d introduced pairs for %s", len(pairs_to_remove), user_pc_key)
+            asyncio.create_task(delayed_broadcaster_cleanup())
+            # Clean up user from group audio mixer and control aggregator
+            mixer = group_audio_mixers.get(robot_id)
+            if mixer:
+                mixer.remove_user(user_pc_key)
+            agg = control_aggregators.get(robot_id)
+            if agg:
+                agg.remove_user(user_pc_key)
+            # Release the streaming lock for this user immediately
+            active_robot_streams[robot_id].discard(current_user.email)
+            asyncio.create_task(notify_streaming_stopped(robot_id, current_user.email))
+            logger.info("SFU Hop2: released stream lock for %s (user=%s), remaining viewers=%s",
+                        robot_id, current_user.email, active_robot_streams.get(robot_id))
+            # Stop robot stream if no more viewers
             remaining = robot_browser_pcs.get(robot_id)
             if not remaining:
-                logger.info("SFU Hop2: no viewers for %s, but keeping stream active", robot_id)
+                logger.info("SFU Hop2: no viewers for %s, stopping robot stream", robot_id)
+                await notify_bridge_stream(robot_id, False)
+                # Internal virtual lobby: persist final pose and stop the sim.
+                await teardown_virtual_source(robot_id)
 
     pc.addTrack(relayed_video_track)
+
+    # Add robot audio track (pass-through from ros-bridge)
     if relayed_audio_track:
         pc.addTrack(relayed_audio_track)
-        logger.info("SFU Hop2: added robot audio track for %s", robot_id)
+        logger.info("SFU Hop2: added robot audio track for %s (user=%s)", robot_id, current_user.email)
+    else:
+        logger.warning("SFU Hop2: no robot audio track for %s", robot_id)
+
+    # Create this user's audio broadcaster (for when they send audio to group)
+    get_or_create_user_broadcaster(user_pc_key, robot_id)
+
+    # Add existing users' audio tracks via MediaRelay (proper approach that aiortc consumes)
+    # Find other users who have incoming audio tracks for this robot
+    other_user_audio_tracks = [
+        (key, track) for key, track in user_incoming_audio_tracks.items()
+        if key.startswith(f"{robot_id}:") and key != user_pc_key
+    ]
+    logger.info("SFU Hop2: found %d other users with audio tracks for %s", len(other_user_audio_tracks), user_pc_key)
+
+    # Initialize relay tracking for this user
+    if user_pc_key not in user_audio_relays:
+        user_audio_relays[user_pc_key] = {}
+
+    # Add relayed audio tracks for each existing user (up to NUM_GROUP_AUDIO_SLOTS)
+    for source_user_key, source_track in other_user_audio_tracks[:NUM_GROUP_AUDIO_SLOTS]:
+        try:
+            # Create a relayed copy via MediaRelay
+            relayed_track = media_relay.subscribe(source_track)
+            user_audio_relays[user_pc_key][source_user_key] = relayed_track
+            pc.addTrack(relayed_track)
+            logger.info("SFU Hop2: added relayed audio track %s -> %s (track_id=%s)",
+                       source_user_key, user_pc_key, relayed_track.id)
+        except Exception as e:
+            logger.error("SFU Hop2: failed to add relayed audio track %s -> %s: %s",
+                        source_user_key, user_pc_key, e)
 
     # Create telemetry data channel to send to browser
     telemetry_channel = pc.createDataChannel("telemetry", ordered=False)
@@ -2169,6 +5085,20 @@ async def start_webrtc(
         logger.info("SFU Hop2: telemetry data channel closed for %s (user=%s)", robot_id, current_user.email)
         if telemetry_channel in hop2_telemetry_channels.get(robot_id, []):
             hop2_telemetry_channels[robot_id].remove(telemetry_channel)
+
+    # Create map data channel to send SLAM minimap to browser
+    map_channel = pc.createDataChannel("map", ordered=False)
+    hop2_map_channels[robot_id].append(map_channel)
+
+    @map_channel.on("open")
+    def on_map_open() -> None:
+        logger.info("SFU Hop2: map data channel open for %s (user=%s)", robot_id, current_user.email)
+
+    @map_channel.on("close")
+    def on_map_close() -> None:
+        logger.info("SFU Hop2: map data channel closed for %s (user=%s)", robot_id, current_user.email)
+        if map_channel in hop2_map_channels.get(robot_id, []):
+            hop2_map_channels[robot_id].remove(map_channel)
 
     browser_offer = RTCSessionDescription(sdp=offer.sdp, type=offer.type)
     await pc.setRemoteDescription(browser_offer)
@@ -2199,6 +5129,27 @@ def _relay_telemetry_to_browsers(robot_id: str, message: str) -> None:
                 logger.debug("Failed to relay telemetry to browser for %s: %s", robot_id, e)
 
 
+def _relay_map_to_browsers(robot_id: str, message: str) -> None:
+    """Relay map data from ros-bridge to all connected browsers via data channels."""
+    channels = hop2_map_channels.get(robot_id, [])
+    if not channels:
+        return
+    # Log occasionally
+    if not hasattr(_relay_map_to_browsers, "_count"):
+        _relay_map_to_browsers._count = {}
+    _relay_map_to_browsers._count[robot_id] = _relay_map_to_browsers._count.get(robot_id, 0) + 1
+    if _relay_map_to_browsers._count[robot_id] % 10 == 1:
+        logger.info("DC relay map %d for %s to %d browsers",
+                    _relay_map_to_browsers._count[robot_id], robot_id, len(channels))
+    # Send to all browser channels
+    for channel in channels:
+        if channel.readyState == "open":
+            try:
+                channel.send(message)
+            except Exception as e:
+                logger.debug("Failed to relay map to browser for %s: %s", robot_id, e)
+
+
 def _relay_control_to_robot(robot_id: str, message: str) -> None:
     """Relay control command from browser to ros-bridge via data channel."""
     channel = hop1_control_channels.get(robot_id)
@@ -2217,14 +5168,18 @@ def _relay_control_to_robot(robot_id: str, message: str) -> None:
         logger.warning("Failed to relay control to robot %s: %s", robot_id, e)
 
 
-async def _forward_browser_audio(robot_id: str, track: MediaStreamTrack) -> None:
-    """Forward audio frames from browser to the browser audio relay track."""
+async def _forward_browser_audio(robot_id: str, track: MediaStreamTrack, user_key: str = None) -> None:
+    """Forward audio frames from browser to the robot and user broadcaster."""
     relay = browser_audio_relay_tracks.get(robot_id)
     if not relay:
         logger.warning("No browser audio relay track for %s", robot_id)
         return
 
-    logger.info("Starting browser audio forwarding for %s", robot_id)
+    # Get this user's broadcaster for group audio
+    broadcaster = user_audio_broadcasters.get(user_key) if user_key else None
+
+    logger.info("Starting browser audio forwarding for %s (user=%s, broadcaster=%s)",
+               robot_id, user_key, broadcaster is not None)
     frame_count = 0
     try:
         while True:
@@ -2241,6 +5196,25 @@ async def _forward_browser_audio(robot_id: str, track: MediaStreamTrack) -> None
                 except Exception:
                     pass
 
-            relay.push_frame(frame)
+            # Check routing preferences for this user
+            routing = user_audio_routing.get(user_key, {"to_group": False, "to_robot": False})
+
+            # Log routing state periodically
+            if frame_count % 100 == 1:
+                logger.info("_forward_browser_audio %s: frame %d, routing=%s",
+                           user_key, frame_count, routing)
+
+            # Forward to robot if enabled
+            if routing.get("to_robot", False):
+                relay.push_frame(frame)
+
+            # Push to user's broadcaster for other users to hear if enabled
+            if broadcaster and routing.get("to_group", False):
+                broadcaster.push_frame(frame)
+                if frame_count % 200 == 1:
+                    logger.info("Pushed frame %d to broadcaster for %s (to_group=True)", frame_count, user_key)
     except Exception as e:
-        logger.info("Browser audio forwarding ended for %s: %s", robot_id, e)
+        logger.info("Browser audio forwarding ended for %s (user=%s): %s", robot_id, user_key, e)
+        # Clean up routing when they disconnect (broadcaster cleanup in PC handler)
+        if user_key:
+            user_audio_routing.pop(user_key, None)

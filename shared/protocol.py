@@ -32,6 +32,18 @@ class MessageType(str, Enum):
     SUBSCRIBE = "subscribe"
     UNSUBSCRIBE = "unsubscribe"
     HEARTBEAT = "heartbeat"
+    # Virtual World (Tauri ↔ API)
+    GET_WORLD_STATE = "get_world_state"
+    WORLD_STATE = "world_state"
+    ADD_ELEMENT = "add_element"
+    UPDATE_ELEMENT = "update_element"
+    REMOVE_ELEMENT = "remove_element"
+    ELEMENT_ADDED = "element_added"
+    ELEMENT_UPDATED = "element_updated"
+    ELEMENT_REMOVED = "element_removed"
+    PLAYER_STATE = "player_state"
+    VIRTUAL_PLAYER_CREATED = "virtual_player_created"
+    VIRTUAL_PLAYER_DELETED = "virtual_player_deleted"
 
 
 class InputSource(str, Enum):
@@ -564,3 +576,124 @@ ROSMASTER_A1_PROFILE = RobotControlProfile(
         "camera_tilt": 0.05,
     },
 )
+
+
+# ============================================================================
+# VIRTUAL WORLD (Tauri Desktop App ↔ API)
+# ============================================================================
+
+class VirtualElementType(str, Enum):
+    WALL = "wall"
+    FRUIT = "fruit"
+    NOTE = "note"
+    OBSTACLE = "obstacle"
+
+
+@dataclass
+class VirtualWorldElement:
+    """Static element in the virtual 3D world."""
+    id: int = 0
+    element_type: str = "wall"
+    x: float = 0.0
+    y: float = 0.0
+    z: float = 0.0
+    width: Optional[float] = None
+    height: Optional[float] = None
+    depth: Optional[float] = None
+    rotation: float = 0.0
+    data: Optional[str] = None  # JSON for element-specific data
+
+    def to_dict(self) -> Dict:
+        d = {
+            "id": self.id,
+            "element_type": self.element_type,
+            "x": self.x,
+            "y": self.y,
+            "z": self.z,
+            "rotation": self.rotation,
+        }
+        if self.width is not None:
+            d["width"] = self.width
+        if self.height is not None:
+            d["height"] = self.height
+        if self.depth is not None:
+            d["depth"] = self.depth
+        if self.data is not None:
+            d["data"] = self.data
+        return d
+
+    @classmethod
+    def from_dict(cls, d: Dict) -> "VirtualWorldElement":
+        return cls(
+            id=d.get("id", 0),
+            element_type=d.get("element_type", "wall"),
+            x=d.get("x", 0.0),
+            y=d.get("y", 0.0),
+            z=d.get("z", 0.0),
+            width=d.get("width"),
+            height=d.get("height"),
+            depth=d.get("depth"),
+            rotation=d.get("rotation", 0.0),
+            data=d.get("data"),
+        )
+
+
+@dataclass
+class VirtualPlayer:
+    """Virtual player (cube) that can be spawned and controlled in the virtual world."""
+    id: int = 0
+    namespace: str = ""
+    name: str = ""
+    x: float = 0.0
+    y: float = 0.0
+    z: float = 0.5
+    yaw: float = 0.0
+    color: str = "#3b82f6"
+
+    def to_dict(self) -> Dict:
+        return {
+            "id": self.id,
+            "namespace": self.namespace,
+            "name": self.name,
+            "x": self.x,
+            "y": self.y,
+            "z": self.z,
+            "yaw": self.yaw,
+            "color": self.color,
+        }
+
+    @classmethod
+    def from_dict(cls, d: Dict) -> "VirtualPlayer":
+        return cls(
+            id=d.get("id", 0),
+            namespace=d.get("namespace", ""),
+            name=d.get("name", ""),
+            x=d.get("x", 0.0),
+            y=d.get("y", 0.0),
+            z=d.get("z", 0.5),
+            yaw=d.get("yaw", 0.0),
+            color=d.get("color", "#3b82f6"),
+        )
+
+
+@dataclass
+class VirtualWorldState:
+    """Full state of the virtual world for a lobby."""
+    lobby_id: int = 0
+    elements: List[VirtualWorldElement] = field(default_factory=list)
+    players: List[VirtualPlayer] = field(default_factory=list)
+
+    def to_dict(self) -> Dict:
+        return {
+            "lobby_id": self.lobby_id,
+            "elements": [e.to_dict() for e in self.elements],
+            "players": [p.to_dict() for p in self.players],
+        }
+
+    @classmethod
+    def from_dict(cls, d: Dict) -> "VirtualWorldState":
+        return cls(
+            lobby_id=d.get("lobby_id", 0),
+            elements=[VirtualWorldElement.from_dict(e) for e in d.get("elements", [])],
+            players=[VirtualPlayer.from_dict(p) for p in d.get("players", [])],
+        )

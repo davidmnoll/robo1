@@ -11,5 +11,8 @@
   "devDependencies": {
     "typescript": "^5.5.4",
     "vite": "^7.3.1"
+  },
+  "dependencies": {
+    "nipplejs": "^1.0.4"
   }
 }

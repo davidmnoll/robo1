@@ -1,118 +1,134 @@
 # Rosmaster A1 Pi Robot - ROS2 Package
 PI_HOST ?= pi@raspberrypi.local
 REMOTE_DIR ?= /home/pi/share/rosmaster
-CONTAINER_DIR ?= /root/share/rosmaster
 ROBOT_ID ?= rosmaster1
 ROS_DOMAIN_ID ?= 61
-# Discovery Server - set to your laptop/server IP
-DISCOVERY_SERVER ?= 10.0.0.185:11811
 
-.PHONY: help sync-to sync-from ssh shell start stop logs build run run-controller run-camera
+# Docker image settings
+REGISTRY ?= 192.168.2.51:5000
+BASE_IMAGE ?= $(REGISTRY)/ros-humble-a1:2.1.3
+IMAGE_NAME ?= $(REGISTRY)/ros-humble-a1
+IMAGE_TAG ?= 2.3.0
+
+.PHONY: help deploy restart stop logs status ssh shell
 
 help:
 	@echo "Rosmaster A1 Pi Robot"
 	@echo ""
-	@echo "From dev machine:"
-	@echo "  make sync-to     - Push code to Pi"
-	@echo "  make sync-from   - Pull code from Pi"
-	@echo "  make deploy      - Sync + build (one command)"
-	@echo "  make ssh         - SSH to the Pi"
-	@echo "  make shell       - Shell into Docker container"
-	@echo "  make build-remote - Build package on Pi"
-	@echo "  make start       - Start robot (remote)"
-	@echo "  make stop        - Stop robot (remote)"
-	@echo "  make logs        - Tail logs (remote)"
+	@echo "Commands (run from dev machine):"
+	@echo "  make deploy   - Push code, build, and restart robot"
+	@echo "  make restart  - Restart robot (no code sync)"
+	@echo "  make stop     - Stop robot"
+	@echo "  make logs     - Tail robot logs"
+	@echo "  make status   - Check robot status"
+	@echo "  make ssh      - SSH to Pi"
+	@echo "  make shell    - Shell into container"
 	@echo ""
-	@echo "On robot (in container):"
-	@echo "  make build         - Build the ROS2 package"
-	@echo "  make run           - Launch all services"
-	@echo "  make run-controller - Controller only"
-	@echo "  make run-camera    - Camera only"
+	@echo "Config: PI_HOST=$(PI_HOST) ROBOT_ID=$(ROBOT_ID)"
+
+deploy:
+	@echo "==> Stopping robot first..."
+	@ssh $(PI_HOST) "sudo systemctl stop rosmaster.service 2>/dev/null" || true
+	@sleep 1
 	@echo ""
-	@echo "Config: ROBOT_ID=$(ROBOT_ID) ROS_DOMAIN_ID=$(ROS_DOMAIN_ID)"
+	@echo "==> Syncing code..."
+	@rsync -avz --checksum --filter=':- .gitignore' ./ $(PI_HOST):$(REMOTE_DIR)/
+	@echo ""
+	@echo "==> Configuring Pi..."
+	@ssh $(PI_HOST) "chmod +x $(REMOTE_DIR)/setup/configure-pi.sh && $(REMOTE_DIR)/setup/configure-pi.sh"
+	@echo ""
+	@echo "==> Setting up udev rules..."
+	@ssh $(PI_HOST) "sudo cp $(REMOTE_DIR)/setup/99-rosmaster-serial.rules /etc/udev/rules.d/ 2>/dev/null && sudo udevadm control --reload-rules && sudo udevadm trigger" || true
+	@echo ""
+	@echo "==> Setting up container..."
+	@ssh $(PI_HOST) "chmod +x $(REMOTE_DIR)/setup/run-container.sh $(REMOTE_DIR)/start-robot.sh $(REMOTE_DIR)/stop-robot.sh"
+	@ssh $(PI_HOST) "cp $(REMOTE_DIR)/setup/run-container.sh /home/pi/"
+	@ssh $(PI_HOST) "/home/pi/run-container.sh"
+	@echo ""
+	@echo "==> Building ROS package..."
+	@ssh $(PI_HOST) "docker exec rosmaster bash -c '\
+		source /opt/ros/humble/setup.bash && \
+		cd /root/share && \
+		colcon build --packages-select rosmaster_robot --symlink-install'"
+	@echo ""
+	@echo "==> Installing service..."
+	@ssh $(PI_HOST) "sudo cp $(REMOTE_DIR)/rosmaster.service /etc/systemd/system/ && sudo systemctl daemon-reload && sudo systemctl enable rosmaster.service"
+	@echo ""
+	@echo "==> Starting robot..."
+	@ssh $(PI_HOST) "sudo systemctl start rosmaster.service"
+	@sleep 3
+	@$(MAKE) status --no-print-directory
 
-# ── Remote targets (run from dev machine) ──────────────────────────
+restart:
+	@echo "Restarting robot..."
+	@ssh $(PI_HOST) "/home/pi/run-container.sh 2>/dev/null" || true
+	@ssh $(PI_HOST) "sudo systemctl restart rosmaster.service"
+	@sleep 2
+	@$(MAKE) status --no-print-directory
 
-sync-to:
-	rsync -avz --filter=':- .gitignore' ./ $(PI_HOST):$(REMOTE_DIR)/
-	@echo "Synced to $(PI_HOST):$(REMOTE_DIR)"
+stop:
+	@ssh $(PI_HOST) "sudo systemctl stop rosmaster.service"
+	@echo "Robot stopped."
 
-sync-from:
-	rsync -avz --filter=':- .gitignore' $(PI_HOST):$(REMOTE_DIR)/ ./
-	@echo "Synced from $(PI_HOST):$(REMOTE_DIR)"
+logs:
+	ssh $(PI_HOST) "sudo journalctl -u rosmaster.service -f"
+
+status:
+	@ssh $(PI_HOST) "sudo systemctl status rosmaster.service --no-pager -l 2>/dev/null" | head -15
 
 ssh:
 	ssh $(PI_HOST)
 
 shell:
-	ssh -t $(PI_HOST) "docker exec -it \$$(docker ps -q) bash"
+	ssh -t $(PI_HOST) "docker exec -it rosmaster bash"
 
-start:
-	ssh -t $(PI_HOST) "docker exec \$$(docker ps -q) bash -c '\
-		source /opt/ros/humble/setup.bash && \
-		source /root/share/install/setup.bash && \
-		cd $(CONTAINER_DIR) && \
-		export ROS_DOMAIN_ID=$(ROS_DOMAIN_ID) && \
-		export ROBOT_ID=$(ROBOT_ID) && \
-		ros2 launch rosmaster_robot robot.launch.py robot_id:=$(ROBOT_ID)'"
+# =============================================================================
+# Dev Environment Commands
+# =============================================================================
+.PHONY: dev-ros-bridge dev-deploy
 
-stop:
-	ssh -t $(PI_HOST) "docker exec \$$(docker ps -q) bash -c '\
-		pkill -f rosmaster_robot || true && \
-		pkill -f usb_cam || true && \
-		echo Stopped'"
+# Dev API IP - set this after dev environment is deployed
+# Get it with: make -C ../.. dev-ip
+DEV_API_IP ?=
+DEV_API_URL = http://$(DEV_API_IP):8080
 
-build-remote:
-	@echo "Building ROS2 package on $(PI_HOST)..."
-	ssh $(PI_HOST) "docker exec \$$(docker ps -q) bash -c 'cd $(CONTAINER_DIR) && make build'"
-
-deploy: sync-to build-remote
-	@echo "Deployed and built on $(PI_HOST)"
-
-logs:
-	ssh -t $(PI_HOST) "docker exec \$$(docker ps -q) bash -c '\
-		journalctl -f -t ros 2>/dev/null || tail -f ~/.ros/log/*/rosout.log 2>/dev/null || echo No logs found'"
-
-# ── Local targets (run ON the robot, inside container) ─────────────
-
-build:
-	@echo "Building ROS2 package..."
-	bash -c "source /opt/ros/humble/setup.bash && cd .. && colcon build --packages-select rosmaster_robot --symlink-install"
-	@echo ""
-	@echo "Done! Now run: source ../install/setup.bash"
-
-# Check if package is built and sourced
-check-build:
-	@if ! ros2 pkg list 2>/dev/null | grep -q rosmaster_robot; then \
-		echo "ERROR: Package not found. Run:"; \
-		echo "  make build"; \
-		echo "  source ../install/setup.bash"; \
+dev-ros-bridge:
+	@if [ -z "$(DEV_API_IP)" ]; then \
+		echo "Error: DEV_API_IP not set. Get it with: make -C ../.. dev-ip"; \
+		echo "Then run: make dev-ros-bridge DEV_API_IP=<ip>"; \
 		exit 1; \
 	fi
+	@echo "Starting ros-bridge connected to DEV API at $(DEV_API_URL)..."
+	GATEWAY_URL=$(DEV_API_URL) python3 ../../ros-bridge/camera_forwarder.py
 
-run: check-build
-	@echo "Launching robot $(ROBOT_ID) on domain $(ROS_DOMAIN_ID)"
-	ROS_DOMAIN_ID=$(ROS_DOMAIN_ID) ROBOT_ID=$(ROBOT_ID) \
-		ros2 launch rosmaster_robot robot.launch.py robot_id:=$(ROBOT_ID)
+dev-deploy: deploy
+	@echo ""
+	@echo "Robot code deployed. To connect to dev API:"
+	@echo "  1. Get dev IP: make -C ../.. dev-ip"
+	@echo "  2. Run: make dev-ros-bridge DEV_API_IP=<ip>"
 
-run-controller: check-build
-	@echo "Starting controller for $(ROBOT_ID)"
-	ROS_DOMAIN_ID=$(ROS_DOMAIN_ID) ROBOT_ID=$(ROBOT_ID) \
-		ros2 run rosmaster_robot controller
+# =============================================================================
+# Docker Image Build (run on Pi for ARM64)
+# =============================================================================
+.PHONY: build-image push-image
 
-run-camera:
-	@echo "Starting camera for $(ROBOT_ID)"
-	ROS_DOMAIN_ID=$(ROS_DOMAIN_ID) ros2 run usb_cam usb_cam_node_exe \
-		--ros-args \
-		-p video_device:=/dev/video0 \
-		-p image_width:=640 \
-		-p image_height:=480 \
-		-p framerate:=15.0 \
-		-r image_raw:=/$(ROBOT_ID)/camera/image_raw
+build-image:
+	@echo "==> Syncing Dockerfile to Pi..."
+	@rsync -avz Dockerfile $(PI_HOST):$(REMOTE_DIR)/
+	@echo ""
+	@echo "==> Building image on Pi (this may take a while)..."
+	@ssh $(PI_HOST) "cd $(REMOTE_DIR) && docker build --build-arg BASE_IMAGE=$(BASE_IMAGE) -t $(IMAGE_NAME):$(IMAGE_TAG) ."
+	@echo ""
+	@echo "Built $(IMAGE_NAME):$(IMAGE_TAG)"
 
-run-audio: check-build
-	@echo "Starting audio nodes for $(ROBOT_ID)"
-	ROS_DOMAIN_ID=$(ROS_DOMAIN_ID) ROBOT_ID=$(ROBOT_ID) \
-		ros2 run rosmaster_robot audio_stream &
-	ROS_DOMAIN_ID=$(ROS_DOMAIN_ID) ROBOT_ID=$(ROBOT_ID) \
-		ros2 run rosmaster_robot audio_play
+push-image:
+	@echo "==> Pushing image to registry..."
+	@ssh $(PI_HOST) "docker push $(IMAGE_NAME):$(IMAGE_TAG)"
+	@echo ""
+	@echo "Pushed $(IMAGE_NAME):$(IMAGE_TAG)"
+	@echo "Update run-container.sh to use this image"
+
+build-and-push: build-image push-image
+	@echo ""
+	@echo "Done! Update ROS_IMAGE in run-container.sh to:"
+	@echo "  $(IMAGE_NAME):$(IMAGE_TAG)"

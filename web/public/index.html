@@ -38,6 +38,11 @@
         padding: 1.5rem;
         box-shadow: 0 20px 60px rgba(0,0,0,.45);
       }
+      #account-card {
+        width: 100%;
+        max-width: 380px;
+        margin: 0 auto;
+      }
       header.hero {
         display: flex;
         flex-wrap: wrap;
@@ -207,13 +212,6 @@
         border-radius: 14px;
         padding: 1rem;
       }
-      .lobby-card.offline {
-        opacity: 0.55;
-        filter: grayscale(0.4);
-      }
-      .lobby-card.offline button {
-        pointer-events: none;
-      }
       .lobby-card h3 {
         margin: 0;
         font-size: 1.25rem;
@@ -316,12 +314,54 @@
         overflow: hidden;
         background: #0b1120;
         border: 1px solid rgba(148,163,184,0.2);
+        touch-action: none;
       }
       .video-wrapper video {
         display: block;
         width: 100%;
         min-height: 240px;
         background: #000;
+      }
+      /* Hide native fullscreen button */
+      video::-webkit-media-controls-fullscreen-button {
+        display: none;
+      }
+      /* Full-page teleop mode */
+      #view-lobby-detail.teleop-active .lobby-actions,
+      #view-lobby-detail.teleop-active #detail-header,
+      #view-lobby-detail.teleop-active .tab-nav {
+        display: none;
+      }
+      #view-lobby-detail.teleop-active [data-panel="teleop"] {
+        position: fixed;
+        top: 0;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        z-index: 50;
+        background: #020617;
+        overflow: hidden;
+        touch-action: none;
+        overscroll-behavior: none;
+      }
+      #view-lobby-detail.teleop-active #teleop-pane {
+        height: 100%;
+        display: flex;
+        flex-direction: column;
+      }
+      #view-lobby-detail.teleop-active .video-wrapper {
+        flex: 1;
+        height: 100%;
+        border-radius: 0;
+        border: none;
+      }
+      #view-lobby-detail.teleop-active .video-wrapper video {
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+      }
+      body.teleop-active {
+        overflow: hidden;
       }
       .hud-overlay {
         position: absolute;
@@ -332,26 +372,69 @@
         padding: 1rem;
         display: flex;
         flex-direction: column;
-        justify-content: flex-start;
+        justify-content: center; /* Center vertically */
         pointer-events: none;
+      }
+      .hud-left-column {
+        display: flex;
+        flex-direction: column;
+        gap: 0.5rem;
+        align-items: flex-start;
+        padding-left: 2.5rem; /* Space for back button */
       }
       .hud-row {
         display: flex;
         gap: 0.75rem;
         flex-wrap: wrap;
+        padding-right: 120px; /* Space for top-right controls */
       }
       .hud-panel {
         background: rgba(2,6,23,0.6);
         border: 1px solid rgba(148,163,184,0.35);
         border-radius: 12px;
         padding: 0.5rem 0.75rem;
-        min-width: 150px;
+        min-width: 100px;
         pointer-events: auto;
+        flex-shrink: 1;
       }
       .hud-panel strong {
         display: block;
         font-size: 1.1rem;
         color: #f8fafc;
+        white-space: nowrap;
+      }
+      @media (max-width: 600px) {
+        .hud-overlay {
+          padding: 0.5rem;
+        }
+        .hud-left-column {
+          gap: 0.4rem;
+          padding-left: 2rem;
+        }
+        .hud-row {
+          gap: 0.4rem;
+          padding-right: 100px;
+        }
+        .hud-panel {
+          padding: 0.3rem 0.5rem;
+          min-width: 70px;
+          border-radius: 8px;
+        }
+        .hud-panel strong {
+          font-size: 0.85rem;
+        }
+      }
+      @media (max-width: 400px) {
+        .hud-left-column {
+          padding-left: 1.5rem;
+        }
+        .hud-panel {
+          padding: 0.25rem 0.4rem;
+          min-width: 55px;
+        }
+        .hud-panel strong {
+          font-size: 0.75rem;
+        }
       }
       .hud-log {
         flex: 1;
@@ -365,12 +448,36 @@
         margin: 0;
         border: none;
       }
-      #video-fullscreen-btn {
+      .video-controls-top-left {
+        position: absolute;
+        top: 0.75rem;
+        left: 0.75rem;
+        z-index: 5;
+        display: flex;
+        gap: 0.5rem;
+        pointer-events: auto;
+      }
+      .video-controls-top-right {
         position: absolute;
         top: 0.75rem;
         right: 0.75rem;
         z-index: 5;
+        display: flex;
+        flex-direction: column;
+        align-items: flex-end;
+        gap: 0.5rem;
         pointer-events: auto;
+      }
+      .top-right-buttons {
+        display: flex;
+        gap: 0.5rem;
+      }
+      .video-controls-top-left button,
+      .video-controls-top-right button {
+        pointer-events: auto;
+      }
+      .video-controls-top-right .hud-minimap {
+        margin-top: 0.25rem;
       }
       pre {
         background: rgba(2,6,23,0.9);
@@ -423,6 +530,7 @@
         justify-content: center;
         font-size: 1.2rem;
         flex-shrink: 0;
+        pointer-events: auto;
       }
       .mic-btn.muted {
         background: rgba(248,113,113,0.2);
@@ -430,10 +538,58 @@
         color: #f87171;
       }
       .mic-btn.active {
-        background: rgba(34,197,94,0.2);
-        border-color: rgba(34,197,94,0.4);
+        background: rgba(34,197,94,0.3);
+        border-color: rgba(34,197,94,0.5);
         color: #4ade80;
       }
+      .mic-btn.active.speaking {
+        background: rgba(22,163,74,0.6);
+        border-color: rgba(22,163,74,0.8);
+        color: #22c55e;
+        box-shadow: 0 0 12px rgba(34,197,94,0.5);
+      }
+      /* Speaker vote button states */
+      .speaker-vote.vote-none {
+        background: rgba(239,68,68,0.2) !important;
+        border-color: rgba(239,68,68,0.4) !important;
+        color: #ef4444 !important;
+      }
+      .speaker-vote.vote-partial {
+        background: rgba(249,115,22,0.2) !important;
+        border-color: rgba(249,115,22,0.4) !important;
+        color: #f97316 !important;
+      }
+      .speaker-vote.vote-pending {
+        background: rgba(234,179,8,0.2) !important;
+        border-color: rgba(234,179,8,0.4) !important;
+        color: #eab308 !important;
+      }
+      .speaker-vote.vote-enabled {
+        background: rgba(34,197,94,0.3) !important;
+        border-color: rgba(34,197,94,0.5) !important;
+        color: #22c55e !important;
+      }
+      /* Capability widgets (rendered from manifests; see renderCapWidgets) */
+      .cap-widgets {
+        display: flex;
+        flex-direction: column;
+        gap: 0.35rem;
+        align-items: flex-end;
+        margin-top: 0.35rem;
+      }
+      .cap-widget {
+        display: flex;
+        align-items: center;
+        gap: 0.4rem;
+        background: rgba(0,0,0,0.45);
+        border-radius: 6px;
+        padding: 0.2rem 0.5rem;
+        font-size: 0.75rem;
+        color: #e5e7eb;
+      }
+      .cap-widget input[type="range"] { width: 90px; }
+      .cap-widget.cap-pending { opacity: 0.6; } /* goal in flight, no proof yet */
+      .cap-widget .cap-value { min-width: 2.5ch; text-align: right; }
       .volume-slider {
         flex: 1;
         min-width: 100px;
@@ -464,12 +620,6 @@
       .volume-slider:disabled {
         opacity: 0.5;
       }
-      .mic-status {
-        font-size: 0.8rem;
-        color: #94a3b8;
-        min-width: 60px;
-        text-align: right;
-      }
       .key-row {
         display: flex;
         align-items: center;
@@ -485,14 +635,73 @@
         font-size: 0.95rem;
       }
 
-      /* Mobile touch controls */
+      /* SLAM Minimap HUD */
+      .hud-minimap {
+        position: relative;
+        width: 150px;
+        height: 150px;
+        background: rgba(0,0,0,0.7);
+        border: 1px solid rgba(148,163,184,0.5);
+        border-radius: 8px;
+        pointer-events: auto;
+        cursor: pointer;
+        transition: width 0.15s ease, height 0.15s ease;
+      }
+      .hud-minimap.expanded {
+        position: fixed;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        width: min(80vh, 80vw);
+        height: min(80vh, 80vw);
+        z-index: 60;
+        box-shadow: 0 10px 40px rgba(0,0,0,0.6);
+      }
+      #minimap-canvas {
+        width: 100%;
+        height: 100%;
+        border-radius: 8px;
+      }
+      .minimap-expand-btn {
+        position: absolute;
+        top: 4px;
+        right: 4px;
+        width: 22px;
+        height: 22px;
+        padding: 0;
+        line-height: 1;
+        font-size: 13px;
+        border: none;
+        border-radius: 5px;
+        background: rgba(15,23,42,0.7);
+        color: #e2e8f0;
+        cursor: pointer;
+        pointer-events: auto;
+        opacity: 0.6;
+        transition: opacity 0.15s ease;
+      }
+      .hud-minimap:hover .minimap-expand-btn { opacity: 1; }
+      @media (max-width: 600px) {
+        .hud-minimap {
+          width: 100px;
+          height: 100px;
+        }
+      }
+
+      /* Touch controls - always visible with low opacity */
       .touch-joystick-zone {
         position: absolute;
-        bottom: 0;
-        width: 45%;
-        height: 50%;
-        z-index: 10;
+        bottom: 50px;
+        width: 40%;
+        height: 45%;
+        z-index: 20;
         pointer-events: auto;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        touch-action: none;
+        -webkit-user-select: none;
+        user-select: none;
       }
       .touch-joystick-zone.left {
         left: 0;
@@ -500,17 +709,69 @@
       .touch-joystick-zone.right {
         right: 0;
       }
+      .touch-joystick-zone .joystick-indicator {
+        width: 100px;
+        height: 100px;
+        border: 2px solid rgba(255,255,255,0.15);
+        border-radius: 50%;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        pointer-events: none;
+      }
+      .touch-joystick-zone .joystick-indicator::after {
+        content: '';
+        width: 40px;
+        height: 40px;
+        background: rgba(255,255,255,0.1);
+        border-radius: 50%;
+      }
       .touch-joystick-zone .joystick-label {
         position: absolute;
         bottom: 10px;
         left: 50%;
         transform: translateX(-50%);
         font-size: 0.7rem;
-        color: rgba(255,255,255,0.5);
+        color: rgba(255,255,255,0.3);
         text-transform: uppercase;
         letter-spacing: 0.1em;
         pointer-events: none;
       }
+      /* Hide indicators when joystick is active */
+      .touch-joystick-zone.active .joystick-indicator {
+        display: none;
+      }
+
+      /* Ghost joystick - positioned inside touch zones, centered via absolute positioning */
+      .ghost-joystick {
+        position: absolute;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        width: 100px;
+        height: 100px;
+        border: 2px solid rgba(34, 197, 94, 0.25);
+        border-radius: 50%;
+        pointer-events: none;
+        z-index: 15;
+        opacity: 0;
+        transition: opacity 0.2s ease;
+      }
+      .ghost-joystick.visible {
+        opacity: 0.7;
+      }
+      .ghost-joystick .ghost-knob {
+        position: absolute;
+        width: 40px;
+        height: 40px;
+        background: rgba(34, 197, 94, 0.35);
+        border-radius: 50%;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        transition: transform 0.15s ease-out;
+      }
+
 
       /* Mobile fullscreen teleop mode */
       @media (max-width: 768px) and (orientation: landscape) {
@@ -561,7 +822,8 @@
         body.mobile-teleop #video-meta {
           display: none;
         }
-        body.mobile-teleop #video-fullscreen-btn {
+        body.mobile-teleop .video-controls-top-left,
+        body.mobile-teleop .video-controls-top-right {
           display: none;
         }
         /* Show touch joysticks on mobile */
@@ -574,9 +836,15 @@
         }
       }
 
-      /* Hide touch zones on desktop */
-      .touch-joystick-zone {
-        display: none;
+      /* On desktop: hide touch indicators but keep zone for ghost joysticks */
+      @media (hover: hover) and (pointer: fine) {
+        .touch-joystick-zone {
+          pointer-events: none;
+        }
+        .touch-joystick-zone .joystick-indicator,
+        .touch-joystick-zone .joystick-label {
+          display: none;
+        }
       }
       .mobile-exit-btn {
         display: none;
@@ -592,19 +860,158 @@
         border-radius: 20px;
         font-size: 0.8rem;
       }
-
-      /* Touch device detection - show enter button */
-      @media (pointer: coarse) {
-        .mobile-teleop-enter {
-          display: inline-block;
-        }
+      /* Reauth overlay */
+      .reauth-overlay {
+        position: fixed;
+        top: 0;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        background: rgba(2,6,23,0.9);
+        z-index: 1000;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        backdrop-filter: blur(4px);
       }
-      .mobile-teleop-enter {
+      .reauth-overlay[hidden] {
         display: none;
+      }
+      .reauth-modal {
+        background: #0f172a;
+        border: 1px solid rgba(148,163,184,0.3);
+        border-radius: 16px;
+        padding: 2rem;
+        max-width: 360px;
+        width: 90%;
+      }
+      .reauth-modal h3 {
+        margin: 0 0 0.5rem 0;
+        color: #f8fafc;
+      }
+      .reauth-modal p {
+        color: #94a3b8;
+        margin: 0 0 1.5rem 0;
+        font-size: 0.9rem;
+      }
+      .reauth-modal form {
+        display: flex;
+        flex-direction: column;
+        gap: 0.75rem;
+      }
+      .reauth-modal input {
+        padding: 0.75rem;
+        border-radius: 8px;
+        border: 1px solid rgba(148,163,184,0.3);
+        background: rgba(15,23,42,0.8);
+        color: #f8fafc;
+        font-size: 1rem;
+      }
+      .reauth-modal button {
+        padding: 0.75rem;
+        border-radius: 8px;
+        background: #3b82f6;
+        color: white;
+        border: none;
+        font-size: 1rem;
+        cursor: pointer;
         margin-top: 0.5rem;
       }
+      .reauth-modal button:hover {
+        background: #2563eb;
+      }
+      /* Chat panel styles */
+      .chat-panel {
+        background: rgba(15,23,42,0.85);
+        border: 1px solid rgba(148,163,184,0.2);
+        border-radius: 12px;
+        margin-top: 1rem;
+        display: flex;
+        flex-direction: column;
+        max-height: 400px;
+      }
+      .chat-header {
+        padding: 0.75rem 1rem;
+        border-bottom: 1px solid rgba(148,163,184,0.2);
+        font-weight: 600;
+        font-size: 0.9rem;
+        color: #94a3b8;
+      }
+      .chat-messages {
+        flex: 1;
+        overflow-y: auto;
+        padding: 0.75rem 1rem;
+        display: flex;
+        flex-direction: column;
+        gap: 0.5rem;
+        min-height: 150px;
+        max-height: 280px;
+      }
+      .chat-message {
+        display: flex;
+        flex-direction: column;
+        gap: 0.15rem;
+      }
+      .chat-message .msg-header {
+        display: flex;
+        align-items: baseline;
+        gap: 0.5rem;
+        font-size: 0.75rem;
+      }
+      .chat-message .msg-user {
+        font-weight: 600;
+        color: #60a5fa;
+      }
+      .chat-message .msg-time {
+        color: #64748b;
+      }
+      .chat-message .msg-content {
+        color: #e2e8f0;
+        word-break: break-word;
+      }
+      .chat-message.system {
+        align-items: center;
+        padding: 0.25rem 0;
+      }
+      .chat-message.system .msg-content {
+        color: #64748b;
+        font-style: italic;
+        font-size: 0.85rem;
+      }
+      .chat-input-row {
+        display: flex;
+        gap: 0.5rem;
+        padding: 0.75rem 1rem;
+        border-top: 1px solid rgba(148,163,184,0.2);
+      }
+      .chat-input-row input {
+        flex: 1;
+        margin: 0;
+        padding: 0.5rem 0.75rem;
+        border-radius: 8px;
+        border: 1px solid rgba(148,163,184,0.3);
+        background: rgba(15,23,42,0.8);
+        color: #f8fafc;
+        font-size: 0.9rem;
+      }
+      .chat-input-row button {
+        padding: 0.5rem 1rem;
+        border-radius: 8px;
+        background: #3b82f6;
+        color: white;
+        border: none;
+        font-size: 0.9rem;
+        cursor: pointer;
+      }
+      .chat-input-row button:hover {
+        background: #2563eb;
+      }
+      .chat-input-row button:disabled {
+        background: #475569;
+        cursor: not-allowed;
+      }
     </style>
-    <script src="https://unpkg.com/nipplejs@0.10.2/dist/nipplejs.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/nipplejs@0.10.2/dist/nipplejs.min.js"></script>
   </head>
   <body>
     <main>
@@ -627,23 +1034,25 @@
       </header>
 
       <section class="card" id="account-card">
-        <h2>Account</h2>
-        <div id="auth-status" class="status disconnected">Not signed in</div>
-        <div class="form-row">
-          <div>
-            <label for="auth-email">Username / Email</label>
-            <input id="auth-email" type="text" placeholder="Enter your username or email">
+        <form id="auth-form">
+          <div style="margin-bottom:0.75rem;">
+            <input id="auth-email" type="text" placeholder="Username or email" required>
           </div>
-          <div>
-            <label for="auth-password">Password</label>
-            <input id="auth-password" type="password" placeholder="••••••••">
+          <div style="margin-bottom:0.75rem;">
+            <input id="auth-password" type="password" placeholder="Password" required>
           </div>
-        </div>
-        <div class="lobby-actions">
-          <button id="register-btn">Sign Up</button>
-          <button id="login-btn">Sign In</button>
-          <span id="auth-message" class="hint"></span>
-        </div>
+          <div style="margin-bottom:0.75rem;text-align:left;">
+            <label style="display:inline-flex;align-items:center;gap:0.5rem;cursor:pointer;font-size:0.875rem;text-transform:none;font-weight:normal;white-space:nowrap;">
+              <input type="checkbox" id="remember-me" checked>
+              Remember me
+            </label>
+          </div>
+          <div class="lobby-actions" style="flex-direction:column;gap:0.5rem;align-items:center;">
+            <button type="submit" id="login-btn">Sign In</button>
+            <button type="button" id="register-btn" class="secondary">Sign Up</button>
+            <span id="auth-message" class="hint"></span>
+          </div>
+        </form>
       </section>
 
       <section class="card" id="dashboard-card" hidden>
@@ -671,7 +1080,7 @@
             <button id="detail-back-btn" class="ghost" title="Back">←</button>
             <button id="detail-edit-btn" class="ghost" title="Edit lobby" style="font-size:1.2rem;padding:0.5rem;">✏️</button>
           </div>
-          <div style="display:flex;align-items:center;gap:0.5rem;">
+          <div id="detail-header" style="display:flex;align-items:center;gap:0.5rem;">
             <h2 id="detail-title" style="margin:0;"></h2>
             <span id="detail-ros-status" class="status disconnected">Offline</span>
           </div>
@@ -683,45 +1092,72 @@
 
           <div data-panel="lobby" class="view active">
             <div id="detail-robots" class="robot-grid"></div>
+            <!-- Lobby chat panel -->
+            <div id="lobby-chat" class="chat-panel">
+              <div class="chat-header">Chat</div>
+              <div id="chat-messages" class="chat-messages"></div>
+              <form id="chat-form" class="chat-input-row">
+                <input type="text" id="chat-input" placeholder="Type a message..." maxlength="2000" autocomplete="off">
+                <button type="submit" id="chat-send-btn">Send</button>
+              </form>
+            </div>
           </div>
           <div data-panel="teleop" class="view">
             <div id="teleop-empty" class="empty-state">Select a robot from the lobby tab to begin streaming.</div>
             <div id="teleop-pane" hidden>
               <!-- full-width video with HUD overlay -->
               <div class="video-wrapper" id="video-wrapper">
-                <video id="robot-video" autoplay playsinline controls></video>
-                <button id="video-fullscreen-btn" class="ghost" type="button" aria-label="Toggle fullscreen">⤢</button>
+                <video id="robot-video" autoplay playsinline controls controlsList="nofullscreen"></video>
+                <div class="video-controls-top-left">
+                  <button id="video-back-btn" class="ghost" type="button" aria-label="Exit stream">←</button>
+                </div>
+                <div class="video-controls-top-right">
+                  <div class="top-right-buttons">
+                    <button id="mic-toggle-btn" class="ghost mic-btn muted" type="button" title="Voice to other streamers">🎤</button>
+                    <button id="robot-mic-btn" class="ghost mic-btn speaker-vote vote-none" type="button" title="Voice to robot speaker" hidden>🔊</button>
+                    <button id="video-fullscreen-btn" class="ghost" type="button" aria-label="Toggle fullscreen">⤢</button>
+                  </div>
+                  <!-- Capability widgets, rendered from declared manifests by
+                       type shape (slider for ranged floats, toggle for bools).
+                       Empty until the robot's capabilities arrive. -->
+                  <div class="cap-widgets" id="cap-widgets"></div>
+                  <div class="hud-minimap" id="hud-minimap" title="Click or press M to expand">
+                    <canvas id="minimap-canvas" width="150" height="150"></canvas>
+                    <button id="minimap-expand-btn" class="minimap-expand-btn" type="button" aria-label="Expand map (M)" title="Expand map (M)">⤢</button>
+                  </div>
+                </div>
                 <button class="mobile-exit-btn" id="mobile-exit-btn" type="button">✕ Exit</button>
                 <div class="touch-joystick-zone left" id="joystick-zone-left">
+                  <div class="joystick-indicator"></div>
+                  <div class="ghost-joystick" id="ghost-move-joystick">
+                    <div class="ghost-knob" id="ghost-move-knob"></div>
+                  </div>
                   <span class="joystick-label">Move</span>
                 </div>
                 <div class="touch-joystick-zone right" id="joystick-zone-right">
-                  <span class="joystick-label">Camera</span>
+                  <div class="joystick-indicator"></div>
+                  <div class="ghost-joystick" id="ghost-camera-joystick">
+                    <div class="ghost-knob" id="ghost-camera-knob"></div>
+                  </div>
+                  <span class="joystick-label">Look</span>
                 </div>
                 <div class="hud-overlay">
-                  <div class="hud-row" style="justify-content:space-between;">
-                    <div style="display:flex;gap:0.5rem;align-items:center;">
-                      <div class="status disconnected" id="video-status" style="font-size:0.75rem;padding:0.25rem 0.5rem;">Video</div>
-                      <div class="hud-panel">
-                        <strong id="linear-speed-value">0.00</strong>
-                      </div>
-                      <div class="hud-panel">
-                        <strong id="angular-speed-value">0.00</strong>
-                      </div>
-                      <div class="hud-panel">
-                        <strong id="front-distance-value">--</strong>
-                      </div>
+                  <div class="hud-left-column">
+                    <div class="hud-panel hud-robot-name" id="hud-robot-name">
+                      <strong>Robot</strong>
                     </div>
-                    <div style="display:flex;gap:0.5rem;align-items:center;">
-                      <button id="mic-toggle-btn" class="ghost mic-btn muted" type="button" title="Toggle microphone">🎤</button>
-                      <span id="mic-status" class="mic-status" style="color:#94a3b8;font-size:0.8rem;"></span>
-                      <button id="mobile-teleop-enter" class="ghost mobile-teleop-enter" type="button" title="Touch controls">📱</button>
+                    <div class="hud-panel">
+                      <strong id="linear-speed-value">0.00</strong>
+                    </div>
+                    <div class="hud-panel">
+                      <strong id="angular-speed-value">0.00</strong>
+                    </div>
+                    <div class="hud-panel">
+                      <strong id="front-distance-value">--</strong>
                     </div>
                   </div>
                 </div>
               </div>
-              <!-- hidden elements for compatibility -->
-              <div id="ws-status" hidden></div>
               <!-- hidden elements for compatibility -->
               <p id="active-robot-label" hidden></p>
               <p id="video-meta" hidden></p>
@@ -744,6 +1180,16 @@
               <option value="public">Public</option>
               <option value="private">Private</option>
             </select>
+            <label for="lobby-style">Style</label>
+            <select id="lobby-style">
+              <option value="remote">Remote (external robots)</option>
+              <option value="raycast">Raycast (first-person world)</option>
+              <option value="dom" disabled>DOM (coming soon)</option>
+            </select>
+            <label id="spawn-toggle-row" style="display:none;align-items:center;gap:0.5rem;margin-top:0.5rem;">
+              <input type="checkbox" id="lobby-allow-spawn">
+              Allow players to spawn (enables the "Add Player" request)
+            </label>
             <div class="key-row" id="key-row" hidden>
               <div>
                 <label>Access key</label>
@@ -752,7 +1198,7 @@
               <button type="button" id="copy-key-btn" class="secondary">Copy</button>
             </div>
             <div class="lobby-actions">
-              <button type="submit" id="save-lobby-btn">Save lobby</button>
+              <button type="submit" id="create-lobby-btn">Create lobby</button>
               <button type="button" id="delete-lobby-btn" class="secondary">Delete lobby</button>
             </div>
             <p id="lobby-message" class="hint"></p>
@@ -775,15 +1221,9 @@
               </div>
               <label for="bot-desc">Description</label>
               <textarea id="bot-desc" placeholder="Optional summary"></textarea>
-              <div class="form-row">
-                <div style="flex:1;">
-                  <label for="bot-volume">Volume</label>
-                  <div style="display:flex;align-items:center;gap:0.5rem;">
-                    <input type="range" id="bot-volume" min="0" max="100" value="100" style="flex:1;">
-                    <span id="bot-volume-label" style="min-width:3ch;">100</span>%
-                  </div>
-                </div>
-              </div>
+              <!-- Volume/mute moved to the live robot view: they are capability
+                   widgets (bot:<ns>/audio/*) rendered from manifests, not bot
+                   metadata. See renderCapWidgets(). -->
               <div class="lobby-actions">
                 <button type="submit" id="save-bot-btn">Save robot</button>
                 <button type="button" id="cancel-bot-edit" class="secondary">Cancel edit</button>
@@ -795,13 +1235,33 @@
       </section>
     </main>
 
+    <!-- Reauth overlay for expired sessions -->
+    <div id="reauth-overlay" class="reauth-overlay" hidden>
+      <div class="reauth-modal">
+        <h3>Session Expired</h3>
+        <p>Your session has expired. Please sign in again to continue.</p>
+        <form id="reauth-form">
+          <input type="text" id="reauth-email" placeholder="Username or email" required>
+          <input type="password" id="reauth-password" placeholder="Password" required>
+          <p id="reauth-message" class="auth-message"></p>
+          <button type="submit">Sign In</button>
+        </form>
+      </div>
+    </div>
+
     <script>
       (function() {
         const apiStatus = document.getElementById('api-status');
+        const authForm = document.getElementById('auth-form');
         const authEmailInput = document.getElementById('auth-email');
         const authPasswordInput = document.getElementById('auth-password');
-        const authStatus = document.getElementById('auth-status');
+        const rememberMeCheckbox = document.getElementById('remember-me');
         const authMessage = document.getElementById('auth-message');
+        const reauthOverlay = document.getElementById('reauth-overlay');
+        const reauthForm = document.getElementById('reauth-form');
+        const reauthEmailInput = document.getElementById('reauth-email');
+        const reauthPasswordInput = document.getElementById('reauth-password');
+        const reauthMessage = document.getElementById('reauth-message');
         const accountCard = document.getElementById('account-card');
         const dashboardCard = document.getElementById('dashboard-card');
         const registerBtn = document.getElementById('register-btn');
@@ -834,24 +1294,33 @@
         const tabPanels = document.querySelectorAll('[data-panel]');
         const teleopPane = document.getElementById('teleop-pane');
         const teleopEmpty = document.getElementById('teleop-empty');
-        const wsStatus = document.getElementById('ws-status');
+        const hudRobotName = document.getElementById('hud-robot-name');
         const telemetryLog = document.getElementById('telemetry');
         const frontDistanceValue = document.getElementById('front-distance-value');
         const linearSpeedValue = document.getElementById('linear-speed-value');
         const angularSpeedValue = document.getElementById('angular-speed-value');
         const activeRobotLabel = document.getElementById('active-robot-label');
         const micToggleBtn = document.getElementById('mic-toggle-btn');
+        const robotMicBtn = document.getElementById('robot-mic-btn');
+        console.log('[init] micToggleBtn=', micToggleBtn, 'robotMicBtn=', robotMicBtn);
         const micVolumeSlider = document.getElementById('mic-volume');
-        const micStatusEl = document.getElementById('mic-status');
         const videoWrapper = document.getElementById('video-wrapper');
         const videoFullscreenBtn = document.getElementById('video-fullscreen-btn');
+        const videoBackBtn = document.getElementById('video-back-btn');
         const videoElement = document.getElementById('robot-video');
-        const videoStatus = document.getElementById('video-status');
         const videoMeta = document.getElementById('video-meta');
         const lobbyForm = document.getElementById('lobby-form');
         const lobbyNameInput = document.getElementById('lobby-name');
         const lobbyDescInput = document.getElementById('lobby-desc');
         const lobbyVisibilityInput = document.getElementById('lobby-visibility');
+        const lobbyStyleInput = document.getElementById('lobby-style');
+        const lobbyAllowSpawnInput = document.getElementById('lobby-allow-spawn');
+        const spawnToggleRow = document.getElementById('spawn-toggle-row');
+        const VIRTUAL_GAME_STYLES = ['raycast', 'dom'];
+        function isVirtualStyle(style) { return VIRTUAL_GAME_STYLES.includes(style); }
+        function updateSpawnToggleVisibility() {
+          spawnToggleRow.style.display = isVirtualStyle(lobbyStyleInput.value) ? 'flex' : 'none';
+        }
         const lobbyMessage = document.getElementById('lobby-message');
         const keyRow = document.getElementById('key-row');
         const lobbyKeyEl = document.getElementById('lobby-key');
@@ -863,10 +1332,13 @@
         const botNameInput = document.getElementById('bot-name');
         const botNamespaceInput = document.getElementById('bot-namespace');
         const botDescInput = document.getElementById('bot-desc');
-        const botVolumeInput = document.getElementById('bot-volume');
-        const botVolumeLabel = document.getElementById('bot-volume-label');
         const botMessage = document.getElementById('bot-message');
         const cancelBotEditBtn = document.getElementById('cancel-bot-edit');
+        // Chat elements
+        const chatMessages = document.getElementById('chat-messages');
+        const chatForm = document.getElementById('chat-form');
+        const chatInput = document.getElementById('chat-input');
+        const chatSendBtn = document.getElementById('chat-send-btn');
 
         const apiMetaTag = document.querySelector('meta[name="robot-gateway-api-base"]');
         const metaValue = apiMetaTag ? (apiMetaTag.getAttribute('content') || '').trim() : '';
@@ -877,7 +1349,6 @@
         const resolvedMeta = isPlaceholder ? '' : metaValue;
         const fallbackApiBase = 'http://localhost:8080/api';
         const staticApiBase = (resolvedMeta || fallbackApiBase).replace(/\/+$/, '');
-        const LOBBY_CACHE_KEY = 'arenaLobbyCache';
         const DEFAULT_ICE_SERVERS = [
           { urls: 'stun:stun.l.google.com:19302' },
         ];
@@ -890,9 +1361,7 @@
             return cachedIceServers;
           }
           try {
-            const resp = await fetch(`${apiBase()}/ice-servers`, {
-              headers: authHeaders(),
-            });
+            const resp = await authFetch(`${apiBase()}/ice-servers`);
             if (resp.ok) {
               const data = await resp.json();
               if (data.iceServers && data.iceServers.length) {
@@ -908,44 +1377,114 @@
           return DEFAULT_ICE_SERVERS;
         }
 
-        function readLobbyCache() {
-          try {
-            const raw = localStorage.getItem(LOBBY_CACHE_KEY);
-            return raw ? JSON.parse(raw) : {};
-          } catch (error) {
-            console.warn('Failed to parse lobby cache', error);
-            return {};
-          }
-        }
-
-        function loadCachedLobbies(email) {
-          if (!email) return [];
-          const cache = readLobbyCache();
-          const entry = cache[email];
-          return Array.isArray(entry) ? entry : [];
-        }
-
-        function saveCachedLobbies(email, items) {
-          if (!email) return;
-          const cache = readLobbyCache();
-          cache[email] = items;
-          localStorage.setItem(LOBBY_CACHE_KEY, JSON.stringify(cache));
-        }
-
         function setMenuOpen(open) {
           state.menuOpen = Boolean(open);
           menuPanel.hidden = !state.menuOpen;
           menuToggle.setAttribute('aria-expanded', String(state.menuOpen));
         }
 
-        const initialToken = localStorage.getItem('arenaToken') || '';
-        const initialEmail = localStorage.getItem('arenaUserEmail') || '';
+        const initialToken = localStorage.getItem('arenaToken') || sessionStorage.getItem('arenaToken') || '';
+        const initialEmail = localStorage.getItem('arenaUserEmail') || sessionStorage.getItem('arenaUserEmail') || '';
+
+        // Pending changes storage for offline editing
+        const PENDING_CHANGES_KEY = 'arenaPendingChanges';
+        function loadPendingChanges() {
+          try {
+            return JSON.parse(localStorage.getItem(PENDING_CHANGES_KEY) || '{}');
+          } catch { return {}; }
+        }
+        function savePendingChanges(changes) {
+          localStorage.setItem(PENDING_CHANGES_KEY, JSON.stringify(changes));
+        }
+        function addPendingLobbyChange(lobbyId, changes) {
+          const pending = loadPendingChanges();
+          pending.lobbies = pending.lobbies || {};
+          pending.lobbies[lobbyId] = { ...pending.lobbies[lobbyId], ...changes, _timestamp: Date.now() };
+          savePendingChanges(pending);
+        }
+        function addPendingBotChange(botId, changes) {
+          const pending = loadPendingChanges();
+          pending.bots = pending.bots || {};
+          pending.bots[botId] = { ...pending.bots[botId], ...changes, _timestamp: Date.now() };
+          savePendingChanges(pending);
+        }
+        function removePendingLobbyChange(lobbyId) {
+          const pending = loadPendingChanges();
+          if (pending.lobbies) delete pending.lobbies[lobbyId];
+          savePendingChanges(pending);
+        }
+        function removePendingBotChange(botId) {
+          const pending = loadPendingChanges();
+          if (pending.bots) delete pending.bots[botId];
+          savePendingChanges(pending);
+        }
+        function getPendingLobbyChange(lobbyId) {
+          const pending = loadPendingChanges();
+          return pending.lobbies?.[lobbyId];
+        }
+        function getPendingBotChange(botId) {
+          const pending = loadPendingChanges();
+          return pending.bots?.[botId];
+        }
+
+        // Sync all pending changes when online
+        async function syncPendingChanges() {
+          if (!state.authToken) return;
+          const pending = loadPendingChanges();
+          let synced = 0;
+
+          // Sync lobby changes
+          for (const [lobbyId, changes] of Object.entries(pending.lobbies || {})) {
+            const { _timestamp, ...body } = changes;
+            try {
+              const resp = await authFetch(`${apiBase()}/lobbies/${lobbyId}`, {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body),
+              });
+              if (resp.ok) {
+                removePendingLobbyChange(lobbyId);
+                synced++;
+              }
+            } catch (err) {
+              console.error(`Failed to sync lobby ${lobbyId}:`, err);
+            }
+          }
+
+          // Sync bot changes
+          for (const [botId, changes] of Object.entries(pending.bots || {})) {
+            const { _timestamp, ...body } = changes;
+            try {
+              const resp = await authFetch(`${apiBase()}/bots/${botId}`, {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body),
+              });
+              if (resp.ok) {
+                removePendingBotChange(botId);
+                synced++;
+              }
+            } catch (err) {
+              console.error(`Failed to sync bot ${botId}:`, err);
+            }
+          }
+
+          if (synced > 0) {
+            console.log(`Synced ${synced} pending changes`);
+            fetchLobbies();  // Refresh lobby list
+          }
+        }
+
+        // Generate unique client ID for this browser session (allows same user on multiple devices)
+        const clientId = crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 
         const state = {
           authToken: initialToken,
           userEmail: initialEmail,
+          clientId: clientId,
+          spawnRequestInProgress: false,
+          spawnRequestTimeout: null,
           lobbies: [],
-          cachedLobbies: loadCachedLobbies(initialEmail),
           offlineLobbies: [],
           offlineCollapsed: true,
           menuOpen: false,
@@ -962,18 +1501,28 @@
           linearSpeed: 0,
           angularSpeed: 0,
           // Microphone state (WebRTC-based)
-          micEnabled: false,
+          micEnabled: false,       // Voice to GROUP (other streamers)
+          robotMicEnabled: false,  // Voice to ROBOT speaker
           micVolume: 0.8,
           micStream: null,
           micTrack: null,
           // Audio playback state (robot -> browser)
           speakerEnabled: false,
+          speakerVoted: false,  // My vote intent (local; witness confirms)
           playbackContext: null,
           playbackQueue: [],
           playbackPlaying: false,
-          // Data channels for control and telemetry
+          // Data channels for control, telemetry, and map
           controlChannel: null,
           telemetryChannel: null,
+          mapChannel: null,
+          // Capability layer (goal/proof envelopes, shared/capability.proto)
+          capChannel: null,
+          caps: {},        // path -> merged fact {manifest, value, citation, ...}
+          capHeads: {},    // path -> my goal-chain head (hash of my last goal wire)
+          capPending: {},  // path -> my last unconfirmed goal body (gap affordance)
+          // SLAM map data
+          mapData: null,
           // Joystick state (axes and buttons)
           // axes[0]: left stick X, axes[1]: left stick Y (fwd/back)
           // axes[2]: left trigger, axes[3]: right stick X (turn)
@@ -992,7 +1541,11 @@
           cameraTilt: 90,
           cameraPtzInterval: null,
           connectedRobots: new Set(),
+          connectedLobbies: new Set(),
           lobbyStatusWs: null,
+          // Chat state
+          chatMessages: [],
+          chatSubscribedLobbyId: null,
         };
         let lobbyFetchController = null;
 
@@ -1012,7 +1565,17 @@
           ws.onmessage = (event) => {
             try {
               const msg = JSON.parse(event.data);
-              if (msg.type === 'connected_robots') {
+              if (msg.type === 'connected_lobbies') {
+                state.connectedLobbies = new Set(msg.lobby_ids || []);
+                updateLobbyRosStatus();
+              } else if (msg.type === 'lobby_status') {
+                if (msg.connected) {
+                  state.connectedLobbies.add(msg.lobby_id);
+                } else {
+                  state.connectedLobbies.delete(msg.lobby_id);
+                }
+                updateLobbyRosStatus();
+              } else if (msg.type === 'connected_robots') {
                 state.connectedRobots = new Set(msg.robots || []);
                 updateLobbyRosStatus();
               } else if (msg.type === 'robot_status') {
@@ -1022,6 +1585,33 @@
                   state.connectedRobots.delete(msg.robot);
                 }
                 updateLobbyRosStatus();
+              } else if (msg.type === 'chat_message') {
+                // Handle incoming chat message
+                if (msg.lobby_id === state.chatSubscribedLobbyId && msg.message) {
+                  appendChatMessage(msg.message);
+                }
+              } else if (msg.type === 'virtual_player_created') {
+                // Handle new virtual player (the response to our spawn request)
+                if (state.currentLobby && state.currentLobby.id === msg.lobby_id && msg.player) {
+                  if (!state.currentLobby.virtual_players) {
+                    state.currentLobby.virtual_players = [];
+                  }
+                  // Avoid duplicates
+                  if (!state.currentLobby.virtual_players.some(p => p.id === msg.player.id)) {
+                    state.currentLobby.virtual_players.push(msg.player);
+                  }
+                  setSpawnRequestInProgress(false);  // clears pending + re-renders
+                }
+              } else if (msg.type === 'virtual_player_deleted') {
+                // Handle deleted virtual player
+                if (state.currentLobby && state.currentLobby.id === msg.lobby_id) {
+                  if (state.currentLobby.virtual_players) {
+                    state.currentLobby.virtual_players = state.currentLobby.virtual_players.filter(
+                      p => p.namespace !== msg.namespace
+                    );
+                    renderLobbyRobots();
+                  }
+                }
               }
             } catch (e) {
               console.warn('[lobby-ws] parse error:', e);
@@ -1030,18 +1620,17 @@
         }
 
         function updateLobbyRosStatus() {
-          // Update lobby cards in directory
-          state.lobbies.forEach(lobby => {
-            lobby.ros_connected = (lobby.bot_namespaces || []).some(
-              ns => state.connectedRobots.has(ns)
-            );
+          // Combine all lobbies, update ros_connected, then re-split
+          const allLobbies = [...state.lobbies, ...state.offlineLobbies];
+          allLobbies.forEach(lobby => {
+            lobby.ros_connected = state.connectedLobbies.has(lobby.id);
           });
+          state.lobbies = allLobbies.filter(l => l.ros_connected);
+          state.offlineLobbies = allLobbies.filter(l => !l.ros_connected);
           renderLobbies();
           // Update current lobby detail if viewing
           if (state.currentLobby) {
-            state.currentLobby.ros_connected = (state.currentLobby.bot_namespaces || []).some(
-              ns => state.connectedRobots.has(ns)
-            );
+            state.currentLobby.ros_connected = state.connectedLobbies.has(state.currentLobby.id);
             detailRosStatus.textContent = state.currentLobby.ros_connected ? 'Online' : 'Offline';
             detailRosStatus.className = `status ${state.currentLobby.ros_connected ? 'connected' : 'disconnected'}`;
           }
@@ -1056,6 +1645,60 @@
           return state.authToken ? { 'Authorization': 'Bearer ' + state.authToken } : {};
         }
 
+        // Wrapper for fetch that automatically handles 401 (expired token)
+        async function authFetch(url, options = {}) {
+          // Merge auth headers
+          options.headers = { ...authHeaders(), ...options.headers };
+          const resp = await fetch(url, options);
+          if (resp.status === 401) {
+            showReauthOverlay();
+          }
+          return resp;
+        }
+
+        function showReauthOverlay() {
+          reauthEmailInput.value = state.userEmail || '';
+          reauthPasswordInput.value = '';
+          reauthMessage.textContent = '';
+          reauthOverlay.hidden = false;
+          if (reauthEmailInput.value) {
+            reauthPasswordInput.focus();
+          } else {
+            reauthEmailInput.focus();
+          }
+        }
+
+        function hideReauthOverlay() {
+          reauthOverlay.hidden = true;
+        }
+
+        async function handleReauth(event) {
+          event.preventDefault();
+          reauthMessage.textContent = 'Signing in...';
+          try {
+            const resp = await fetch(`${apiBase()}/auth/login`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                email: reauthEmailInput.value,
+                password: reauthPasswordInput.value,
+              }),
+            });
+            if (!resp.ok) {
+              const err = await resp.json().catch(() => ({}));
+              throw new Error(err.detail || 'Login failed');
+            }
+            const data = await resp.json();
+            setAuth(data.access_token, data.user.email, true);
+            hideReauthOverlay();
+            reauthMessage.textContent = '';
+            // Refresh lobbies after reauth
+            fetchLobbies();
+          } catch (err) {
+            reauthMessage.textContent = err.message || 'Login failed';
+          }
+        }
+
         function cancelLobbyFetch() {
           if (lobbyFetchController) {
             lobbyFetchController.abort();
@@ -1063,20 +1706,22 @@
           }
         }
 
-        function setAuth(token, email) {
+        function setAuth(token, email, remember = true) {
           state.authToken = token || '';
           state.userEmail = email || '';
           if (!state.authToken) {
             cancelLobbyFetch();
           }
+          // Clear both storages first
+          localStorage.removeItem('arenaToken');
+          localStorage.removeItem('arenaUserEmail');
+          sessionStorage.removeItem('arenaToken');
+          sessionStorage.removeItem('arenaUserEmail');
           if (state.authToken) {
-            localStorage.setItem('arenaToken', state.authToken);
-            localStorage.setItem('arenaUserEmail', state.userEmail);
-          } else {
-            localStorage.removeItem('arenaToken');
-            localStorage.removeItem('arenaUserEmail');
+            const storage = remember ? localStorage : sessionStorage;
+            storage.setItem('arenaToken', state.authToken);
+            storage.setItem('arenaUserEmail', state.userEmail);
           }
-          state.cachedLobbies = loadCachedLobbies(state.userEmail);
           state.offlineLobbies = [];
           state.offlineCollapsed = true;
           setMenuOpen(false);
@@ -1089,16 +1734,12 @@
           dashboardCard.hidden = !authed;
           userMenu.hidden = !authed;
           if (authed) {
-            authStatus.textContent = `Signed in as ${state.userEmail}`;
-            authStatus.className = 'status connected';
             menuUserEmail.textContent = state.userEmail || 'Signed in';
             setMenuOpen(false);
             lobbyEmptyEl.hidden = true;
             showView('lobbies');
             fetchLobbies();
           } else {
-            authStatus.textContent = 'Not signed in';
-            authStatus.className = 'status disconnected';
             setMenuOpen(false);
             state.lobbies = [];
             state.offlineLobbies = [];
@@ -1123,6 +1764,7 @@
           if (view !== 'detail') {
             setLobbyTab('lobby');
             teardownTeleop();
+            cleanupChat();
           }
         }
 
@@ -1137,35 +1779,29 @@
           cancelLobbyFetch();
           lobbyFetchController = new AbortController();
           try {
-            const resp = await fetch(`${apiBase()}/lobbies`, {
-              headers: authHeaders(),
+            const resp = await authFetch(`${apiBase()}/lobbies`, {
               signal: lobbyFetchController.signal,
             });
-            if (resp.status === 401) {
-              authMessage.textContent = 'Session expired. Please sign in again.';
-              setAuth('', '');
-              return;
-            }
+            if (resp.status === 401) return;
             if (!resp.ok) throw new Error('Failed to load lobbies');
             const data = await resp.json();
             const items = Array.isArray(data.items) ? data.items : [];
-            state.lobbies = items;
-            state.cachedLobbies = items.slice();
-            state.offlineLobbies = [];
-            saveCachedLobbies(state.userEmail, state.cachedLobbies);
+            // Split lobbies by ros_connected status
+            state.lobbies = items.filter(l => l.ros_connected);
+            state.offlineLobbies = items.filter(l => !l.ros_connected);
             renderLobbies();
+            // Sync any pending offline changes now that we're online
+            syncPendingChanges();
           } catch (err) {
             if (err && err.name === 'AbortError') {
               return;
             }
             console.error('Failed to load lobbies', err);
             state.lobbies = [];
-            state.offlineLobbies = state.cachedLobbies.slice();
+            state.offlineLobbies = [];
             renderLobbies();
-            if (!state.offlineLobbies.length) {
-              lobbyEmptyEl.hidden = false;
-              lobbyEmptyEl.textContent = 'Failed to load lobbies.';
-            }
+            lobbyEmptyEl.hidden = false;
+            lobbyEmptyEl.textContent = 'Failed to load lobbies.';
           } finally {
             lobbyFetchController = null;
           }
@@ -1186,7 +1822,7 @@
           } else {
             lobbyEmptyEl.hidden = false;
             lobbyEmptyEl.textContent = state.offlineLobbies.length
-              ? 'Lobbies unavailable. Expand Offline to view cached entries.'
+              ? 'No online lobbies. Expand below to view offline lobbies.'
               : 'No lobbies yet. Create one to get started.';
           }
           updateOfflineSection();
@@ -1259,13 +1895,16 @@
         async function openLobbyDetail(lobbyId) {
           if (!state.authToken) return;
           try {
-            const resp = await fetch(`${apiBase()}/lobbies/${lobbyId}`, { headers: authHeaders() });
+            const resp = await authFetch(`${apiBase()}/lobbies/${lobbyId}`);
+            if (resp.status === 401) return;
             if (!resp.ok) throw new Error(await resp.text());
             const data = await resp.json();
             state.currentLobby = data;
             showView('detail');
             setLobbyTab('lobby');
             renderLobbyDetail();
+            // Initialize chat for this lobby
+            initLobbyChat(lobbyId);
           } catch (err) {
             console.error(err);
           }
@@ -1284,13 +1923,23 @@
         function renderLobbyRobots() {
           const lobby = state.currentLobby;
           detailRobots.innerHTML = '';
-          if (!lobby || !lobby.bots?.length) {
+
+          const hasBots = lobby?.bots?.length > 0;
+          const hasVirtualPlayers = lobby?.virtual_players?.length > 0;
+
+          if (!lobby || (!hasBots && !hasVirtualPlayers)) {
             const empty = document.createElement('div');
             empty.className = 'empty-state';
             empty.textContent = 'No robots registered in this lobby.';
             detailRobots.appendChild(empty);
+            // Add virtual player button even when empty
+            if (lobby) {
+              renderAddVirtualPlayerButton(detailRobots);
+            }
             return;
           }
+
+          // Render physical robots
           lobby.bots.forEach((bot) => {
             if (bot.is_deleted) return;
             const card = document.createElement('div');
@@ -1308,9 +1957,9 @@
               button.textContent = 'Resume streaming';
               if (!isOffline) button.addEventListener('click', () => selectRobot(bot, false));
             } else if (otherStreaming) {
-              button.textContent = 'View stream';
+              button.textContent = 'Join stream';
               button.className = 'secondary';
-              if (!isOffline) button.addEventListener('click', () => selectRobot(bot, true));
+              if (!isOffline) button.addEventListener('click', () => selectRobot(bot, false));  // Multi-user: controls enabled
             } else {
               button.textContent = 'Stream robot';
               if (!isOffline) button.addEventListener('click', () => selectRobot(bot, false));
@@ -1338,7 +1987,290 @@
             card.appendChild(actions);
             detailRobots.appendChild(card);
           });
+
+          // Render virtual players
+          (lobby.virtual_players || []).forEach((player) => {
+            if (player.is_deleted) return;
+            const card = document.createElement('div');
+            card.className = 'robot-card';
+            card.style.borderLeft = `4px solid ${player.color}`;
+            card.innerHTML = `
+              <h4>${escapeHtml(player.name)}</h4>
+              <p class="robot-status" style="color: ${player.color};">Virtual Player</p>
+              <p class="hint" style="margin:0;font-size:0.75rem;">${player.namespace}</p>
+            `;
+            const actions = document.createElement('div');
+            actions.style.cssText = 'display:flex;gap:0.5rem;align-items:center;';
+            const streamBtn = document.createElement('button');
+            streamBtn.textContent = 'Stream';
+            streamBtn.addEventListener('click', () => selectVirtualPlayer(player));
+            actions.appendChild(streamBtn);
+            if (lobby.is_owner) {
+              const deleteBtn = document.createElement('button');
+              deleteBtn.className = 'ghost';
+              deleteBtn.textContent = '🗑️';
+              deleteBtn.title = 'Delete virtual player';
+              deleteBtn.style.cssText = 'padding:0.25rem 0.5rem;font-size:1rem;';
+              deleteBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                deleteVirtualPlayer(player.namespace);
+              });
+              actions.appendChild(deleteBtn);
+            }
+            card.appendChild(actions);
+            detailRobots.appendChild(card);
+          });
+
+          // Add "Add Virtual Player" button
+          renderAddVirtualPlayerButton(detailRobots);
         }
+
+        function renderAddVirtualPlayerButton(container) {
+          const lobby = state.currentLobby;
+          if (!lobby) return;
+
+          // The "Add Player" control fires a request event to the game. It's only
+          // active when the game has registered the matching listener (and the
+          // lobby is virtual). For non-virtual lobbies it's shown but disabled.
+          const hasSpawnListener = (lobby.game_listeners || []).includes('spawn_player');
+          const enabled = !!lobby.is_virtual && hasSpawnListener;
+          const inProgress = !!state.spawnRequestInProgress;
+
+          const addCard = document.createElement('div');
+          addCard.className = 'robot-card add-player-card';
+          const base = 'background:transparent;display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100px;';
+          if (inProgress) {
+            addCard.style.cssText = base + 'border:2px solid #f59e0b;cursor:wait;';
+            addCard.innerHTML = `
+              <span style="font-size:1.6rem;color:#f59e0b;">⟳</span>
+              <span style="color:#f59e0b;font-size:0.9rem;">Requesting…</span>
+            `;
+          } else if (enabled) {
+            addCard.style.cssText = base + 'border:2px dashed rgba(148,163,184,0.4);cursor:pointer;';
+            addCard.innerHTML = `
+              <span style="font-size:2rem;color:#64748b;">+</span>
+              <span style="color:#94a3b8;font-size:0.9rem;">Add Player</span>
+            `;
+            addCard.addEventListener('click', () => createVirtualPlayer());
+          } else {
+            addCard.style.cssText = base + 'border:2px dashed rgba(148,163,184,0.25);cursor:not-allowed;opacity:0.5;';
+            addCard.title = 'Spawning players is not enabled for this lobby';
+            addCard.innerHTML = `
+              <span style="font-size:2rem;color:#475569;">+</span>
+              <span style="color:#64748b;font-size:0.9rem;">Add Player</span>
+            `;
+          }
+          container.appendChild(addCard);
+        }
+
+        // Track an in-flight "request" event (e.g. spawn_player) so the button can
+        // show a pending state until the game responds. Generalizes to other
+        // request/response listeners later.
+        function setSpawnRequestInProgress(on) {
+          state.spawnRequestInProgress = on;
+          if (state.spawnRequestTimeout) {
+            clearTimeout(state.spawnRequestTimeout);
+            state.spawnRequestTimeout = null;
+          }
+          if (on) {
+            // Safety timeout so the button recovers if no response arrives.
+            state.spawnRequestTimeout = setTimeout(() => setSpawnRequestInProgress(false), 10000);
+          }
+          renderLobbyRobots();
+        }
+
+        function createVirtualPlayer() {
+          const lobby = state.currentLobby;
+          if (!lobby) return;
+          if (state.spawnRequestInProgress) return;  // one request at a time
+
+          const name = prompt('Enter name for virtual player:', `Player ${(lobby.virtual_players?.length || 0) + 1}`);
+          if (!name) return;
+
+          const colors = ['#3b82f6', '#ef4444', '#22c55e', '#f59e0b', '#8b5cf6', '#ec4899'];
+          const color = colors[Math.floor(Math.random() * colors.length)];
+
+          // Send request event to the game via WebSocket; the game's listener
+          // responds with a virtual_player_created event that clears the pending state.
+          const ws = state.lobbyStatusWs;
+          if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({
+              type: 'request_virtual_player',
+              lobby_id: lobby.id,
+              name,
+              color,
+            }));
+            console.log('[virtual-player] Requested new player via WebSocket');
+            setSpawnRequestInProgress(true);
+          } else {
+            alert('Not connected to server. Please refresh the page.');
+          }
+        }
+
+        function deleteVirtualPlayer(namespace) {
+          if (!confirm('Delete this virtual player?')) return;
+
+          // Send request via WebSocket
+          const ws = state.lobbyStatusWs;
+          if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({
+              type: 'delete_virtual_player',
+              namespace,
+            }));
+            console.log('[virtual-player] Requested delete via WebSocket');
+          } else {
+            alert('Not connected to server. Please refresh the page.');
+          }
+          // Player will be removed via WebSocket event (virtual_player_deleted)
+        }
+
+        function selectVirtualPlayer(player) {
+          // Virtual players stream a server-generated first-person view over the
+          // same WebRTC path as robots. Treat the player as a bot keyed by its
+          // namespace and reuse the normal teleop/streaming components.
+          selectRobot({
+            id: `virtual:${player.id}`,
+            name: player.name,
+            ros_namespace: player.namespace,
+          }, false);
+        }
+
+        // ---- Chat Functions ----
+
+        function initLobbyChat(lobbyId) {
+          // Unsubscribe from previous lobby if any
+          if (state.chatSubscribedLobbyId && state.chatSubscribedLobbyId !== lobbyId) {
+            unsubscribeFromChat();
+          }
+          // Clear existing messages
+          state.chatMessages = [];
+          chatMessages.innerHTML = '';
+          // Load history and subscribe
+          loadChatHistory(lobbyId);
+          subscribeToChatUpdates(lobbyId);
+        }
+
+        function cleanupChat() {
+          unsubscribeFromChat();
+          state.chatMessages = [];
+          chatMessages.innerHTML = '';
+        }
+
+        async function loadChatHistory(lobbyId) {
+          try {
+            const resp = await authFetch(`${apiBase()}/lobbies/${lobbyId}/messages?limit=50`);
+            if (resp.status === 401 || !resp.ok) return;
+            const data = await resp.json();
+            const messages = data.items || [];
+            state.chatMessages = messages;
+            renderChatMessages();
+          } catch (err) {
+            console.error('[chat] Failed to load history:', err);
+          }
+        }
+
+        function subscribeToChatUpdates(lobbyId) {
+          state.chatSubscribedLobbyId = lobbyId;
+          const ws = state.lobbyStatusWs;
+          if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: 'subscribe_chat', lobby_id: lobbyId }));
+            console.log('[chat] Subscribed to lobby', lobbyId);
+          }
+        }
+
+        function unsubscribeFromChat() {
+          if (!state.chatSubscribedLobbyId) return;
+          const ws = state.lobbyStatusWs;
+          if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: 'unsubscribe_chat', lobby_id: state.chatSubscribedLobbyId }));
+            console.log('[chat] Unsubscribed from lobby', state.chatSubscribedLobbyId);
+          }
+          state.chatSubscribedLobbyId = null;
+        }
+
+        function renderChatMessages() {
+          chatMessages.innerHTML = '';
+          state.chatMessages.forEach(msg => {
+            const el = createChatMessageElement(msg);
+            chatMessages.appendChild(el);
+          });
+          scrollChatToBottom();
+        }
+
+        function appendChatMessage(msg) {
+          // Avoid duplicates
+          if (state.chatMessages.some(m => m.id === msg.id)) return;
+          state.chatMessages.push(msg);
+          const el = createChatMessageElement(msg);
+          chatMessages.appendChild(el);
+          scrollChatToBottom();
+        }
+
+        function createChatMessageElement(msg) {
+          const div = document.createElement('div');
+          div.className = 'chat-message' + (msg.message_type === 'system' ? ' system' : '');
+          if (msg.message_type === 'system') {
+            div.innerHTML = `<span class="msg-content">${escapeHtml(msg.content)}</span>`;
+          } else {
+            const time = formatChatTime(msg.created_at);
+            div.innerHTML = `
+              <div class="msg-header">
+                <span class="msg-user">${escapeHtml(msg.user_name || 'Anonymous')}</span>
+                <span class="msg-time">${time}</span>
+              </div>
+              <span class="msg-content">${escapeHtml(msg.content)}</span>
+            `;
+          }
+          return div;
+        }
+
+        function formatChatTime(isoStr) {
+          try {
+            const d = new Date(isoStr);
+            return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+          } catch {
+            return '';
+          }
+        }
+
+        function escapeHtml(text) {
+          const div = document.createElement('div');
+          div.textContent = text;
+          return div.innerHTML;
+        }
+
+        function scrollChatToBottom() {
+          chatMessages.scrollTop = chatMessages.scrollHeight;
+        }
+
+        async function sendChatMessage(content) {
+          const lobbyId = state.currentLobby?.id;
+          if (!lobbyId || !content.trim()) return;
+          chatSendBtn.disabled = true;
+          try {
+            const resp = await authFetch(`${apiBase()}/lobbies/${lobbyId}/messages`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ content: content.trim() }),
+            });
+            if (!resp.ok) throw new Error('Failed to send message');
+            // Message will arrive via WebSocket
+            chatInput.value = '';
+          } catch (err) {
+            console.error('[chat] Failed to send:', err);
+          } finally {
+            chatSendBtn.disabled = false;
+            chatInput.focus();
+          }
+        }
+
+        // Chat form handler
+        chatForm.addEventListener('submit', (e) => {
+          e.preventDefault();
+          sendChatMessage(chatInput.value);
+        });
+
+        // ---- End Chat Functions ----
 
         async function openBotEdit(bot) {
           const lobby = state.currentLobby;
@@ -1362,6 +2294,9 @@
             panel.classList.toggle('active', match);
             panel.hidden = !match;
           });
+          // Full-page teleop mode
+          detailView.classList.toggle('teleop-active', tab === 'teleop');
+          document.body.classList.toggle('teleop-active', tab === 'teleop');
           updateTeleopKeyState();
         }
 
@@ -1389,8 +2324,9 @@
           state.activeRobot = bot;
           state.viewOnly = viewOnly;
           activeRobotLabel.textContent = `${bot.name}${viewOnly ? ' (viewing)' : ''}`;
+          hudRobotName.querySelector('strong').textContent = bot.name;
           setTeleopAvailability(true);
-          resetJoy();
+          resetJoy(false);  // Don't send commands on join - let robot keep its state
           setLobbyTab('teleop');
           teleopEmpty.hidden = true;
           teleopPane.hidden = false;
@@ -1405,6 +2341,10 @@
           startVideo(namespace);  // Also sets up bidirectional audio via WebRTC
           updateMicUI();
           startIdleTimeout();
+          // Auto-initialize touch joysticks on touch devices
+          if (isTouchDevice()) {
+            initTouchJoysticks();
+          }
         }
 
         const IDLE_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
@@ -1439,11 +2379,13 @@
           stopIdleTimeout();
           state.activeRobot = null;
           state.viewOnly = false;
+          state.speakerVoted = false;
           activeRobotLabel.textContent = '';
           setTeleopAvailability(false);
           resetJoy();
           stopMicrophone();
           stopGamepadPolling();
+          destroyTouchJoysticks();
           teleopPane.hidden = true;
           teleopEmpty.hidden = false;
           logTelemetry('Teleop idle');
@@ -1457,10 +2399,21 @@
             state.controlChannel.close();
             state.controlChannel = null;
           }
+          if (state.capChannel) {
+            state.capChannel.close();
+          }
+          resetCapState();
           if (state.telemetryChannel) {
             state.telemetryChannel.close();
             state.telemetryChannel = null;
           }
+          if (state.mapChannel) {
+            state.mapChannel.close();
+            state.mapChannel = null;
+          }
+          // Clear minimap and collapse it if expanded
+          state.mapData = null;
+          setMinimapExpanded(false);
           if (state.pc) {
             state.pc.close();
             state.pc = null;
@@ -1472,11 +2425,7 @@
           if (document.fullscreenElement === videoWrapper) {
             document.exitFullscreen?.();
           }
-          videoStatus.textContent = 'Video';
-          videoStatus.className = 'status disconnected';
           videoMeta.textContent = 'No active stream';
-          wsStatus.textContent = 'WS idle';
-          wsStatus.className = 'status disconnected';
           updateTeleopKeyState();
           updateFullscreenButton();
         }
@@ -1487,30 +2436,266 @@
           // Hide mic controls in view-only mode
           if (state.viewOnly) {
             micToggleBtn.style.display = 'none';
+            robotMicBtn.style.display = 'none';
             micVolumeSlider.style.display = 'none';
-            micStatusEl.textContent = '';
             return;
           }
           micToggleBtn.style.display = '';
+          robotMicBtn.style.display = '';
           micVolumeSlider.style.display = '';
-          const enabled = state.micEnabled;
-          micToggleBtn.classList.toggle('muted', !enabled);
-          micToggleBtn.classList.toggle('active', enabled);
-          micToggleBtn.title = enabled ? 'Mute microphone' : 'Unmute microphone';
+          // Group mic button (voice to other streamers)
+          micToggleBtn.classList.toggle('muted', !state.micEnabled);
+          micToggleBtn.classList.toggle('active', state.micEnabled);
+          micToggleBtn.title = state.micEnabled ? 'Mute to streamers' : 'Unmute to streamers';
+          // Robot mic button styling is handled by updateSpeakerButtonFromCaps (vote colors)
           micVolumeSlider.disabled = true; // Volume control not yet implemented for WebRTC
-          micStatusEl.textContent = enabled ? 'Mic on' : 'Mic off';
         }
+
+        function sendAudioRouting() {
+          // Send audio routing preferences to server via control channel
+          const routing = {
+            type: 'audio_routing',
+            to_group: state.micEnabled,
+            to_robot: state.robotMicEnabled,
+          };
+          if (state.controlChannel && state.controlChannel.readyState === 'open') {
+            state.controlChannel.send(JSON.stringify(routing));
+            console.info('[audio] SENT routing:', routing);
+          } else {
+            console.warn('[audio] routing NOT sent (channel not ready):', routing);
+          }
+        }
+
+        // ── Capability layer (goal/proof envelopes, shared/capability.proto) ──
+        //
+        // Facts arrive as proofs on the 'cap' data channel and merge into
+        // state.caps; widgets render from manifests by type shape. Outcomes
+        // (satisfied / diverged) are judged here by comparing evidence to our
+        // own goals — the wire carries no status fields.
+
+        async function sha256Hex(s) {
+          const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(s));
+          return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, '0')).join('');
+        }
+
+        function capPrefix() {
+          return state.activeRobot ? `bot:${state.activeRobot.ros_namespace}/` : null;
+        }
+
+        // My writer key as the API sees it (user_pc_key) — used to recognize
+        // my own vote witness among votes/*.
+        function capWriterKey() {
+          return `${state.activeRobot?.ros_namespace}:${state.user?.email}:${state.clientId}`;
+        }
+
+        // Goals are serialized through a promise queue so prev-chains never
+        // interleave (hashing is async).
+        let capSendQueue = Promise.resolve();
+        function sendCapGoal(suffix, body) {
+          capSendQueue = capSendQueue.then(async () => {
+            const prefix = capPrefix();
+            if (!prefix || !state.capChannel || state.capChannel.readyState !== 'open') return;
+            const path = prefix + suffix;
+            const wire = JSON.stringify({ path, verb: 'goal', body, prev: state.capHeads[path] || '' });
+            state.capHeads[path] = await sha256Hex(wire);
+            state.capPending[path] = body;
+            state.capChannel.send(wire);
+          }).catch((err) => console.warn('[cap] send failed:', err));
+          return capSendQueue;
+        }
+
+        function handleCapMessage(wire) {
+          let msg;
+          try { msg = JSON.parse(wire); } catch { return; }
+          if (msg.verb !== 'proof' || !msg.path) return;
+          const body = msg.body || {};
+          if (body.tombstone) {
+            delete state.caps[msg.path];
+          } else {
+            const fact = state.caps[msg.path] || (state.caps[msg.path] = {});
+            for (const k of ['manifest', 'value', 'citation', 'provenance']) {
+              if (k in body) fact[k] = body[k];
+            }
+          }
+          // Judge my pending goal against the evidence: equal → satisfied.
+          // (Numbers compare with epsilon — the provider may clamp/round.)
+          if (msg.path in state.capPending) {
+            const pending = state.capPending[msg.path];
+            const v = body.value;
+            const satisfied = (typeof pending === 'number' && typeof v === 'number')
+              ? Math.abs(pending - v) < 0.005
+              : v === pending;
+            if (satisfied) delete state.capPending[msg.path];
+          }
+          renderCapWidgets();
+        }
+
+        function resetCapState() {
+          state.caps = {};
+          state.capHeads = {};
+          state.capPending = {};
+          state.capChannel = null;
+          renderCapWidgets();
+        }
+
+        // Widget table: manifest type shape -> widget. Rendering is
+        // presence-driven: no manifest, no widget.
+        function renderCapWidgets() {
+          const container = document.getElementById('cap-widgets');
+          const prefix = capPrefix();
+          if (!container) return;
+          if (!prefix) { container.innerHTML = ''; updateSpeakerButtonFromCaps(); return; }
+
+          const seen = new Set();
+          for (const [path, fact] of Object.entries(state.caps)) {
+            if (!path.startsWith(prefix) || !fact.manifest) continue;
+            const m = fact.manifest;
+            // Per-peer bools bind the dedicated vote button; read-only facts
+            // surface through it too (enabled state) — skip generic rendering.
+            if (m.key === 'PEER' || m.readOnly) continue;
+            const suffix = path.slice(prefix.length);
+            const id = `cap-${suffix.replace(/\//g, '-')}`;
+            seen.add(id);
+            let el = document.getElementById(id);
+            const pending = path in state.capPending;
+            if ((m.schema || {}).type === 'FLOAT') {
+              const min = m.schema.min ?? 0, max = m.schema.max ?? 1;
+              if (!el) {
+                el = document.createElement('div');
+                el.id = id;
+                el.className = 'cap-widget';
+                el.innerHTML = `<span class="cap-label"></span>
+                  <input type="range" min="0" max="100" class="volume-slider">
+                  <span class="cap-value"></span>`;
+                el.querySelector('.cap-label').textContent = suffix.split('/').pop();
+                const slider = el.querySelector('input');
+                const sliderValue = () => {
+                  const v = min + (max - min) * (parseInt(slider.value, 10) / 100);
+                  return Math.round(v * 100) / 100;
+                };
+                let sendTimer = null;
+                slider.addEventListener('input', () => {
+                  el.dataset.dragging = '1';
+                  // Trailing throttle (~12Hz): latest value wins, no backlog.
+                  if (!sendTimer) {
+                    sendTimer = setTimeout(() => {
+                      sendTimer = null;
+                      sendCapGoal(suffix, sliderValue());
+                    }, 80);
+                  }
+                });
+                slider.addEventListener('change', () => {
+                  delete el.dataset.dragging;
+                  if (sendTimer) { clearTimeout(sendTimer); sendTimer = null; }
+                  sendCapGoal(suffix, sliderValue());  // final value, immediately
+                });
+                container.appendChild(el);
+              }
+              // Show confirmed value; never yank the thumb mid-drag.
+              if (!el.dataset.dragging && typeof fact.value === 'number') {
+                el.querySelector('input').value = Math.round(((fact.value - min) / (max - min)) * 100);
+              }
+              if (typeof fact.value === 'number') {
+                el.querySelector('.cap-value').textContent = `${Math.round(fact.value * 100)}%`;
+              }
+            } else if ((m.schema || {}).type === 'BOOL') {
+              if (!el) {
+                el = document.createElement('div');
+                el.id = id;
+                el.className = 'cap-widget';
+                el.innerHTML = `<button type="button" class="ghost"></button>`;
+                el.querySelector('button').addEventListener('click', () => {
+                  const current = (state.caps[path] || {}).value;
+                  sendCapGoal(suffix, !current);
+                });
+                container.appendChild(el);
+              }
+              const btn = el.querySelector('button');
+              btn.textContent = fact.value ? '🔇' : '🔊';
+              btn.title = (m.description || suffix) + (fact.value ? ' (muted)' : '');
+            } else {
+              seen.delete(id);
+              continue;
+            }
+            el.classList.toggle('cap-pending', pending);
+          }
+          // Drop widgets whose capability vanished
+          for (const el of [...container.children]) {
+            if (!seen.has(el.id)) el.remove();
+          }
+          updateSpeakerButtonFromCaps();
+        }
+
+        // The speaker vote button is the widget for the per-peer vote
+        // capability: presence follows the manifest; colors derive from the
+        // resolver's tally citation + the bridge-proved gate.
+        function updateSpeakerButtonFromCaps() {
+          if (!robotMicBtn) return;
+          const prefix = capPrefix();
+          const voteFact = prefix ? state.caps[`${prefix}audio/speaker/vote`] : null;
+          if (!voteFact || !voteFact.manifest) {
+            robotMicBtn.hidden = true;
+            return;
+          }
+          robotMicBtn.hidden = false;
+          const citation = voteFact.citation || { votes: [], connected: [] };
+          const votes = (citation.votes || []).length;
+          const total = (citation.connected || []).length;
+          const enabled = !!(state.caps[`${prefix}audio/speaker/enabled`] || {}).value;
+          const myWitness = state.caps[`${prefix}audio/speaker/votes/${capWriterKey()}`];
+          const userVoted = !!(myWitness && myWitness.value) || state.speakerVoted;
+          state.speakerEnabled = enabled;
+
+          robotMicBtn.classList.remove('vote-none', 'vote-partial', 'vote-pending', 'vote-enabled', 'muted', 'active');
+          if (enabled) {
+            robotMicBtn.classList.add('vote-enabled');
+            robotMicBtn.title = `Speaker enabled (${votes}/${total} votes)`;
+          } else if (votes === 0) {
+            robotMicBtn.classList.add('vote-none');
+            robotMicBtn.title = `Vote to enable speaker (0/${total} votes)`;
+          } else if (userVoted) {
+            robotMicBtn.classList.add('vote-pending');
+            robotMicBtn.title = `Waiting for others (${votes}/${total} votes)`;
+          } else {
+            robotMicBtn.classList.add('vote-partial');
+            robotMicBtn.title = `Others want speaker (${votes}/${total} votes) - click to vote`;
+          }
+          // Autoplay policy workaround (was in handleSpeakerState): make sure
+          // the video element is unmuted once real speaker facts flow.
+          const videoElement = document.getElementById('robot-video');
+          if (videoElement && videoElement.muted) videoElement.muted = false;
+        }
+
+        function toggleSpeakerVote() {
+          state.speakerVoted = !state.speakerVoted;
+          sendCapGoal('audio/speaker/vote', state.speakerVoted);
+          updateSpeakerButtonFromCaps();
+          logTelemetry(state.speakerVoted ? 'Voted for speaker' : 'Removed speaker vote');
+        }
+
+        let micEnableInProgress = false;  // Guard against concurrent mic enable attempts
 
         async function enableMicrophone() {
           console.log('[mic] enableMicrophone called (v2)');
+
+          // Guard against concurrent mic enable attempts
+          if (micEnableInProgress) {
+            console.log('[mic] mic enable already in progress, skipping');
+            return;
+          }
+
           // If mic track already exists, just enable it
-          if (state.micTrack) {
+          if (state.micTrack && state.micTrack.readyState === 'live') {
             console.log('[mic] reusing existing track');
             state.micTrack.enabled = true;
-            state.micEnabled = true;
-            updateMicUI();
-            logTelemetry('Microphone enabled (WebRTC)');
+            // Don't set micEnabled - that's for group routing now
+            logTelemetry('Microphone capture enabled');
             return;
+          }
+          // Clear dead track reference
+          if (state.micTrack && state.micTrack.readyState !== 'live') {
+            console.log('[mic] clearing dead mic track');
+            state.micTrack = null;
           }
 
           // First time: request mic access and add track to WebRTC
@@ -1519,19 +2704,68 @@
             return;
           }
 
+          // Wait for connection to be stable before renegotiating
+          if (state.pc.connectionState !== 'connected' || state.pc.signalingState !== 'stable') {
+            console.log('[mic] waiting for connection to stabilize (conn=%s, sig=%s)',
+                        state.pc.connectionState, state.pc.signalingState);
+            logTelemetry('Waiting for connection to stabilize...');
+            // Wait up to 5 seconds for stable state
+            for (let i = 0; i < 25; i++) {
+              await new Promise(r => setTimeout(r, 200));
+              if (state.pc && state.pc.connectionState === 'connected' && state.pc.signalingState === 'stable') {
+                console.log('[mic] connection now stable');
+                break;
+              }
+              if (!state.pc || state.pc.connectionState === 'failed' || state.pc.connectionState === 'closed') {
+                logTelemetry('Connection lost - cannot enable mic');
+                return;
+              }
+            }
+            if (!state.pc || state.pc.signalingState !== 'stable') {
+              logTelemetry('Connection did not stabilize - try again');
+              return;
+            }
+          }
+
+          // Set guard before starting renegotiation
+          micEnableInProgress = true;
           try {
             logTelemetry('Requesting microphone access...');
-            const micStream = await navigator.mediaDevices.getUserMedia({
-              audio: {
-                echoCancellation: true,
-                noiseSuppression: true,
-                autoGainControl: true,
-                sampleRate: 48000,
-              },
-            });
+            // Try with constraints first, fall back to simple audio:true for iOS compatibility
+            let micStream;
+            try {
+              micStream = await navigator.mediaDevices.getUserMedia({
+                audio: {
+                  echoCancellation: true,
+                  noiseSuppression: true,
+                  autoGainControl: true,
+                },
+              });
+            } catch (constraintErr) {
+              console.warn('[mic] constraint getUserMedia failed, trying simple audio:', constraintErr);
+              micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            }
             state.micStream = micStream;
             const micTrack = micStream.getAudioTracks()[0];
+            console.info('[mic] got track:', micTrack.label, 'enabled:', micTrack.enabled, 'muted:', micTrack.muted, 'readyState:', micTrack.readyState);
+            console.info('[mic] track settings:', JSON.stringify(micTrack.getSettings()));
+
+            // Explicitly enable track (iOS sometimes starts disabled)
+            micTrack.enabled = true;
+            console.info('[mic] track after enable:', 'enabled:', micTrack.enabled, 'muted:', micTrack.muted);
+
             state.micTrack = micTrack;
+
+            // Monitor track state changes (useful for iOS debugging)
+            micTrack.onmute = () => {
+              console.warn('[mic] track MUTED - re-enabling');
+              micTrack.enabled = true;
+            };
+            micTrack.onunmute = () => console.info('[mic] track unmuted');
+            micTrack.onended = () => console.warn('[mic] track ENDED');
+
+            // Set up audio level detection for visual feedback
+            setupMicLevelDetection(micStream);
 
             // Add mic track to peer connection
             state.pc.addTrack(micTrack, micStream);
@@ -1559,44 +2793,67 @@
             });
 
             // Send renegotiation offer to API (same endpoint as initial offer)
+            // Retry logic for 409 Conflict (server doing its own renegotiation)
             const namespace = state.activeRobot?.ros_namespace;
             console.log('[mic] sending renegotiation to', `${apiBase()}/robots/${encodeURIComponent(namespace)}/webrtc`);
-            const resp = await fetch(`${apiBase()}/robots/${encodeURIComponent(namespace)}/webrtc`, {
-              method: 'POST',
-              headers: {
-                'Content-Type': 'application/json',
-                ...authHeaders(),
-              },
-              body: JSON.stringify({
-                sdp: state.pc.localDescription.sdp,
-                type: state.pc.localDescription.type,
-              }),
-            });
 
-            if (!resp.ok) {
-              throw new Error(`Renegotiation failed: ${resp.status}`);
+            let answer = null;
+            for (let attempt = 1; attempt <= 5; attempt++) {
+              const resp = await authFetch(`${apiBase()}/robots/${encodeURIComponent(namespace)}/webrtc`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  sdp: state.pc.localDescription.sdp,
+                  type: state.pc.localDescription.type,
+                  client_id: state.clientId,
+                }),
+              });
+
+              if (resp.ok) {
+                answer = await resp.json();
+                break;
+              } else if (resp.status === 409 && attempt < 5) {
+                // Server is doing its own renegotiation, wait and retry
+                console.warn(`[mic] renegotiation conflict (attempt ${attempt}/5), retrying in 500ms...`);
+                await new Promise(r => setTimeout(r, 500));
+                continue;
+              } else {
+                throw new Error(`Renegotiation failed: ${resp.status}`);
+              }
             }
 
-            const answer = await resp.json();
+            if (!answer) {
+              throw new Error('Renegotiation failed after 5 attempts');
+            }
+            console.info('[mic] got answer, setting remote description');
             await state.pc.setRemoteDescription(new RTCSessionDescription(answer));
-            console.info('[mic] renegotiation complete');
+            console.info('[mic] renegotiation complete, senders:', state.pc.getSenders().map(s => s.track?.kind));
 
-            state.micEnabled = true;
-            updateMicUI();
-            logTelemetry('Microphone enabled (WebRTC)');
+            // Verify the track was added
+            const audioSenders = state.pc.getSenders().filter(s => s.track?.kind === 'audio');
+            if (audioSenders.length === 0) {
+              console.warn('[mic] No audio senders after renegotiation!');
+            } else {
+              console.info('[mic] Audio sender active:', audioSenders[0].track?.enabled, audioSenders[0].track?.muted);
+            }
+            logTelemetry('Microphone capture enabled');
           } catch (err) {
             console.error('[mic] failed to enable microphone:', err);
             logTelemetry(`Mic error: ${err.message}`);
+          } finally {
+            micEnableInProgress = false;
           }
         }
 
         function disableMicrophone() {
+          console.log('[mic] disableMicrophone called');
           // Disable (mute) the mic track
           if (state.micTrack) {
             state.micTrack.enabled = false;
           }
-          state.micEnabled = false;
-          updateMicUI();
+          // Don't reset micEnabled/robotMicEnabled - those are routing states
+          micToggleBtn.classList.remove('speaking');
+          robotMicBtn.classList.remove('speaking');
         }
 
         function stopMicrophone() {
@@ -1608,18 +2865,92 @@
             state.micStream.getTracks().forEach((track) => track.stop());
             state.micStream = null;
           }
+          // Clean up audio level detection
+          if (state.micLevelInterval) {
+            clearInterval(state.micLevelInterval);
+            state.micLevelInterval = null;
+          }
+          if (state.micAudioContext) {
+            state.micAudioContext.close();
+            state.micAudioContext = null;
+          }
+          micToggleBtn.classList.remove('speaking');
+          robotMicBtn.classList.remove('speaking');
           state.micTrack = null;
+          // Reset routing states when stopping completely
           state.micEnabled = false;
+          state.robotMicEnabled = false;
           updateMicUI();
         }
 
-        function toggleMicrophone() {
-          if (state.micEnabled) {
-            disableMicrophone();
-            logTelemetry('Microphone muted');
-          } else {
-            enableMicrophone();
+        async function setupMicLevelDetection(stream) {
+          try {
+            const audioContext = new AudioContext();
+            // iOS requires explicit resume after user interaction
+            if (audioContext.state === 'suspended') {
+              console.info('[mic] AudioContext suspended, resuming...');
+              await audioContext.resume();
+            }
+            console.info('[mic] AudioContext state:', audioContext.state, 'sampleRate:', audioContext.sampleRate);
+
+            const analyser = audioContext.createAnalyser();
+            const source = audioContext.createMediaStreamSource(stream);
+            source.connect(analyser);
+            analyser.fftSize = 256;
+            const dataArray = new Uint8Array(analyser.frequencyBinCount);
+            state.micAudioContext = audioContext;
+
+            // Check audio levels periodically
+            state.micLevelInterval = setInterval(() => {
+              if (!state.micEnabled && !state.robotMicEnabled) {
+                micToggleBtn.classList.remove('speaking');
+                return;
+              }
+              analyser.getByteFrequencyData(dataArray);
+              const average = dataArray.reduce((a, b) => a + b, 0) / dataArray.length;
+              // Threshold for "speaking" - adjust as needed
+              const isSpeaking = average > 15;
+              micToggleBtn.classList.toggle('speaking', isSpeaking);
+              // Log every 50 intervals (~5 sec) for debugging
+              if (state._micLevelCount === undefined) state._micLevelCount = 0;
+              state._micLevelCount++;
+              if (state._micLevelCount % 50 === 1) {
+                console.info('[mic] level check:', average.toFixed(1), 'speaking:', isSpeaking);
+              }
+            }, 100);
+          } catch (err) {
+            console.warn('[mic] Could not set up level detection:', err);
           }
+        }
+
+        function toggleMicrophone() {
+          // Toggle voice to GROUP (other streamers)
+          console.log('[mic] toggleMicrophone called, state.micEnabled=', state.micEnabled);
+          state.micEnabled = !state.micEnabled;
+          updateMicUI();
+          sendAudioRouting();
+          // Enable/disable actual mic capture based on either button
+          if (state.micEnabled || state.robotMicEnabled) {
+            if (!state.micTrack) enableMicrophone();
+          } else {
+            disableMicrophone();
+          }
+          logTelemetry(state.micEnabled ? 'Group mic on' : 'Group mic off');
+        }
+
+        function toggleRobotMic() {
+          // Toggle voice to ROBOT speaker
+          console.log('[mic] toggleRobotMic called, state.robotMicEnabled=', state.robotMicEnabled);
+          state.robotMicEnabled = !state.robotMicEnabled;
+          updateMicUI();
+          sendAudioRouting();
+          // Enable/disable actual mic capture based on either button
+          if (state.micEnabled || state.robotMicEnabled) {
+            if (!state.micTrack) enableMicrophone();
+          } else {
+            disableMicrophone();
+          }
+          logTelemetry(state.robotMicEnabled ? 'Robot mic on' : 'Robot mic off');
         }
 
         function setMicVolume(volume) {
@@ -1634,11 +2965,7 @@
           if (state.ws) state.ws.close();
           const ws = new WebSocket(`${wsBase}/ws/${encodeURIComponent(namespace)}`);
           state.ws = ws;
-          wsStatus.textContent = 'Connecting...';
-          wsStatus.className = 'status disconnected';
           ws.onopen = () => {
-            wsStatus.textContent = `WS connected (${namespace})`;
-            wsStatus.className = 'status connected';
             logTelemetry(`WebSocket connected to ${namespace}`);
           };
           ws.onmessage = (event) => {
@@ -1649,11 +2976,8 @@
                 if (typeof data.linear_speed === 'number') {
                   state.linearSpeed = data.linear_speed;
                 }
-                if (typeof data.angular_speed === 'number') {
-                  state.angularSpeed = data.angular_speed;
-                }
                 updateSpeedIndicators();
-                logTelemetry(`vel: lin=${state.linearSpeed.toFixed(2)} ang=${state.angularSpeed.toFixed(2)}`);
+                logTelemetry(`vel: lin=${state.linearSpeed.toFixed(2)}`);
               } else {
                 logTelemetry(JSON.stringify(data));
               }
@@ -1665,8 +2989,7 @@
             }
           };
           ws.onclose = () => {
-            wsStatus.textContent = 'WS disconnected';
-            wsStatus.className = 'status disconnected';
+            logTelemetry('WebSocket disconnected');
           };
           ws.onerror = (event) => {
             console.error('WS error', event);
@@ -1749,6 +3072,9 @@
           // Update display
           updateJoyIndicators();
           sendJoy();
+
+          // Update ghost move joystick to show local WASD inputs
+          updateLocalMoveGhost();
         }
 
         function updateJoyIndicators() {
@@ -1775,32 +3101,95 @@
           const iceServers = await fetchIceServers();
           const pc = new RTCPeerConnection({ iceServers });
           state.pc = pc;
-          const inboundStream = new MediaStream();
+          const videoStream = new MediaStream();  // Only for video
+          const audioElements = [];  // Track audio elements for cleanup
+
           pc.addEventListener('track', (event) => {
-            console.info('[video] received track:', event.track.kind);
-            inboundStream.addTrack(event.track);
-            videoElement.srcObject = inboundStream;
-            // Ensure audio plays
-            if (event.track.kind === 'audio') {
-              console.info('[video] audio track received, enabling playback');
-              videoElement.muted = false;
-              videoElement.volume = 1.0;
-              // Try to play - if blocked, user will need to click
-              videoElement.play().then(() => {
-                console.info('[video] audio playback started');
+            console.info('[track] received:', event.track.kind, 'id:', event.track.id);
+
+            if (event.track.kind === 'video') {
+              // Video goes to the video element
+              videoStream.addTrack(event.track);
+              if (videoElement.srcObject !== videoStream) {
+                videoElement.srcObject = videoStream;
+                videoElement.muted = true;  // Video element muted - audio via separate elements
+                videoElement.play().catch(e => {
+                  console.warn('[video] autoplay blocked:', e);
+                });
+              }
+            } else if (event.track.kind === 'audio') {
+              // Each audio track gets its own audio element (browser mixes automatically)
+              console.info('[audio] creating audio element for track:', event.track.id);
+              const audioEl = document.createElement('audio');
+              const audioStream = new MediaStream([event.track]);
+              audioEl.srcObject = audioStream;
+              audioEl.autoplay = true;
+              audioEl.play().then(() => {
+                console.info('[audio] playing track:', event.track.id);
               }).catch(e => {
-                console.warn('[video] autoplay blocked, click video to enable audio:', e);
-                // Add click handler to enable audio
-                videoElement.onclick = () => {
-                  videoElement.muted = false;
-                  videoElement.play();
-                  videoElement.onclick = null;
-                };
+                console.warn('[audio] autoplay blocked for track:', event.track.id, e);
               });
+              audioElements.push({ el: audioEl, track: event.track });
+
+              // RMS audio level monitoring for debugging peer audio
+              const trackId = event.track.id.substring(0, 8);  // Short ID for logging
+              try {
+                const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+                const source = audioCtx.createMediaStreamSource(audioStream);
+                const analyser = audioCtx.createAnalyser();
+                analyser.fftSize = 256;
+                source.connect(analyser);
+                const dataArray = new Float32Array(analyser.fftSize);
+                let hasLoggedAudio = false;
+                let silentFrames = 0;
+
+                const checkAudio = () => {
+                  if (event.track.readyState !== 'live') {
+                    console.info('[audio-monitor] track %s no longer live, stopping', trackId);
+                    audioCtx.close();
+                    return;
+                  }
+                  analyser.getFloatTimeDomainData(dataArray);
+                  let sum = 0;
+                  for (let i = 0; i < dataArray.length; i++) {
+                    sum += dataArray[i] * dataArray[i];
+                  }
+                  const rms = Math.sqrt(sum / dataArray.length);
+
+                  if (rms > 0.01) {  // Threshold for "audio present"
+                    if (!hasLoggedAudio) {
+                      console.info('[audio-monitor] PEER AUDIO DETECTED on track %s, rms=%.4f', trackId, rms);
+                      hasLoggedAudio = true;
+                    }
+                    silentFrames = 0;
+                  } else {
+                    silentFrames++;
+                    if (hasLoggedAudio && silentFrames === 50) {  // ~5 seconds of silence
+                      console.info('[audio-monitor] peer audio went silent on track %s', trackId);
+                      hasLoggedAudio = false;
+                    }
+                  }
+                  setTimeout(checkAudio, 100);  // Check every 100ms
+                };
+                setTimeout(checkAudio, 500);  // Start after short delay
+                console.info('[audio-monitor] started monitoring peer track %s', trackId);
+              } catch (e) {
+                console.warn('[audio-monitor] failed to setup for track %s:', trackId, e);
+              }
+
+              // Clean up when track ends
+              event.track.onended = () => {
+                console.info('[audio] track ended:', event.track.id);
+                const idx = audioElements.findIndex(a => a.track === event.track);
+                if (idx >= 0) {
+                  audioElements[idx].el.srcObject = null;
+                  audioElements.splice(idx, 1);
+                }
+              };
             }
           });
 
-          // Handle incoming data channels (telemetry from API)
+          // Handle incoming data channels (telemetry and map from API)
           pc.addEventListener('datachannel', (event) => {
             const channel = event.channel;
             console.info('[data] received data channel:', channel.label);
@@ -1817,6 +3206,19 @@
               channel.onmessage = (event) => {
                 handleTelemetryData(event.data);
               };
+            } else if (channel.label === 'map') {
+              state.mapChannel = channel;
+              channel.onopen = () => {
+                console.info('[data] map channel open');
+                logTelemetry('Map data channel connected');
+              };
+              channel.onclose = () => {
+                console.info('[data] map channel closed');
+                state.mapChannel = null;
+              };
+              channel.onmessage = (event) => {
+                handleMapData(event.data);
+              };
             }
           });
 
@@ -1830,6 +3232,8 @@
             controlChannel.onopen = () => {
               console.info('[data] control channel open');
               logTelemetry('Control data channel connected');
+              // Send current audio routing state in case buttons were clicked before channel opened
+              sendAudioRouting();
             };
             controlChannel.onclose = () => {
               console.info('[data] control channel closed');
@@ -1838,25 +3242,94 @@
             controlChannel.onerror = (event) => {
               console.warn('[data] control channel error:', event);
             };
+            controlChannel.onmessage = async (event) => {
+              // Handle incoming messages from server (speaker state, aggregated control, renegotiation, etc.)
+              try {
+                const data = JSON.parse(event.data);
+                if (data.type === 'aggregated_control') {
+                  // Update ghost joysticks to show other users' inputs
+                  updateGhostJoysticks(data.axes, data.users);
+                } else if (data.type === 'camera_control') {
+                  // Update ghost camera joystick for other users' camera inputs
+                  updateGhostCameraJoystick(data.pan_delta, data.tilt_delta, data.user);
+                } else if (data.type === 'renegotiate_request') {
+                  // Server has new tracks for us - send a new offer (browser-initiated renegotiation)
+                  const trackCount = data.new_track_count || 1;
+                  console.info('[renegotiate] server requested renegotiation, reason:', data.reason, 'tracks:', trackCount);
+                  const namespace = state.activeRobot?.ros_namespace;
+                  if (namespace && state.pc && state.pc.signalingState === 'stable') {
+                    handleServerRenegotiateRequest(namespace, trackCount);
+                  } else {
+                    console.warn('[renegotiate] cannot renegotiate: no PC or not stable');
+                  }
+                } else if (data.type === 'reconnect_needed') {
+                  // Server wants us to fully reconnect (fallback)
+                  console.info('[reconnect] server requested reconnect, reason:', data.reason);
+                  const namespace = state.activeRobot?.ros_namespace;
+                  if (namespace) {
+                    console.info('[reconnect] closing current connection and reconnecting...');
+                    const wasMicEnabled = state.micEnabled;
+                    const wasRobotMicEnabled = state.robotMicEnabled;
+                    setTimeout(async () => {
+                      if (state.micTrack) {
+                        state.micTrack.stop();
+                        state.micTrack = null;
+                      }
+                      if (state.micStream) {
+                        state.micStream.getTracks().forEach(t => t.stop());
+                        state.micStream = null;
+                      }
+                      if (state.pc) {
+                        state.pc.close();
+                        state.pc = null;
+                      }
+                      startVideo(namespace);
+                      if (wasMicEnabled || wasRobotMicEnabled) {
+                        const waitForConnection = () => {
+                          if (state.pc && state.pc.connectionState === 'connected' && state.pc.signalingState === 'stable') {
+                            enableMicrophone();
+                          } else if (state.pc) {
+                            setTimeout(waitForConnection, 200);
+                          }
+                        };
+                        setTimeout(waitForConnection, 500);
+                      }
+                    }, 100);
+                  }
+                }
+              } catch (err) {
+                console.warn('[data] control channel message parse error:', err);
+              }
+            };
+
+            // Capability channel: goal/proof envelopes (ordered+reliable —
+            // unlike joy traffic, prev-chains want in-order delivery).
+            const capChannel = pc.createDataChannel('cap', { ordered: true });
+            state.capChannel = capChannel;
+            capChannel.onopen = () => {
+              console.info('[cap] channel open');
+              // Re-assert my vote intent across reconnects (votes are
+              // connection-scoped facts on the server side).
+              if (state.speakerVoted) sendCapGoal('audio/speaker/vote', true);
+            };
+            capChannel.onmessage = (event) => handleCapMessage(event.data);
+            capChannel.onclose = () => {
+              console.info('[cap] channel closed');
+              if (state.capChannel === capChannel) state.capChannel = null;
+            };
           }
 
           // Request video from server (recvonly)
           pc.addTransceiver('video', { direction: 'recvonly' });
 
-          // Receive robot audio (recvonly initially - mic is added on button click)
+          // Receive robot audio (recvonly)
           pc.addTransceiver('audio', { direction: 'recvonly' });
-          console.info('[video] added recvonly audio transceiver');
-          videoStatus.textContent = 'Connecting';
-          videoStatus.className = 'status disconnected';
+          // Group audio tracks are added dynamically via renegotiation
+          console.info('[video] added recvonly transceivers for video + robot audio');
           pc.addEventListener('connectionstatechange', () => {
             console.info('[video] connection state changed:', pc.connectionState);
             if (pc.connectionState === 'connected') {
-              videoStatus.textContent = 'Live';
-              videoStatus.className = 'status connected';
               videoMeta.textContent = 'ROS stream active';
-            } else if (pc.connectionState === 'failed') {
-              videoStatus.textContent = 'Error';
-              videoStatus.className = 'status disconnected';
             }
           });
           pc.addEventListener('iceconnectionstatechange', () => {
@@ -1879,10 +3352,10 @@
             })
             .then((offer) => {
               console.info('[video] sending offer to gateway');
-              return fetch(`${apiBase()}/robots/${encodeURIComponent(namespace)}/webrtc`, {
+              return authFetch(`${apiBase()}/robots/${encodeURIComponent(namespace)}/webrtc`, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json', ...authHeaders() },
-                body: JSON.stringify({ sdp: offer.sdp, type: offer.type }),
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ sdp: offer.sdp, type: offer.type, client_id: state.clientId }),
               });
             })
             .then((resp) => {
@@ -1895,9 +3368,79 @@
             })
             .catch((err) => {
               console.error('Video setup failed', err);
-              videoStatus.textContent = 'Error';
-              videoStatus.className = 'status disconnected';
             });
+        }
+
+        let renegotiationInProgress = false;  // Guard against concurrent renegotiation
+
+        async function handleServerRenegotiateRequest(namespace, newTrackCount = 1) {
+          /**
+           * Handle server's request for renegotiation (new audio tracks available).
+           * Browser creates a new offer and sends it to server.
+           * @param {number} newTrackCount - How many new audio transceivers to create
+           */
+          if (renegotiationInProgress) {
+            console.info('[renegotiate] renegotiation already in progress, skipping');
+            return;
+          }
+
+          if (!state.pc || state.pc.signalingState !== 'stable') {
+            console.warn('[renegotiate] cannot renegotiate: PC not stable (sig=%s)',
+                        state.pc?.signalingState);
+            return;
+          }
+
+          renegotiationInProgress = true;
+          try {
+            // Add recvonly audio transceivers for each new track the server wants to send
+            // Each transceiver = one audio stream (e.g., one other user's mic)
+            for (let i = 0; i < newTrackCount; i++) {
+              state.pc.addTransceiver('audio', { direction: 'recvonly' });
+            }
+            console.info('[renegotiate] added %d recvonly audio transceiver(s), creating new offer', newTrackCount);
+            const offer = await state.pc.createOffer();
+            await state.pc.setLocalDescription(offer);
+
+            // Wait for ICE gathering (brief timeout since ICE should already be established)
+            await new Promise((resolve) => {
+              if (state.pc.iceGatheringState === 'complete') {
+                resolve();
+              } else {
+                const checkState = () => {
+                  if (state.pc.iceGatheringState === 'complete') {
+                    state.pc.removeEventListener('icegatheringstatechange', checkState);
+                    resolve();
+                  }
+                };
+                state.pc.addEventListener('icegatheringstatechange', checkState);
+                setTimeout(resolve, 1000);  // Short timeout - ICE should already be ready
+              }
+            });
+
+            console.info('[renegotiate] sending offer to server');
+            const resp = await authFetch(`${apiBase()}/robots/${encodeURIComponent(namespace)}/webrtc`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                sdp: state.pc.localDescription.sdp,
+                type: state.pc.localDescription.type,
+                client_id: state.clientId,
+              }),
+            });
+
+            if (!resp.ok) {
+              throw new Error(`Renegotiation failed: ${resp.status}`);
+            }
+
+            const answer = await resp.json();
+            console.info('[renegotiate] received answer, setting remote description');
+            await state.pc.setRemoteDescription(new RTCSessionDescription(answer));
+            console.info('[renegotiate] renegotiation complete');
+          } catch (err) {
+            console.error('[renegotiate] renegotiation failed:', err);
+          } finally {
+            renegotiationInProgress = false;
+          }
         }
 
         function handleTelemetryData(message) {
@@ -1908,16 +3451,30 @@
             const data = JSON.parse(message);
             if (data.type === 'telemetry') {
               // Update actual speed from robot telemetry
+              // (robot sends linear_speed + steering; there is no
+              // angular_speed field — the old read of it was dead code)
               if (typeof data.linear_speed === 'number') {
                 state.linearSpeed = data.linear_speed;
               }
-              if (typeof data.angular_speed === 'number') {
-                state.angularSpeed = data.angular_speed;
-              }
               updateSpeedIndicators();
-              logTelemetry(`[DC] vel: lin=${state.linearSpeed.toFixed(2)} ang=${state.angularSpeed.toFixed(2)}`);
-              if (typeof data.front_distance === 'number') {
-                frontDistanceValue.textContent = `${data.front_distance.toFixed(2)} m`;
+              // Update front distance display
+              if (typeof data.front_distance === 'number' && data.front_distance > 0) {
+                const distText = `${data.front_distance.toFixed(2)} m`;
+                frontDistanceValue.textContent = distText;
+                // Color gradient based on speed factor (1.0 = normal, lower = more red)
+                const factor = data.obstacle_speed_factor ?? 1.0;
+                if (factor < 1.0) {
+                  // Interpolate from yellow (factor=1) to red (factor=0.1)
+                  const intensity = Math.max(0, (factor - 0.1) / 0.9);
+                  const red = 248;
+                  const green = Math.round(113 + (180 - 113) * intensity);
+                  frontDistanceValue.style.color = `rgb(${red}, ${green}, 113)`;
+                } else {
+                  frontDistanceValue.style.color = '';
+                }
+              } else {
+                frontDistanceValue.textContent = '-- m';
+                frontDistanceValue.style.color = '';
               }
             }
           } catch (err) {
@@ -1925,14 +3482,164 @@
           }
         }
 
+        function handleMapData(message) {
+          /**
+           * Handle SLAM map data received via data channel.
+           */
+          try {
+            const data = JSON.parse(message);
+            if (data.type === 'map_update') {
+              state.mapData = data;
+              renderMinimap();
+            }
+          } catch (err) {
+            console.warn('[data] failed to parse map data:', err);
+          }
+        }
+
+        function renderMinimap() {
+          const canvas = document.getElementById('minimap-canvas');
+          if (!canvas) return;
+          const ctx = canvas.getContext('2d');
+          const map = state.mapData;
+          if (!map) {
+            clearMinimap();
+            return;
+          }
+
+          // Decode base64 map data
+          const binaryString = atob(map.data);
+          const grid = new Uint8Array(binaryString.length);
+          for (let i = 0; i < binaryString.length; i++) {
+            grid[i] = binaryString.charCodeAt(i);
+          }
+
+          // Create image data
+          const imgData = ctx.createImageData(map.width, map.height);
+          for (let i = 0; i < grid.length; i++) {
+            const v = grid[i];
+            const idx = i * 4;
+            if (v === 0) {
+              // Unknown (-1 + 1 = 0) -> Gray
+              imgData.data[idx] = 64;
+              imgData.data[idx + 1] = 64;
+              imgData.data[idx + 2] = 64;
+            } else if (v === 1) {
+              // Free (0 + 1 = 1) -> White/light
+              imgData.data[idx] = 200;
+              imgData.data[idx + 1] = 200;
+              imgData.data[idx + 2] = 200;
+            } else {
+              // Occupied (100 + 1 = 101 or higher) -> Dark/black
+              imgData.data[idx] = 20;
+              imgData.data[idx + 1] = 20;
+              imgData.data[idx + 2] = 20;
+            }
+            imgData.data[idx + 3] = 255; // Alpha
+          }
+
+          // Draw scaled to canvas
+          const tmpCanvas = document.createElement('canvas');
+          tmpCanvas.width = map.width;
+          tmpCanvas.height = map.height;
+          tmpCanvas.getContext('2d').putImageData(imgData, 0, 0);
+
+          // Clear and draw scaled. The occupancy grid is row-major with row 0 at
+          // the map origin (minimum y, ROS y-up), but putImageData places row 0 at
+          // the top, so flip vertically to render a conventional y-up map. The
+          // robot marker below assumes this orientation.
+          ctx.clearRect(0, 0, canvas.width, canvas.height);
+          ctx.save();
+          ctx.translate(0, canvas.height);
+          ctx.scale(1, -1);
+          ctx.drawImage(tmpCanvas, 0, 0, canvas.width, canvas.height);
+          ctx.restore();
+
+          // Robot position: map pose (world metres) -> grid cell -> canvas px.
+          // Falls back to map centre if pose fields are absent (older sources).
+          const res = map.resolution || 0.05;
+          let rx = canvas.width / 2;
+          let ry = canvas.height / 2;
+          if (typeof map.robot_x === 'number' && typeof map.origin_x === 'number') {
+            const cellX = (map.robot_x - map.origin_x) / res;
+            const cellY = (map.robot_y - map.origin_y) / res;
+            rx = (cellX / map.width) * canvas.width;
+            // Grid is row-major from origin (y up); canvas y is down -> flip.
+            ry = canvas.height - (cellY / map.height) * canvas.height;
+          }
+          const theta = typeof map.robot_theta === 'number' ? map.robot_theta : Math.PI / 2;
+
+          ctx.fillStyle = '#3b82f6';
+          ctx.beginPath();
+          ctx.arc(rx, ry, 4, 0, 2 * Math.PI);
+          ctx.fill();
+
+          // Direction indicator (theta measured CCW from +x; canvas y is flipped).
+          const len = 10;
+          ctx.strokeStyle = '#3b82f6';
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          ctx.moveTo(rx, ry);
+          ctx.lineTo(rx + len * Math.cos(theta), ry - len * Math.sin(theta));
+          ctx.stroke();
+        }
+
+        function clearMinimap() {
+          const canvas = document.getElementById('minimap-canvas');
+          if (!canvas) return;
+          const ctx = canvas.getContext('2d');
+          ctx.clearRect(0, 0, canvas.width, canvas.height);
+          // Draw placeholder text
+          ctx.fillStyle = 'rgba(148, 163, 184, 0.5)';
+          ctx.font = '10px sans-serif';
+          ctx.textAlign = 'center';
+          ctx.fillText('No map', canvas.width / 2, canvas.height / 2);
+        }
+
+        function setMinimapExpanded(expanded) {
+          const hud = document.getElementById('hud-minimap');
+          const canvas = document.getElementById('minimap-canvas');
+          if (!hud || !canvas) return;
+          state.minimapExpanded = expanded;
+          hud.classList.toggle('expanded', expanded);
+          // Use a larger drawing buffer when expanded so the map stays crisp.
+          const size = expanded ? 600 : 150;
+          if (canvas.width !== size) {
+            canvas.width = size;
+            canvas.height = size;
+          }
+          if (state.mapData) {
+            renderMinimap();
+          } else {
+            clearMinimap();
+          }
+        }
+
+        function toggleMinimap() {
+          setMinimapExpanded(!state.minimapExpanded);
+        }
+
         function updateTeleopKeyState() {
+          const wasEnabled = Boolean(window.__teleopKeysEnabled);
           window.__teleopKeysEnabled = Boolean(state.activeRobot && state.view === 'detail' && state.lobbyTab === 'teleop');
           // Start/stop gamepad polling based on teleop state
           if (window.__teleopKeysEnabled) {
             startGamepadPolling();
           } else {
             stopGamepadPolling();
+            // handleKey ignores events while disabled, so any key held right
+            // now would stay latched down forever — release everything.
+            if (wasEnabled) resetJoy();
           }
+        }
+
+        // Movement (WASD/arrows) and camera (IJKL) keys share state.keysPressed,
+        // so drive logic must only ever scan the movement subset — a latched
+        // camera key must not block the drive send loop or gamepad polling.
+        const MOVEMENT_KEYS = ['w', 's', 'a', 'd', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright'];
+        const CAMERA_KEYS = ['i', 'j', 'k', 'l'];
+        function anyMovementKeyHeld() {
+          return MOVEMENT_KEYS.some(k => state.keysPressed[k]);
         }
 
         function handleKey(event, isKeyDown) {
@@ -1940,12 +3647,11 @@
           const key = event.key.toLowerCase();
 
           // Movement keys (WASD / arrows)
-          const movementKeys = ['w', 's', 'a', 'd', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright'];
-          if (movementKeys.includes(key)) {
+          if (MOVEMENT_KEYS.includes(key)) {
             event.preventDefault();
-            const wasPressed = Object.values(state.keysPressed).some(v => v);
+            const wasPressed = anyMovementKeyHeld();
             state.keysPressed[key] = isKeyDown;
-            const isPressed = Object.values(state.keysPressed).some(v => v);
+            const isPressed = anyMovementKeyHeld();
 
             // Debug: log key state changes
             console.log(`[key] ${isKeyDown ? 'down' : 'up'} '${key}' wasPressed=${wasPressed} isPressed=${isPressed} interval=${!!state.keySendInterval}`);
@@ -1958,18 +3664,20 @@
               console.log('[key] Stopping continuous send');
               stopKeySending();
               updateAxesFromKeyboard(); // Send final zero state
+            } else if (isPressed) {
+              // Key changed while other keys held - update immediately
+              updateAxesFromKeyboard();
             }
             return;
           }
 
           // Camera pan/tilt keys (IJKL)
-          const cameraKeys = ['i', 'j', 'k', 'l'];
-          if (cameraKeys.includes(key)) {
+          if (CAMERA_KEYS.includes(key)) {
             event.preventDefault();
             state.keysPressed[key] = isKeyDown;
 
             // Start/stop camera movement based on whether any camera key is held
-            const anyCameraKeyHeld = cameraKeys.some(k => state.keysPressed[k]);
+            const anyCameraKeyHeld = CAMERA_KEYS.some(k => state.keysPressed[k]);
             if (anyCameraKeyHeld && !state.cameraPtzInterval) {
               startCameraPtz();
             } else if (!anyCameraKeyHeld && state.cameraPtzInterval) {
@@ -2002,10 +3710,13 @@
           }
         }
 
-        // Camera pan/tilt control (IJKL keys)
-        const CAMERA_STEP = 5;  // Degrees per update
+        // Camera pan/tilt control (IJKL keys) - uses DELTAS for multi-user compatibility
+        const CAMERA_STEP = 3;  // Degrees per update (keyboard); 10Hz updates → 30°/s
         const CAMERA_MIN = 0;
         const CAMERA_MAX = 180;
+        // Track deltas accumulated since last send (for delta-based control)
+        let cameraPanDelta = 0;
+        let cameraTiltDelta = 0;
 
         function startCameraPtz() {
           if (state.cameraPtzInterval) return;
@@ -2026,27 +3737,30 @@
 
           // I = tilt up, K = tilt down
           if (keys['i']) {
-            state.cameraTilt = Math.min(CAMERA_MAX, state.cameraTilt + CAMERA_STEP);
+            cameraTiltDelta += CAMERA_STEP;
             changed = true;
           }
           if (keys['k']) {
-            state.cameraTilt = Math.max(CAMERA_MIN, state.cameraTilt - CAMERA_STEP);
+            cameraTiltDelta -= CAMERA_STEP;
             changed = true;
           }
 
           // J = pan left, L = pan right
           if (keys['j']) {
-            state.cameraPan = Math.min(CAMERA_MAX, state.cameraPan + CAMERA_STEP);
+            cameraPanDelta += CAMERA_STEP;
             changed = true;
           }
           if (keys['l']) {
-            state.cameraPan = Math.max(CAMERA_MIN, state.cameraPan - CAMERA_STEP);
+            cameraPanDelta -= CAMERA_STEP;
             changed = true;
           }
 
           if (changed) {
             sendCameraPtz();
           }
+
+          // Update ghost camera joystick to show local IJKL inputs
+          updateLocalCameraGhost();
         }
 
         function sendCameraPtz() {
@@ -2054,12 +3768,20 @@
           if (!state.controlChannel || state.controlChannel.readyState !== 'open') {
             return;
           }
+          // Only send if there's actually a delta to send
+          if (cameraPanDelta === 0 && cameraTiltDelta === 0) {
+            return;
+          }
           const payload = {
             type: 'camera_ptz',
-            pan: Math.round(state.cameraPan),
-            tilt: Math.round(state.cameraTilt),
+            pan_delta: Math.round(cameraPanDelta),
+            tilt_delta: Math.round(cameraTiltDelta),
             timestamp: Date.now(),
           };
+          console.log('[camera] sending ptz:', payload.pan_delta, payload.tilt_delta);
+          // Reset deltas after sending
+          cameraPanDelta = 0;
+          cameraTiltDelta = 0;
           resetIdleTimeout();
           try {
             state.controlChannel.send(JSON.stringify(payload));
@@ -2068,18 +3790,21 @@
           }
         }
 
-        function resetJoy() {
+        function resetJoy(sendCommands = true) {
           stopKeySending();
           stopCameraPtz();
           state.joyAxes = [0, 0, 0, 0, 0, 0];
           state.joyButtons = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
           state.keysPressed = {};
-          // Reset camera to center
-          state.cameraPan = 90;
-          state.cameraTilt = 90;
+          // Clear any pending camera deltas
+          cameraPanDelta = 0;
+          cameraTiltDelta = 0;
           updateJoyIndicators();
-          sendJoy();
-          sendCameraPtz();
+          // Only send commands if requested (don't send when joining - let robot keep its state)
+          if (sendCommands) {
+            sendJoy();
+            // Note: don't send camera reset - we're using deltas now, robot maintains its own state
+          }
         }
 
         // Gamepad support
@@ -2114,8 +3839,8 @@
             return;
           }
 
-          // If keyboard keys are pressed, prefer keyboard
-          if (Object.values(state.keysPressed).some(v => v)) {
+          // If movement keys are pressed, prefer keyboard (camera keys don't count)
+          if (anyMovementKeyHeld()) {
             return;
           }
 
@@ -2160,7 +3885,6 @@
         let cameraJoystick = null;
         let touchSendInterval = null;
 
-        const mobileEnterBtn = document.getElementById('mobile-teleop-enter');
         const mobileExitBtn = document.getElementById('mobile-exit-btn');
         const joystickZoneLeft = document.getElementById('joystick-zone-left');
         const joystickZoneRight = document.getElementById('joystick-zone-right');
@@ -2169,26 +3893,20 @@
           return 'ontouchstart' in window || navigator.maxTouchPoints > 0;
         }
 
-        function enterMobileTeleop() {
-          document.body.classList.add('mobile-teleop');
-          // Lock to landscape if possible
-          if (screen.orientation && screen.orientation.lock) {
-            screen.orientation.lock('landscape').catch(() => {});
-          }
-          initTouchJoysticks();
-          logTelemetry('Mobile teleop mode entered');
-        }
-
         function exitMobileTeleop() {
           document.body.classList.remove('mobile-teleop');
           if (screen.orientation && screen.orientation.unlock) {
             screen.orientation.unlock();
           }
-          destroyTouchJoysticks();
           logTelemetry('Mobile teleop mode exited');
         }
 
         function initTouchJoysticks() {
+          console.log('[touch] initTouchJoysticks called');
+          console.log('[touch] nipplejs:', !!window.nipplejs);
+          console.log('[touch] joystickZoneLeft:', joystickZoneLeft);
+          console.log('[touch] joystickZoneRight:', joystickZoneRight);
+
           if (!window.nipplejs) {
             console.warn('[touch] nipplejs not loaded');
             return;
@@ -2201,9 +3919,8 @@
             zone: joystickZoneLeft,
             mode: 'static',
             position: { left: '50%', top: '50%' },
-            color: 'rgba(59, 130, 246, 0.5)',
-            size: 120,
-            restOpacity: 0.5,
+            color: 'rgba(59, 130, 246, 0.6)',
+            size: 100,
           });
 
           moveJoystick.on('move', (evt, data) => {
@@ -2212,10 +3929,18 @@
             const force = Math.min(data.force, 1);
             state.joyAxes[1] = data.vector.y * force;  // forward/back
             state.joyAxes[3] = -data.vector.x * force; // turn (inverted for steering)
+            console.log('[touch] move:', state.joyAxes[1].toFixed(2), state.joyAxes[3].toFixed(2));
             updateJoyIndicators();
           });
 
+          moveJoystick.on('start', () => {
+            console.log('[touch] joystick start');
+            joystickZoneLeft.classList.add('active');
+          });
+
           moveJoystick.on('end', () => {
+            console.log('[touch] joystick end');
+            joystickZoneLeft.classList.remove('active');
             state.joyAxes[1] = 0;
             state.joyAxes[3] = 0;
             updateJoyIndicators();
@@ -2227,24 +3952,39 @@
             zone: joystickZoneRight,
             mode: 'static',
             position: { left: '50%', top: '50%' },
-            color: 'rgba(20, 184, 166, 0.5)',
-            size: 120,
-            restOpacity: 0.5,
+            color: 'rgba(20, 184, 166, 0.6)',
+            size: 100,
+          });
+
+          // Double-tap detection for camera joystick
+          let cameraLastTapTime = 0;
+          const DOUBLE_TAP_THRESHOLD = 300; // ms
+
+          cameraJoystick.on('start', () => {
+            joystickZoneRight.classList.add('active');
+
+            // Check for double-tap
+            const now = Date.now();
+            if (now - cameraLastTapTime < DOUBLE_TAP_THRESHOLD) {
+              console.log('[touch] camera double-tap detected, resetting');
+              resetJoy();
+              cameraLastTapTime = 0; // Reset to prevent triple-tap
+            } else {
+              cameraLastTapTime = now;
+            }
           });
 
           cameraJoystick.on('move', (evt, data) => {
             const force = Math.min(data.force, 1);
-            // Adjust pan/tilt based on joystick position
+            // Accumulate pan/tilt deltas based on joystick position
             // x: left = pan left (+), right = pan right (-)
             // y: up = tilt up (+), down = tilt down (-)
-            const panDelta = -data.vector.x * force * 3;
-            const tiltDelta = data.vector.y * force * 3;
-            state.cameraPan = Math.max(CAMERA_MIN, Math.min(CAMERA_MAX, state.cameraPan + panDelta));
-            state.cameraTilt = Math.max(CAMERA_MIN, Math.min(CAMERA_MAX, state.cameraTilt + tiltDelta));
+            cameraPanDelta += -data.vector.x * force * 1;
+            cameraTiltDelta += data.vector.y * force * 1;
           });
 
           cameraJoystick.on('end', () => {
-            // Camera stays at current position when released
+            joystickZoneRight.classList.remove('active');
           });
 
           // Start continuous sending while in touch mode
@@ -2257,7 +3997,7 @@
             sendCameraPtz();
           }, 50);
 
-          console.info('[touch] joysticks initialized');
+          console.info('[touch] joysticks initialized, controlChannel:', state.controlChannel?.readyState);
         }
 
         function destroyTouchJoysticks() {
@@ -2275,14 +4015,6 @@
           }
         }
 
-        // Show mobile enter button on touch devices
-        if (isTouchDevice() && mobileEnterBtn) {
-          mobileEnterBtn.style.display = 'inline-block';
-        }
-
-        if (mobileEnterBtn) {
-          mobileEnterBtn.addEventListener('click', enterMobileTeleop);
-        }
 
         if (mobileExitBtn) {
           mobileExitBtn.addEventListener('click', exitMobileTeleop);
@@ -2290,9 +4022,235 @@
 
         window.addEventListener('keydown', (event) => handleKey(event, true));
         window.addEventListener('keyup', (event) => handleKey(event, false));
+        // A keyup can be swallowed while the page loses focus (alt-tab, tab
+        // switch), leaving a key latched down forever. Release everything when
+        // focus goes away.
+        window.addEventListener('blur', () => resetJoy());
+        document.addEventListener('visibilitychange', () => {
+          if (document.hidden) resetJoy();
+        });
+
+        // Expand/collapse the SLAM minimap via the button, clicking it, or "M".
+        const minimapExpandBtn = document.getElementById('minimap-expand-btn');
+        if (minimapExpandBtn) {
+          minimapExpandBtn.addEventListener('click', (event) => {
+            event.stopPropagation();
+            toggleMinimap();
+          });
+        }
+        const hudMinimap = document.getElementById('hud-minimap');
+        if (hudMinimap) {
+          hudMinimap.addEventListener('click', () => toggleMinimap());
+        }
+        window.addEventListener('keydown', (event) => {
+          if (event.key.toLowerCase() !== 'm') return;
+          const el = document.activeElement;
+          const tag = (el && el.tagName) || '';
+          if (tag === 'INPUT' || tag === 'TEXTAREA' || (el && el.isContentEditable)) return;
+          if (state.view !== 'detail') return;
+          event.preventDefault();
+          toggleMinimap();
+        });
+
+        // ── Ghost Joystick for Other Users' Inputs ──────────────────────
+        const ghostMoveJoystick = document.getElementById('ghost-move-joystick');
+        const ghostMoveKnob = document.getElementById('ghost-move-knob');
+        const ghostCameraJoystick = document.getElementById('ghost-camera-joystick');
+        const ghostCameraKnob = document.getElementById('ghost-camera-knob');
+        let ghostFadeTimeout = null;
+
+        // Hide a ghost joystick and recenter its knob — a hidden knob must
+        // never keep a stale offset, or it reappears stuck at an old position.
+        function hideGhost(joystickEl, knobEl) {
+          joystickEl?.classList.remove('visible');
+          if (knobEl) knobEl.style.transform = 'translate(-50%, -50%)';
+        }
+
+        function updateGhostJoysticks(aggregatedAxes, userCount) {
+          // This handles OTHER users' inputs - skip if local control is active
+          const hasLocalMoveInput = !!state.keySendInterval;
+          const hasLocalCameraInput = !!state.cameraPtzInterval;
+
+          // Only show ghost if there are other users controlling
+          if (userCount <= 1 || !aggregatedAxes) {
+            // Don't hide if local input is active (local handler controls visibility)
+            if (!hasLocalMoveInput) hideGhost(ghostMoveJoystick, ghostMoveKnob);
+            if (!hasLocalCameraInput) hideGhost(ghostCameraJoystick, ghostCameraKnob);
+            return;
+          }
+
+          // Move joystick: axes[1] = forward/back, axes[3] = turn
+          // Skip if local move control is active (local handler takes priority)
+          if (!hasLocalMoveInput) {
+            const moveX = aggregatedAxes[3] || 0;  // turn
+            const moveY = -(aggregatedAxes[1] || 0);  // forward (inverted for display)
+            const moveMagnitude = Math.sqrt(moveX * moveX + moveY * moveY);
+
+            if (moveMagnitude > 0.1 && ghostMoveKnob) {
+              ghostMoveJoystick.classList.add('visible');
+              const maxOffset = 30;  // pixels from center
+              ghostMoveKnob.style.transform = `translate(calc(-50% + ${moveX * maxOffset}px), calc(-50% + ${moveY * maxOffset}px))`;
+            } else {
+              hideGhost(ghostMoveJoystick, ghostMoveKnob);
+            }
+          }
+
+          // Camera joystick: axes[4] = camera tilt
+          // Skip if local camera control is active (local handler takes priority)
+          if (!hasLocalCameraInput) {
+            const cameraY = -(aggregatedAxes[4] || 0);
+            const cameraMagnitude = Math.abs(cameraY);
+
+            if (cameraMagnitude > 0.1 && ghostCameraKnob) {
+              ghostCameraJoystick.classList.add('visible');
+              const maxOffset = 30;
+              ghostCameraKnob.style.transform = `translate(-50%, calc(-50% + ${cameraY * maxOffset}px))`;
+            } else {
+              hideGhost(ghostCameraJoystick, ghostCameraKnob);
+            }
+          }
+
+          // Auto-hide after inactivity (only for remote inputs, not local)
+          if (ghostFadeTimeout) clearTimeout(ghostFadeTimeout);
+          ghostFadeTimeout = setTimeout(() => {
+            if (!state.keySendInterval) hideGhost(ghostMoveJoystick, ghostMoveKnob);
+            if (!state.cameraPtzInterval) hideGhost(ghostCameraJoystick, ghostCameraKnob);
+          }, 500);
+        }
+
+        // Track camera ghost timeout separately
+        let ghostCameraFadeTimeout = null;
+
+        function updateGhostCameraJoystick(panDelta, tiltDelta, user) {
+          // Show ghost camera joystick for OTHER users' camera control inputs
+          // Skip if local camera control is active (local handler takes priority)
+          if (state.cameraPtzInterval) return;
+
+          // Also skip if this is our own echoed input
+          const ourKey = `${state.activeRobot?.ros_namespace}:${state.user?.email}`;
+          if (user === ourKey) return;
+
+          // Convert deltas to joystick position (-1 to 1 range)
+          // panDelta: positive = left, negative = right
+          // tiltDelta: positive = up, negative = down
+          const panNorm = Math.max(-1, Math.min(1, panDelta / 10));
+          const tiltNorm = Math.max(-1, Math.min(1, -tiltDelta / 10));  // Invert for display
+          const magnitude = Math.sqrt(panNorm * panNorm + tiltNorm * tiltNorm);
+
+          if (magnitude > 0.1 && ghostCameraKnob) {
+            ghostCameraJoystick.classList.add('visible');
+            const maxOffset = 30;  // pixels from center
+            // Negate panNorm: positive panDelta = left = knob should move left (negative X)
+            ghostCameraKnob.style.transform = `translate(calc(-50% + ${-panNorm * maxOffset}px), calc(-50% + ${tiltNorm * maxOffset}px))`;
+          }
+
+          // Auto-hide after inactivity
+          if (ghostCameraFadeTimeout) clearTimeout(ghostCameraFadeTimeout);
+          ghostCameraFadeTimeout = setTimeout(() => {
+            hideGhost(ghostCameraJoystick, ghostCameraKnob);
+          }, 300);
+        }
+
+        // Also show ghost camera joystick for local IJKL inputs
+        function updateLocalCameraGhost() {
+          const keys = state.keysPressed;
+          const hasI = keys['i'];
+          const hasK = keys['k'];
+          const hasJ = keys['j'];
+          const hasL = keys['l'];
+
+          if (!hasI && !hasK && !hasJ && !hasL) {
+            // No camera keys pressed, hide after timeout
+            if (ghostCameraFadeTimeout) clearTimeout(ghostCameraFadeTimeout);
+            ghostCameraFadeTimeout = setTimeout(() => {
+              ghostCameraJoystick?.classList.remove('visible');
+              // Reset knob to center when hiding
+              if (ghostCameraKnob) {
+                ghostCameraKnob.style.transform = 'translate(-50%, -50%)';
+              }
+            }, 150);
+            return;
+          }
+
+          // Keys are pressed - clear any pending timeout and show at edge
+          if (ghostCameraFadeTimeout) {
+            clearTimeout(ghostCameraFadeTimeout);
+            ghostCameraFadeTimeout = null;
+          }
+
+          // Calculate direction from keys
+          let panDir = 0;
+          let tiltDir = 0;
+          if (hasJ) panDir += 1;  // left
+          if (hasL) panDir -= 1;  // right
+          if (hasI) tiltDir += 1;  // up
+          if (hasK) tiltDir -= 1;  // down
+
+          if (ghostCameraKnob && (panDir !== 0 || tiltDir !== 0)) {
+            ghostCameraJoystick.classList.add('visible');
+            const maxOffset = 30;
+            // Negate panDir: J = left = knob should move left (negative X)
+            ghostCameraKnob.style.transform = `translate(calc(-50% + ${-panDir * maxOffset}px), calc(-50% + ${-tiltDir * maxOffset}px))`;
+          }
+        }
+
+        // Track move ghost timeout separately
+        let ghostMoveFadeTimeout = null;
+
+        // Show ghost move joystick for local WASD/arrow inputs
+        function updateLocalMoveGhost() {
+          const keys = state.keysPressed;
+          const hasW = keys['w'] || keys['arrowup'];
+          const hasS = keys['s'] || keys['arrowdown'];
+          const hasA = keys['a'] || keys['arrowleft'];
+          const hasD = keys['d'] || keys['arrowright'];
+
+          if (!hasW && !hasS && !hasA && !hasD) {
+            // No move keys pressed, hide after timeout
+            if (ghostMoveFadeTimeout) clearTimeout(ghostMoveFadeTimeout);
+            ghostMoveFadeTimeout = setTimeout(() => {
+              ghostMoveJoystick?.classList.remove('visible');
+              // Reset knob to center when hiding
+              if (ghostMoveKnob) {
+                ghostMoveKnob.style.transform = 'translate(-50%, -50%)';
+              }
+            }, 150);
+            return;
+          }
+
+          // Keys are pressed - clear any pending timeout and show at edge
+          if (ghostMoveFadeTimeout) {
+            clearTimeout(ghostMoveFadeTimeout);
+            ghostMoveFadeTimeout = null;
+          }
+
+          // Calculate direction from keys
+          // X: A/left = -1, D/right = +1
+          // Y: W/up = -1 (forward), S/down = +1 (backward) - inverted for display
+          let moveX = 0;
+          let moveY = 0;
+          if (hasA) moveX -= 1;
+          if (hasD) moveX += 1;
+          if (hasW) moveY -= 1;  // Forward = up on joystick
+          if (hasS) moveY += 1;  // Backward = down on joystick
+
+          if (ghostMoveKnob && (moveX !== 0 || moveY !== 0)) {
+            ghostMoveJoystick.classList.add('visible');
+            const maxOffset = 30;
+            ghostMoveKnob.style.transform = `translate(calc(-50% + ${moveX * maxOffset}px), calc(-50% + ${moveY * maxOffset}px))`;
+          }
+        }
 
         micToggleBtn.addEventListener('click', () => {
+          console.log('[mic] button clicked, micEnabled=', state.micEnabled);
           toggleMicrophone();
+        });
+
+        robotMicBtn.addEventListener('click', () => {
+          console.log('[speaker] robot mic/speaker button clicked, robotMicEnabled=', state.robotMicEnabled, 'speakerVoted=', state.speakerVoted);
+          // Toggle both: voice to robot AND speaker vote
+          toggleRobotMic();
+          toggleSpeakerVote();
         });
 
         micVolumeSlider.addEventListener('input', (event) => {
@@ -2308,6 +4266,13 @@
             }
           });
           document.addEventListener('fullscreenchange', updateFullscreenButton);
+        }
+
+        if (videoBackBtn) {
+          videoBackBtn.addEventListener('click', () => {
+            teardownTeleop();
+            setLobbyTab('lobby');
+          });
         }
 
         function copyText(text, successMessage, target = lobbyMessage) {
@@ -2344,22 +4309,47 @@
         }
 
         async function fetchLobbyDetail(lobbyId) {
-          const resp = await fetch(`${apiBase()}/lobbies/${lobbyId}`, { headers: authHeaders() });
+          const resp = await authFetch(`${apiBase()}/lobbies/${lobbyId}`);
+          if (resp.status === 401) return null;
           if (!resp.ok) throw new Error(await resp.text());
           return resp.json();
         }
 
         function populateLobbyForm(lobby) {
+          // Apply any pending offline changes on top of server data
+          let pendingChanges = null;
+          if (lobby?.id) {
+            pendingChanges = getPendingLobbyChange(lobby.id);
+            if (pendingChanges) {
+              lobby = { ...lobby, ...pendingChanges };
+            }
+          }
+
           lobbyNameInput.value = lobby?.name || '';
           lobbyDescInput.value = lobby?.description || '';
           lobbyVisibilityInput.value = lobby?.is_public ? 'public' : 'private';
-          lobbyMessage.textContent = '';
+          lobbyStyleInput.value = lobby?.game_style || 'remote';
+          lobbyAllowSpawnInput.checked = (lobby?.game_listeners || []).includes('spawn_player');
+          updateSpawnToggleVisibility();
+
+          // Show pending changes indicator
+          if (pendingChanges) {
+            lobbyMessage.textContent = 'Has unsaved changes (will sync when online)';
+            lobbyMessage.style.color = '#f59e0b';
+          } else {
+            lobbyMessage.textContent = '';
+            lobbyMessage.style.color = '';
+          }
+
           if (lobby?.access_key) {
             keyRow.hidden = false;
             lobbyKeyEl.textContent = lobby.access_key;
           } else {
             keyRow.hidden = true;
           }
+          // Show create button only for new lobbies, delete button only for existing
+          const createLobbyBtn = document.getElementById('create-lobby-btn');
+          createLobbyBtn.style.display = lobby ? 'none' : 'inline-flex';
           deleteLobbyBtn.style.display = lobby ? 'inline-flex' : 'none';
         }
 
@@ -2400,14 +4390,21 @@
         }
 
         function startBotEdit(bot) {
+          // Apply any pending offline changes
+          const pendingChanges = getPendingBotChange(bot.id);
+          if (pendingChanges) {
+            bot = { ...bot, ...pendingChanges };
+          }
+
           botForm.dataset.editingId = bot.id;
           botNameInput.value = bot.name;
           botNamespaceInput.value = bot.ros_namespace;
           botDescInput.value = bot.description || '';
-          const vol = Math.round((bot.volume ?? 1.0) * 100);
-          botVolumeInput.value = vol;
-          botVolumeLabel.textContent = vol;
-          botMessage.textContent = `Editing ${bot.name}`;
+          botMessage.textContent = pendingChanges
+            ? `Editing ${bot.name} (has unsaved changes)`
+            : `Editing ${bot.name}`;
+          if (pendingChanges) botMessage.style.color = '#f59e0b';
+          else botMessage.style.color = '';
         }
 
         function resetBotForm() {
@@ -2415,56 +4412,121 @@
           botNameInput.value = '';
           botNamespaceInput.value = '';
           botDescInput.value = '';
-          botVolumeInput.value = 100;
-          botVolumeLabel.textContent = '100';
           botMessage.textContent = '';
         }
 
-        lobbyForm.addEventListener('submit', async (event) => {
-          event.preventDefault();
-          if (!state.authToken) return;
-          lobbyMessage.textContent = 'Saving...';
+        // Auto-save lobby fields on change (supports offline mode)
+        async function autoSaveLobby() {
+          if (!state.manageLobby) return;
+          const lobbyId = state.manageLobby.id;
+          const style = lobbyStyleInput.value;
+          const allowSpawn = lobbyAllowSpawnInput.checked;
           const body = {
             name: lobbyNameInput.value,
             description: lobbyDescInput.value || null,
             is_public: lobbyVisibilityInput.value === 'public',
+            game_style: style,
+            allow_spawn_players: allowSpawn,
           };
+          // Mirror server-derived fields locally for immediate UI feedback
+          const derived = {
+            is_virtual: isVirtualStyle(style),
+            game_listeners: allowSpawn ? ['spawn_player'] : [],
+          };
+
+          // Update local state immediately
+          Object.assign(state.manageLobby, body, derived);
+          if (state.currentLobby?.id === lobbyId) {
+            Object.assign(state.currentLobby, body, derived);
+            renderLobbyDetail();
+          }
+
+          // Try to save to server
+          if (!state.authToken) {
+            addPendingLobbyChange(lobbyId, body);
+            lobbyMessage.textContent = 'Saved locally (offline)';
+            return;
+          }
+
+          lobbyMessage.textContent = 'Saving...';
           try {
-            if (state.manageLobby) {
-              const resp = await fetch(`${apiBase()}/lobbies/${state.manageLobby.id}`, {
-                method: 'PATCH',
-                headers: { 'Content-Type': 'application/json', ...authHeaders() },
-                body: JSON.stringify(body),
-              });
-              if (!resp.ok) throw new Error(await resp.text());
-              lobbyMessage.textContent = 'Lobby updated.';
-              const updated = await fetchLobbyDetail(state.manageLobby.id);
-              state.manageLobby = updated;
-              if (state.currentLobby?.id === updated.id) {
-                state.currentLobby = updated;
-                renderLobbyDetail();
-              }
-              keyRow.hidden = !updated.access_key;
-              lobbyKeyEl.textContent = updated.access_key || '';
-            } else {
-              const resp = await fetch(`${apiBase()}/lobbies`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', ...authHeaders() },
-                body: JSON.stringify(body),
-              });
-              if (!resp.ok) throw new Error(await resp.text());
-              const created = await resp.json();
-              lobbyMessage.textContent = 'Lobby created. Key copied to clipboard.';
-              copyText(created.access_key, 'Lobby key copied');
-              const detail = await fetchLobbyDetail(created.id);
-              state.manageLobby = detail;
-              populateLobbyForm(detail);
-              renderManageRobots();
+            const resp = await authFetch(`${apiBase()}/lobbies/${lobbyId}`, {
+              method: 'PATCH',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(body),
+            });
+            if (!resp.ok) throw new Error(await resp.text());
+            lobbyMessage.textContent = 'Saved';
+            removePendingLobbyChange(lobbyId);  // Clear any pending changes
+            setTimeout(() => { if (lobbyMessage.textContent === 'Saved') lobbyMessage.textContent = ''; }, 1500);
+            const updated = await fetchLobbyDetail(lobbyId);
+            state.manageLobby = updated;
+            if (state.currentLobby?.id === updated.id) {
+              state.currentLobby = updated;
+              renderLobbyDetail();
             }
+            keyRow.hidden = !updated.access_key;
+            lobbyKeyEl.textContent = updated.access_key || '';
             fetchLobbies();
           } catch (err) {
             console.error(err);
-            lobbyMessage.textContent = 'Failed to save lobby.';
+            // Save locally on failure (offline)
+            addPendingLobbyChange(lobbyId, body);
+            lobbyMessage.textContent = 'Saved locally (will sync when online)';
+            setTimeout(() => { if (lobbyMessage.textContent.includes('locally')) lobbyMessage.textContent = ''; }, 2500);
+          }
+        }
+
+        // Debounce auto-save for text inputs
+        let lobbySaveTimeout = null;
+        function debouncedLobbyAutoSave() {
+          if (lobbySaveTimeout) clearTimeout(lobbySaveTimeout);
+          lobbySaveTimeout = setTimeout(autoSaveLobby, 500);
+        }
+
+        // Auto-save on field changes (only for existing lobbies)
+        lobbyNameInput.addEventListener('blur', () => { if (state.manageLobby) autoSaveLobby(); });
+        lobbyDescInput.addEventListener('blur', () => { if (state.manageLobby) autoSaveLobby(); });
+        lobbyVisibilityInput.addEventListener('change', () => { if (state.manageLobby) autoSaveLobby(); });
+        lobbyStyleInput.addEventListener('change', () => { updateSpawnToggleVisibility(); if (state.manageLobby) autoSaveLobby(); });
+        lobbyAllowSpawnInput.addEventListener('change', () => { if (state.manageLobby) autoSaveLobby(); });
+
+        // For new lobbies, create on first field blur if name is filled
+        lobbyForm.addEventListener('submit', async (event) => {
+          event.preventDefault();
+          // Only used for creating new lobbies now
+          if (state.manageLobby) return;  // Already exists, auto-save handles updates
+          if (!state.authToken) return;
+          if (!lobbyNameInput.value.trim()) {
+            lobbyMessage.textContent = 'Enter a lobby name';
+            return;
+          }
+          lobbyMessage.textContent = 'Creating...';
+          const body = {
+            name: lobbyNameInput.value,
+            description: lobbyDescInput.value || null,
+            is_public: lobbyVisibilityInput.value === 'public',
+            game_style: lobbyStyleInput.value,
+            allow_spawn_players: lobbyAllowSpawnInput.checked,
+          };
+          try {
+            const resp = await authFetch(`${apiBase()}/lobbies`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(body),
+            });
+            if (!resp.ok) throw new Error(await resp.text());
+            const created = await resp.json();
+            lobbyMessage.textContent = 'Lobby created. Key copied to clipboard.';
+            copyText(created.access_key, 'Lobby key copied');
+            const detail = await fetchLobbyDetail(created.id);
+            state.manageLobby = detail;
+            populateLobbyForm(detail);
+            renderManageRobots();
+            fetchLobbies();
+          } catch (err) {
+            console.error(err);
+            lobbyMessage.textContent = 'Failed to create lobby.';
           }
         });
 
@@ -2472,9 +4534,8 @@
           if (!state.manageLobby) return;
           if (!confirm('Delete this lobby?')) return;
           try {
-            const resp = await fetch(`${apiBase()}/lobbies/${state.manageLobby.id}`, {
+            const resp = await authFetch(`${apiBase()}/lobbies/${state.manageLobby.id}`, {
               method: 'DELETE',
-              headers: authHeaders(),
             });
             if (!resp.ok) throw new Error(await resp.text());
             lobbyMessage.textContent = 'Lobby deleted.';
@@ -2508,22 +4569,21 @@
             name: botNameInput.value,
             ros_namespace: botNamespaceInput.value,
             description: botDescInput.value || null,
-            volume: parseInt(botVolumeInput.value, 10) / 100,
           };
           try {
             if (botForm.dataset.editingId) {
-              const resp = await fetch(`${apiBase()}/bots/${botForm.dataset.editingId}`, {
+              const resp = await authFetch(`${apiBase()}/bots/${botForm.dataset.editingId}`, {
                 method: 'PATCH',
-                headers: { 'Content-Type': 'application/json', ...authHeaders() },
+                headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(payload),
               });
               if (!resp.ok) throw new Error(await resp.text());
               botMessage.textContent = 'Robot updated.';
             } else {
               payload.lobby_id = state.manageLobby.id;
-              const resp = await fetch(`${apiBase()}/bots`, {
+              const resp = await authFetch(`${apiBase()}/bots`, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json', ...authHeaders() },
+                headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(payload),
               });
               if (!resp.ok) throw new Error(await resp.text());
@@ -2548,17 +4608,17 @@
           resetBotForm();
         });
 
-        botVolumeInput.addEventListener('input', () => {
-          botVolumeLabel.textContent = botVolumeInput.value;
-        });
+        // Volume and mute are capability widgets on the live robot view now
+        // (bot:<ns>/audio/gain and /audio/muted goals over the cap channel);
+        // the REST volume write path is gone.
 
         async function deleteBot(botId) {
           if (!confirm('Archive this robot?')) return;
           try {
-            const resp = await fetch(`${apiBase()}/bots/${botId}`, {
+            const resp = await authFetch(`${apiBase()}/bots/${botId}`, {
               method: 'DELETE',
-              headers: authHeaders(),
             });
+            if (resp.status === 401) return;
             if (!resp.ok) throw new Error(await resp.text());
             const detail = await fetchLobbyDetail(state.manageLobby.id);
             state.manageLobby = detail;
@@ -2572,21 +4632,56 @@
           }
         }
 
+        // Pull a human-readable reason out of a FastAPI error response.
+        // Validation (422) errors come back as {detail: [{msg, loc}, ...]};
+        // most others as {detail: "..."}. Falls back to the raw text.
+        function describeAuthError(rawText, fallback) {
+          try {
+            const body = JSON.parse(rawText);
+            const detail = body && body.detail;
+            if (typeof detail === 'string') return detail;
+            if (Array.isArray(detail) && detail.length) {
+              return detail
+                .map((d) => {
+                  const field = Array.isArray(d.loc) ? d.loc[d.loc.length - 1] : '';
+                  const msg = (d.msg || '').replace(/^String /, '');
+                  return field && field !== 'body' ? `${field}: ${msg}` : msg;
+                })
+                .filter(Boolean)
+                .join('; ');
+            }
+          } catch (_) { /* not JSON */ }
+          return (rawText && rawText.trim()) || fallback;
+        }
+
         async function handleAuth(path) {
+          const email = authEmailInput.value.trim();
+          const password = authPasswordInput.value;
+          if (!email || !password) {
+            authMessage.textContent = 'Enter a username and password.';
+            return;
+          }
           authMessage.textContent = 'Working...';
           try {
             const resp = await fetch(`${apiBase()}/auth/${path}`, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ email: authEmailInput.value, password: authPasswordInput.value }),
+              body: JSON.stringify({ email, password }),
             });
-            if (!resp.ok) throw new Error(await resp.text());
+            if (!resp.ok) {
+              const reason = describeAuthError(
+                await resp.text(),
+                path === 'login' ? 'Invalid credentials.' : 'Could not create account.',
+              );
+              authMessage.textContent = reason;
+              return;
+            }
             const data = await resp.json();
-            setAuth(data.access_token, data.user.email);
+            setAuth(data.access_token, data.user.email, rememberMeCheckbox.checked);
             authMessage.textContent = path === 'login' ? 'Welcome back!' : 'Account created.';
           } catch (err) {
             console.error(err);
-            authMessage.textContent = 'Authentication failed.';
+            authMessage.textContent = 'Could not reach the server. Check your connection and try again.';
           }
         }
 
@@ -2607,8 +4702,13 @@
           updateOfflineSection();
         });
 
+        authForm.addEventListener('submit', (e) => {
+          e.preventDefault();
+          handleAuth('login');
+        });
+
+        reauthForm.addEventListener('submit', handleReauth);
         registerBtn.addEventListener('click', () => handleAuth('register'));
-        loginBtn.addEventListener('click', () => handleAuth('login'));
         logoutBtn.addEventListener('click', () => {
           setAuth('', '');
           setMenuOpen(false);

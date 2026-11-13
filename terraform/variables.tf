@@ -4,6 +4,17 @@ variable "project_id" {
   default     = "robo1-489405"
 }
 
+variable "environment" {
+  description = "Deployment environment (prod or dev)"
+  type        = string
+  default     = "prod"
+
+  validation {
+    condition     = contains(["prod", "dev"], var.environment)
+    error_message = "Environment must be 'prod' or 'dev'."
+  }
+}
+
 variable "region" {
   description = "Primary region for Compute Engine and Cloud SQL"
   type        = string
@@ -31,7 +42,7 @@ variable "api_vm_name" {
 variable "api_vm_machine_type" {
   description = "Compute Engine machine type for the API VM"
   type        = string
-  default     = "e2-small"
+  default     = "e2-medium"  # Upgraded from e2-small for better audio processing
 }
 
 variable "api_vm_disk_size_gb" {

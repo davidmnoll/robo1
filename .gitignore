@@ -25,3 +25,5 @@ web/dist/
 bin
 lib
 .venv
+
+.claude/worktrees
